@@ -1,0 +1,633 @@
+--- a/frontend/OBSApp.cpp
++++ b/frontend/OBSApp.cpp
+@@ -1,3 +1,6 @@
++#ifdef __ANDROID__
++#include <dlfcn.h>
++#endif
+ /******************************************************************************
+     Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
+ 
+@@ -2082,6 +2085,13 @@
+ 	os_inhibit_sleep_destroy(sleepInhibitor);
+ 
+ 	if (libobs_initialized) {
++#ifdef __ANDROID__
++        if (void *bridge = dlopen("libobs-android-jni.so", RTLD_NOW | RTLD_NOLOAD)) {
++            using StopFn = void (*)();
++            if (auto fn = reinterpret_cast<StopFn>(dlsym(bridge, "obs_android_prepare_shutdown"))) fn();
++            dlclose(bridge);
++        }
++#endif
+ 		obs_shutdown();
+ 		libobs_initialized = false;
+ 	}
+--- a/frontend/utility/android-hardware-info.hpp
++++ b/frontend/utility/android-hardware-info.hpp
+@@ -8,8 +8,8 @@
+ 	std::string manufacturer;
+ 	std::string model;
+ 	std::string device_name{"Dispositivo Android ARM64"};
+-	std::string android_release{"15"};
+-	int sdk_int = 35;
++	std::string android_release{"Sin verificar"};
++	int sdk_int = 0;
+ 
+ 	std::string soc_name{"ARM64 SoC"};
+ 	std::string soc_model;
+@@ -31,11 +31,11 @@
+ 	int screen_height = 1080;
+ 	int refresh_hz = 60;
+ 
+-	bool h264_hw = true;
++	bool h264_hw = false;
+ 	std::string h264_codec;
+-	bool h264_surface = true;
+-	bool h264_cbr = true;
+-	bool h264_vbr = true;
++	bool h264_surface = false;
++	bool h264_cbr = false;
++	bool h264_vbr = false;
+ 	int h264_max_w = 1920;
+ 	int h264_max_h = 1080;
+ 	int h264_max_bitrate_kbps = 25000;
+@@ -43,10 +43,10 @@
+ 	bool h264_2160p30 = false;
+ 	bool h264_1440p60 = false;
+ 	bool h264_1440p30 = false;
+-	bool h264_1080p60 = true;
+-	bool h264_1080p30 = true;
+-	bool h264_720p60 = true;
+-	bool h264_720p30 = true;
++	bool h264_1080p60 = false;
++	bool h264_1080p30 = false;
++	bool h264_720p60 = false;
++	bool h264_720p30 = false;
+ 
+ 	bool hevc_hw = false;
+ 	std::string hevc_codec;
+@@ -85,7 +85,7 @@
+ 		const int longSide = w >= h ? w : h;
+ 		const int shortSide = w >= h ? h : w;
+ 		if (hevc) {
+-			if (!hevc_hw)
++			if (!hevc_hw || !hevc_surface)
+ 				return false;
+ 			if (longSide > hevc_max_w || shortSide > hevc_max_h)
+ 				return false;
+@@ -97,7 +97,7 @@
+ 				return fps > 30 ? hevc_1080p60 : (hevc_1080p30 || hevc_1080p60);
+ 			return true;
+ 		}
+-		if (!h264_hw)
++		if (!h264_hw || !h264_surface)
+ 			return false;
+ 		if (longSide > h264_max_w || shortSide > h264_max_h)
+ 			return false;
+--- a/frontend/utility/android-tools.cpp
++++ b/frontend/utility/android-tools.cpp
+@@ -1,4 +1,9 @@
+ #include <QSaveFile>
++#include <QClipboard>
++#include <atomic>
++#include <condition_variable>
++#include <chrono>
++#include <memory>
+ /* SPDX-License-Identifier: GPL-2.0-or-later */
+ 
+ #include <OBSApp.hpp>
+@@ -81,6 +86,7 @@
+ #include <vector>
+ 
+ namespace {
++std::atomic<bool> androidFrontendClosing{false};
+ void *FindAndroidJni()
+ {
+ 	static std::mutex mutex;
+@@ -1158,6 +1164,31 @@
+ 	j["recording"] = obs_frontend_recording_active();
+ 	j["studioMode"] = obs_frontend_preview_program_mode_active();
+ 	j["fps"] = obs_get_active_fps();
++    j["render_ms"] = double(obs_get_average_frame_time_ns()) / 1e6;
++    if (auto *video = obs_get_video()) {
++        j["video_frames"] = video_output_get_total_frames(video);
++        j["encoding_skipped_frames"] = video_output_get_skipped_frames(video);
++    }
++    if (void *bridge = FindAndroidJni()) {
++        using StatsFn = bool (*)(char *, size_t);
++        for (const auto &entry : {std::pair<const char *, const char *>{"encoders", "obs_android_encoder_stats"},
++                                  {"health", "obs_android_get_device_health"}, {"rgba", "obs_android_rgba_stats"}}) {
++            char stats[4096] = {};
++            auto fn = reinterpret_cast<StatsFn>(dlsym(bridge, entry.second));
++            if (fn && fn(stats, sizeof(stats))) {
++                auto parsed = nlohmann::json::parse(stats, nullptr, false);
++                if (!parsed.is_discarded()) j[entry.first] = parsed;
++            }
++        }
++    }
++    OBSOutputAutoRelease diagStream = obs_frontend_get_streaming_output();
++    if (diagStream) {
++        j["network_dropped_frames"] = obs_output_get_frames_dropped(diagStream);
++        j["stream_frames"] = obs_output_get_total_frames(diagStream);
++        j["stream_bytes"] = obs_output_get_total_bytes(diagStream);
++        j["reconnecting"] = obs_output_reconnecting(diagStream);
++    }
++
+ 	auto *mainWin = OBSBasic::Get();
+ 	j["cpu"] = mainWin ? mainWin->GetCPUUsage() : 0.0;
+ 
+@@ -1322,41 +1353,46 @@
+ 	return resp.dump();
+ }
+ 
+-bool RemoteGetStateBridge(char *outBuf, size_t outCap)
+-{
+-	if (!outBuf || outCap == 0)
+-		return false;
+-	QCoreApplication *app = QCoreApplication::instance();
+-	if (!app)
+-		return false;
+-	std::string res;
+-	if (QThread::currentThread() == app->thread()) {
+-		res = BuildStateJsonOnGuiThread();
+-	} else {
+-		QMetaObject::invokeMethod(
+-			app, [&res]() { res = BuildStateJsonOnGuiThread(); }, Qt::BlockingQueuedConnection);
+-	}
+-	std::snprintf(outBuf, outCap, "%s", res.c_str());
+-	return true;
+-}
+-
+-bool RemoteExecuteActionBridge(const char *body, char *outBuf, size_t outCap)
+-{
+-	if (!outBuf || outCap == 0)
+-		return false;
+-	QCoreApplication *app = QCoreApplication::instance();
+-	if (!app)
+-		return false;
+-	std::string in = body ? body : "{}";
+-	std::string res;
+-	if (QThread::currentThread() == app->thread()) {
+-		res = ExecuteActionJsonOnGuiThread(in);
+-	} else {
+-		QMetaObject::invokeMethod(
+-			app, [&in, &res]() { res = ExecuteActionJsonOnGuiThread(in); }, Qt::BlockingQueuedConnection);
+-	}
+-	std::snprintf(outBuf, outCap, "%s", res.c_str());
+-	return true;
++bool RunRemoteOnGuiThread(std::function<std::string()> action, char *out, size_t capacity)
++{
++    if (!out || !capacity || androidFrontendClosing.load()) return false;
++    auto *app = QCoreApplication::instance();
++    if (!app) return false;
++    std::string text;
++    if (QThread::currentThread() == app->thread()) text = action();
++    else {
++        struct Reply { std::mutex mutex; std::condition_variable ready; std::string text; bool done{}, cancelled{}; };
++        auto reply = std::make_shared<Reply>();
++        QMetaObject::invokeMethod(app, [reply, action = std::move(action)]() {
++            {
++                std::lock_guard<std::mutex> lock(reply->mutex);
++                if (reply->cancelled || androidFrontendClosing.load()) return;
++            }
++            auto text = action();
++            std::lock_guard<std::mutex> lock(reply->mutex);
++            if (reply->cancelled) return;
++            reply->text = std::move(text); reply->done = true;
++            reply->ready.notify_one();
++        }, Qt::QueuedConnection);
++        std::unique_lock<std::mutex> lock(reply->mutex);
++        if (!reply->ready.wait_for(lock, std::chrono::milliseconds(750), [&] { return reply->done; })) {
++            reply->cancelled = true;
++            return false;
++        }
++        text = std::move(reply->text);
++    }
++    if (text.size() >= capacity) return false;
++    std::memcpy(out, text.c_str(), text.size() + 1);
++    return true;
++}
++bool RemoteGetStateBridge(char *out, size_t capacity)
++{
++    return RunRemoteOnGuiThread([] { return BuildStateJsonOnGuiThread(); }, out, capacity);
++}
++bool RemoteExecuteActionBridge(const char *body, char *out, size_t capacity)
++{
++    const std::string input = body ? body : "{}";
++    return RunRemoteOnGuiThread([input] { return ExecuteActionJsonOnGuiThread(input); }, out, capacity);
+ }
+ 
+ QWidget *CreateScoreboardDockWidget();
+@@ -5419,9 +5455,12 @@
+ 
+ void OnFrontendEventAndroid(enum obs_frontend_event event, void *)
+ {
+-	if (event == OBS_FRONTEND_EVENT_EXIT) {
++    if (event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN || event == OBS_FRONTEND_EVENT_EXIT) {
++        androidFrontendClosing.store(true);
+ 		ClearBugLayer();
+ 		if (void *jni = FindAndroidJni()) {
++            using ShutdownFn = void (*)();
++            if (auto stop = reinterpret_cast<ShutdownFn>(dlsym(jni, "obs_android_prepare_shutdown"))) stop();
+ 			using KeepaliveFn = void (*)(bool);
+ 			if (auto fn = reinterpret_cast<KeepaliveFn>(dlsym(jni, "obs_android_set_broadcast_keepalive")))
+ 				fn(false);
+@@ -5458,8 +5497,98 @@
+ }
+ } // namespace
+ 
++void OpenPerformanceDiagnostics(QWidget *parent)
++{
++    QDialog dialog(parent);
++    dialog.setWindowTitle(QStringLiteral("Diagnóstico de rendimiento"));
++    auto *layout = new QVBoxLayout(&dialog);
++    auto *text = new QPlainTextEdit(&dialog);
++    text->setReadOnly(true);
++    layout->addWidget(text);
++    auto update = [text] {
++        try {
++            const auto j = nlohmann::json::parse(BuildStateJsonOnGuiThread());
++            const auto health = j.value("health", nlohmann::json::object());
++            const auto enc = j.value("encoders", nlohmann::json::object());
++            const double fps = j.value("fps", 0.0), render = j.value("render_ms", 0.0);
++            QString report = QStringLiteral("Motor: %1 FPS\nTiempo de render: %2 ms\n\nVideo por hardware (Surface): %3 codificadores\nVideo por CPU: %4 codificadores\nFotogramas retrasados de codificación: %5\nPérdidas de la transmisión principal: %6\n\nEstado térmico Android: %7\nTemperatura de batería: %8 °C\nVistas previas: hasta %9 FPS\nNavegador y VTuber: hasta %10 FPS\nMemoria Java: %11 MB · Nativa: %12 MB\n")
++                .arg(fps, 0, 'f', 2).arg(render, 0, 'f', 2)
++                .arg(enc.value("active_surface_codecs", 0)).arg(enc.value("active_cpu_video_codecs", 0))
++                .arg(j.value("encoding_skipped_frames", 0)).arg(j.value("network_dropped_frames", 0))
++                .arg(health.value("thermal", 0)).arg(health.value("temp_c", 0.0), 0, 'f', 1)
++                .arg(health.value("preview_fps_limit", 15)).arg(health.value("browser_fps_limit", 60))
++                .arg(health.value("java_heap_mb", 0)).arg(health.value("native_heap_mb", 0));
++            obs_video_info videoInfo{};
++            const double targetFps = obs_get_video_info(&videoInfo) && videoInfo.fps_den
++                ? double(videoInfo.fps_num) / videoInfo.fps_den : fps;
++            if (targetFps > 0.0 && render > 750.0 / targetFps) report += QStringLiteral("\nLa escena consume mucho tiempo de render. Reduce filtros o la resolución de sus fuentes.\n");
++            report += QStringLiteral("\nLos contadores son acumulados de esta sesión. La temperatura de batería y el porcentaje GPU no atribuyen todo el consumo a OBS.");
++            text->setPlainText(report);
++        } catch (...) { text->setPlainText(QStringLiteral("Esperando al motor OBS...")); }
++    };
++    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
++    auto *copy = buttons->addButton(QStringLiteral("Copiar diagnóstico"), QDialogButtonBox::ActionRole);
++    QObject::connect(copy, &QPushButton::clicked, &dialog, [text] { QApplication::clipboard()->setText(text->toPlainText()); });
++    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
++    layout->addWidget(buttons);
++    QTimer timer(&dialog);
++    QObject::connect(&timer, &QTimer::timeout, &dialog, update);
++    timer.start(2000); update();
++    dialog.resize(650, 430);
++    dialog.exec();
++}
++
+ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ {
++    if (toolsMenu) {
++        auto *ndi = toolsMenu->addAction(QStringLiteral("Salida NDI en red..."));
++        QObject::connect(ndi, &QAction::triggered, mainWindow, [mainWindow] {
++            QDialog dialog(mainWindow);
++            dialog.setWindowTitle(QStringLiteral("Salida NDI"));
++            auto *layout = new QVBoxLayout(&dialog);
++            auto *description = new QLabel(QStringLiteral("Envía el Programa con audio a otros receptores NDI de la red local. Requiere libndi.so para Android ARM64, instalada desde las propiedades de una fuente NDI."), &dialog);
++            description->setWordWrap(true);
++            auto *form = new QFormLayout();
++            auto *name = new QLineEdit(QStringLiteral("OBS Android"), &dialog);
++            name->setPlaceholderText(QStringLiteral("Nombre que verán los receptores NDI"));
++            form->addRow(QStringLiteral("Nombre de la fuente:"), name);
++            layout->addWidget(description);
++            layout->addLayout(form);
++            auto *status = new QLabel(QStringLiteral("Estado: detenido"), &dialog);
++            status->setWordWrap(true);
++            layout->addWidget(status);
++            auto *buttons = new QHBoxLayout();
++            auto *start = new QPushButton(QStringLiteral("Iniciar salida"), &dialog);
++            auto *stop = new QPushButton(QStringLiteral("Detener"), &dialog);
++            auto *close = new QPushButton(QStringLiteral("Cerrar"), &dialog);
++            buttons->addWidget(start); buttons->addWidget(stop); buttons->addWidget(close);
++            layout->addLayout(buttons);
++            auto call = [](const char *symbol, const char *text) -> bool {
++                if (void *jni = FindAndroidJni()) {
++                    using Fn = bool (*)(const char *);
++                    auto fn = reinterpret_cast<Fn>(dlsym(jni, symbol));
++                    if (fn) return fn(text);
++                }
++                return false;
++            };
++            QObject::connect(start, &QPushButton::clicked, &dialog, [&] {
++                if (call("obs_android_ndi_output_start", name->text().toUtf8().constData()))
++                    status->setText(QStringLiteral("Enviando Programa y audio por NDI en la red local."));
++                else
++                    status->setText(QStringLiteral("No se inició. Importa una libndi.so sender para ARM64 y revisa que el runtime tenga NDIlib_send_*."));
++            });
++            QObject::connect(stop, &QPushButton::clicked, &dialog, [&] {
++                if (void *jni = FindAndroidJni()) if (auto fn = reinterpret_cast<void (*)()>(dlsym(jni, "obs_android_ndi_output_stop"))) fn();
++                status->setText(QStringLiteral("Estado: detenido"));
++            });
++            QObject::connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
++            dialog.resize(520, 230);
++            dialog.exec();
++        });
++        auto *diagnostics = toolsMenu->addAction(QStringLiteral("Diagnóstico de rendimiento..."));
++        QObject::connect(diagnostics, &QAction::triggered, mainWindow, [mainWindow] { OpenPerformanceDiagnostics(mainWindow); });
++    }
++
+ 	SyncVerticalRuntimeFromConfig(LoadMultiConfig());
+ 	if (auto *window = qobject_cast<QMainWindow *>(mainWindow)) {
+ 		InstallBugBar(window);
+@@ -5511,7 +5640,7 @@
+ 					auto fn = reinterpret_cast<HealthFn>(dlsym(h, "obs_android_get_device_health"));
+ 					if (!fn)
+ 						return;
+-					char buf[256] = {};
++					char buf[1024] = {};
+ 					if (!fn(buf, sizeof(buf)) || !buf[0])
+ 						return;
+ 					try {
+@@ -5524,6 +5653,22 @@
+ 							"Ahorro automático: vistas previas hasta %1 FPS; navegador hasta %2 FPS según su configuración. "
+ 							"Los FPS y la resolución de transmisión/grabación se conservan. La temperatura mostrada es de la batería.")
+ 							.arg(j.value("preview_fps_limit", 15)).arg(j.value("browser_fps_limit", 60)));
++                        QString diagnostic = healthLabel->toolTip();
++                        diagnostic += QStringLiteral("\nRender: %1 ms; memoria Java: %2 MB; memoria nativa: %3 MB.")
++                            .arg(double(obs_get_average_frame_time_ns()) / 1e6, 0, 'f', 2)
++                            .arg(j.value("java_heap_mb", 0)).arg(j.value("native_heap_mb", 0));
++                        if (j.contains("thermal_headroom")) diagnostic += QStringLiteral("\nMargen térmico normalizado: %1 (1 = umbral severo).")
++                            .arg(j.value("thermal_headroom", 0.0), 0, 'f', 2);
++                        if (auto encoderStats = reinterpret_cast<HealthFn>(dlsym(h, "obs_android_encoder_stats"))) {
++                            char encoderBuffer[1024] = {};
++                            if (encoderStats(encoderBuffer, sizeof(encoderBuffer))) {
++                                auto e = nlohmann::json::parse(encoderBuffer, nullptr, false);
++                                if (!e.is_discarded()) diagnostic += QStringLiteral("\nCodificadores por Surface: %1; por CPU: %2. Tiempo medio de callback: %3 ms.")
++                                    .arg(e.value("active_surface_codecs", 0)).arg(e.value("active_cpu_video_codecs", 0))
++                                    .arg(e.value("encode_avg_ms", 0.0), 0, 'f', 2);
++                            }
++                        }
++                        healthLabel->setToolTip(diagnostic);
+ 						QString text;
+ 						if (bat >= 0)
+ 							text += QStringLiteral("Bat %1%%2").arg(bat).arg(chg ? "+" : "");
+--- a/frontend/utility/system-info-android.cpp
++++ b/frontend/utility/system-info-android.cpp
+@@ -118,19 +118,9 @@
+ 		obs_leave_graphics();
+ 	}
+ 
+-	if (p.ram_total_mb >= 7200 && p.max_freq_mhz >= 2800) {
+-		p.tier = 4;
+-		p.tier_label = "Gama Alta (Ultra · 1080p60 GPU Zero-Copy)";
+-	} else if (p.ram_total_mb >= 5200 && p.max_freq_mhz >= 2200) {
+-		p.tier = 3;
+-		p.tier_label = "Gama Media-Alta (1080p30 / 720p60 GPU)";
+-	} else if (p.ram_total_mb >= 3500) {
+-		p.tier = 2;
+-		p.tier_label = "Gama Media (720p30 Equilibrado)";
+-	} else {
+-		p.tier = 1;
+-		p.tier_label = "Modo Ligero / Ahorro (540p/720p 30 FPS)";
+-	}
++    p.tier = 1;
++    p.tier_label = "Capacidades de video pendientes de verificar";
++
+ }
+ } // namespace
+ 
+--- a/frontend/widgets/OBSBasic.cpp
++++ b/frontend/widgets/OBSBasic.cpp
+@@ -1,3 +1,6 @@
++#ifdef __ANDROID__
++#include <dlfcn.h>
++#endif
+ /******************************************************************************
+     Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
+                           Zachary Lund <admin@computerquip.com>
+@@ -1957,6 +1960,15 @@
+ 
+ 	disableSaving++;
+ 
++#ifdef __ANDROID__
++    // Stop external producers and auxiliary outputs before ClearSceneData releases sources.
++    if (void *bridge = dlopen("libobs-android-jni.so", RTLD_NOW | RTLD_NOLOAD)) {
++        using StopFn = void (*)();
++        if (auto fn = reinterpret_cast<StopFn>(dlsym(bridge, "obs_android_prepare_shutdown"))) fn();
++        dlclose(bridge);
++    }
++#endif
++
+ 	/* Clear all scene data (dialogs, widgets, widget sub-items, scenes,
+ 	 * sources, etc) so that all references are released before shutdown */
+ 	ClearSceneData();
+--- a/frontend/widgets/OBSBasicStatusBar.cpp
++++ b/frontend/widgets/OBSBasicStatusBar.cpp
+@@ -231,15 +231,8 @@
+ 				return val;
+ 		}
+ 	}
+-	// Fallback: real OBS render frame time vs frame budget
+-	struct obs_video_info ovi = {};
+-	if (obs_get_video_info(&ovi) && ovi.fps_num > 0 && ovi.fps_den > 0) {
+-		double frameBudgetNs = (1e9 * double(ovi.fps_den)) / double(ovi.fps_num);
+-		double avgFrameNs = double(obs_get_average_frame_time_ns());
+-		if (frameBudgetNs > 0.0)
+-			return std::clamp((avgFrameNs / frameBudgetNs) * 100.0, 0.0, 100.0);
+-	}
+-	return 0.0;
++	return -1.0; // Render time is not a measurement of GPU utilisation.
++
+ }
+ #endif
+ 
+@@ -253,7 +246,10 @@
+ 	QString text;
+ 	text += QString("CPU: ") + QString::number(main->GetCPUUsage(), 'f', 1) + QString("%");
+ #ifdef __ANDROID__
+-	text += QString("  |  GPU: ") + QString::number(ReadAndroidGpuUsagePercent(), 'f', 0) + QString("%");
++    const double gpu = ReadAndroidGpuUsagePercent();
++    if (gpu >= 0.0) text += QString("  |  GPU: ") + QString::number(gpu, 'f', 0) + QString("%");
++    else text += QString("  |  Render: ") + QString::number(double(obs_get_average_frame_time_ns()) / 1e6, 'f', 1) + QString(" ms");
++    statusWidget->ui->cpuUsage->setToolTip(QStringLiteral("CPU del proceso OBS; GPU del dispositivo cuando el controlador permite leerla. Render indica tiempo por fotograma, no utilización GPU."));
+ #endif
+ 
+ 	statusWidget->ui->cpuUsage->setText(text);
+--- a/frontend/wizards/AutoConfigTestPage.cpp
++++ b/frontend/wizards/AutoConfigTestPage.cpp
+@@ -993,13 +993,13 @@
+ 	}
+ 
+ 	// Run real live GPU + MediaCodec Surface benchmark using TestMode + null_output
+-	TestMode testMode;
++	TestMode testMode(true); // Keep the real Program scene and its sources active.
+ 	Result chosen = candidates.back();
+ 	double bestMeasuredFps = 0.0;
++    bool validated = false;
+ 
+ 	for (size_t idx = 0; idx < candidates.size(); ++idx) {
+ 		const Result &cand = candidates[idx];
+-		const bool isLastFallback = (idx + 1 == candidates.size());
+ 		const int pct = int(((idx + 1) * 90) / candidates.size());
+ 		QMetaObject::invokeMethod(this, &AutoConfigTestPage::Progress, pct);
+ 
+@@ -1011,7 +1011,7 @@
+ 				     QString::number(cand.cx), QString::number(cand.cy),
+ 				     QString::number(int(std::lround(targetFps)))));
+ 
+-		testMode.SetVideo(cand.cx, cand.cy, cand.fps_num, cand.fps_den);
++        if (!testMode.SetVideo(cand.cx, cand.cy, cand.fps_num, cand.fps_den)) continue;
+ 
+ 		OBSEncoderAutoRelease vencoder = obs_video_encoder_create(vencId, "android_bench_venc", nullptr, nullptr);
+ 		OBSEncoderAutoRelease aencoder =
+@@ -1019,10 +1019,6 @@
+ 		OBSOutputAutoRelease output = obs_output_create("null_output", "android_bench_null", nullptr, nullptr);
+ 
+ 		if (!vencoder || !aencoder || !output) {
+-			if (isLastFallback) {
+-				chosen = cand;
+-				break;
+-			}
+ 			continue;
+ 		}
+ 
+@@ -1043,7 +1039,7 @@
+ 		obs_output_set_audio_encoder(output, aencoder, 0);
+ 		obs_output_set_media(output, obs_get_video(), obs_get_audio());
+ 
+-		bool deactivated = false;
++		std::atomic<bool> deactivated{false};
+ 		auto on_deactivated = [&]() {
+ 			unique_lock<mutex> lock(m);
+ 			deactivated = true;
+@@ -1056,7 +1052,9 @@
+ 		signal_handler *sh = obs_output_get_signal_handler(output);
+ 		signal_handler_connect(sh, "deactivate", pre_deact, &on_deactivated);
+ 
+-		uint32_t skippedBefore = video_output_get_skipped_frames(obs_get_video());
++        uint32_t skippedBefore = 0;
++        int framesBefore = 0;
++        auto measuredStart = chrono::steady_clock::now();
+ 		{
+ 			unique_lock<mutex> ul(m);
+ 			if (cancel)
+@@ -1065,16 +1063,17 @@
+ 
+ 		if (!obs_output_start(output)) {
+ 			signal_handler_disconnect(sh, "deactivate", pre_deact, &on_deactivated);
+-			if (isLastFallback) {
+-				chosen = cand;
+-				break;
+-			}
+ 			continue;
+ 		}
+ 
+-		{
+-			unique_lock<mutex> ul(m);
+-			cv.wait_for(ul, chrono::milliseconds(1600), [&]() { return cancel || deactivated; });
++        {
++            unique_lock<mutex> ul(m);
++            cv.wait_for(ul, chrono::seconds(2), [&]() { return cancel || deactivated; });
++            skippedBefore = video_output_get_skipped_frames(obs_get_video());
++            framesBefore = obs_output_get_total_frames(output);
++            measuredStart = chrono::steady_clock::now();
++            if (!cancel && !deactivated)
++                cv.wait_for(ul, chrono::seconds(12), [&]() { return cancel || deactivated; });
+ 			if (cancel) {
+ 				ul.unlock();
+ 				obs_output_force_stop(output);
+@@ -1083,29 +1082,48 @@
+ 			}
+ 		}
+ 
+-		const double activeFps = obs_get_active_fps();
++        const double elapsed = chrono::duration<double>(chrono::steady_clock::now() - measuredStart).count();
++        const int encodedFrames = obs_output_get_total_frames(output) - framesBefore;
++        const double encodedFps = elapsed > 0.0 ? encodedFrames / elapsed : 0.0;
++        const double activeFps = obs_get_active_fps();
++        const auto afterHw = QueryAndroidHardwareProfile();
++        const bool outputAlive = obs_output_active(output) && !deactivated;
+ 		const uint32_t skippedAfter = video_output_get_skipped_frames(obs_get_video());
+ 		const int skippedDelta = int(skippedAfter >= skippedBefore ? (skippedAfter - skippedBefore) : 0);
+ 
+ 		obs_output_stop(output);
+ 		{
+ 			unique_lock<mutex> ul(m);
+-			cv.wait_for(ul, chrono::milliseconds(1500), [&]() { return deactivated; });
++            if (!cv.wait_for(ul, chrono::milliseconds(1500), [&]() { return deactivated.load(); })) {
++                ul.unlock();
++                obs_output_force_stop(output);
++                ul.lock();
++                cv.wait_for(ul, chrono::seconds(3), [&]() { return deactivated.load(); });
++            }
+ 		}
+ 		signal_handler_disconnect(sh, "deactivate", pre_deact, &on_deactivated);
+ 
+-		const bool sustained = (skippedDelta <= 4) && (activeFps <= 1.0 || activeFps >= targetFps * 0.84);
++        const bool sustained = outputAlive && elapsed >= 10.0 && skippedDelta <= int(targetFps * elapsed * 0.01)
++            && activeFps >= targetFps * 0.95 && encodedFps >= targetFps * 0.95
++            && afterHw.thermal_status < 3;
++        blog(LOG_INFO, "[Android AutoConfig] Real scene: %.1fs encoded=%d %.2f FPS thermal=%d", elapsed, encodedFrames, encodedFps, afterHw.thermal_status);
+ 		blog(LOG_INFO,
+ 		     "[Android AutoConfig] Benchmarked %s %dx%d@%.0ffps -> skipped=%d activeFps=%.1f sustained=%d",
+ 		     vencId, cand.cx, cand.cy, targetFps, skippedDelta, activeFps, int(sustained));
+ 
+-		if (sustained || isLastFallback) {
++		if (sustained) {
+ 			chosen = cand;
+-			bestMeasuredFps = activeFps > 1.0 ? activeFps : targetFps;
++			bestMeasuredFps = encodedFps;
++            validated = true;
+ 			break;
+ 		}
+ 	}
+ 
++    if (!validated) {
++        QMetaObject::invokeMethod(this, &AutoConfigTestPage::Failure,
++            QStringLiteral("Ninguna configuración sostuvo la escena actual. Reduce fuentes o calidad y repite la prueba."));
++        return false;
++    }
+ 	QMetaObject::invokeMethod(this, &AutoConfigTestPage::Progress, 100);
+ 
+ 	wiz->idealResolutionCX = chosen.cx;
+--- a/frontend/wizards/TestMode.hpp
++++ b/frontend/wizards/TestMode.hpp
+@@ -4,6 +4,7 @@
+ #include <obs.hpp>
+ 
+ class TestMode {
++    bool preserveSources{false};
+ 	obs_video_info ovi;
+ 	OBSSource source[6];
+ 
+@@ -28,9 +29,10 @@
+ 	}
+ 
+ public:
+-	inline TestMode()
++	inline TestMode(bool preserve = false) : preserveSources(preserve)
+ 	{
+ 		obs_get_video_info(&ovi);
++        if (preserveSources) return;
+ 		obs_add_main_render_callback(render_rand, this);
+ 
+ 		for (uint32_t i = 0; i < 6; i++) {
+@@ -42,6 +44,10 @@
+ 
+ 	inline ~TestMode()
+ 	{
++        if (preserveSources) {
++            obs_reset_video(&ovi);
++            return;
++        }
+ 		for (uint32_t i = 0; i < 6; i++) {
+ 			obs_set_output_source(i, source[i]);
+ 		}
+@@ -50,7 +56,7 @@
+ 		obs_reset_video(&ovi);
+ 	}
+ 
+-	inline void SetVideo(int cx, int cy, int fps_num, int fps_den)
++	inline bool SetVideo(int cx, int cy, int fps_num, int fps_den)
+ 	{
+ 		obs_video_info newOVI = ovi;
+ 
+@@ -59,6 +65,6 @@
+ 		newOVI.fps_num = (uint32_t)fps_num;
+ 		newOVI.fps_den = (uint32_t)fps_den;
+ 
+-		obs_reset_video(&newOVI);
++        return obs_reset_video(&newOVI) == OBS_VIDEO_SUCCESS;
+ 	}
+ };

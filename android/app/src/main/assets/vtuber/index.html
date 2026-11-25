@@ -82,6 +82,49 @@ console.log('VTuber init: pixi=' + !!window.PIXI + ' cubismCore=' + !!window.Liv
 let glPixelBuf = null;
 let frameInFlight = false;
 let lastPushMs = 0;
+let messageBuffer = null;
+let pboState = null;
+function asyncReadPixels(gl, w, h) {
+  if (!gl.fenceSync || !gl.getBufferSubData || gl.isContextLost()) return null;
+  const size = w * h * 4;
+  if (!pboState || pboState.gl !== gl || pboState.size !== size) {
+    if (pboState) for (const slot of pboState.slots) {
+      if (slot.sync) pboState.gl.deleteSync(slot.sync);
+      pboState.gl.deleteBuffer(slot.buffer);
+    }
+    pboState = {gl, size, slots: [], next: 0};
+    for (let i = 0; i < 3; ++i) {
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, size, gl.STREAM_READ);
+      pboState.slots.push({buffer, sync: null, order: 0});
+    }
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  }
+  let pixels = null;
+  const pending = pboState.slots.filter(s => s.sync).sort((a,b) => a.order - b.order);
+  if (pending.length) {
+    const slot = pending[0];
+    const ready = gl.clientWaitSync(slot.sync, 0, 0);
+    if (ready === gl.ALREADY_SIGNALED || ready === gl.CONDITION_SATISFIED) {
+      if (!glPixelBuf || glPixelBuf.length !== size) glPixelBuf = new Uint8Array(size);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
+      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, glPixelBuf);
+      gl.deleteSync(slot.sync); slot.sync = null;
+      pixels = glPixelBuf;
+    }
+  }
+  const slot = pboState.slots.find(s => !s.sync);
+  if (slot) {
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    slot.sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    slot.order = ++pboState.next;
+    gl.flush();
+  }
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  return pixels;
+}
 
 function getRenderSize() {
   const w = Math.max(128, Math.min(1280, cfg.width || window.innerWidth || 768));
@@ -464,8 +507,13 @@ function pushCurrentFrame(activeGl) {
       glPixelBuf = new Uint8Array(byteLen);
     }
     activeGl.bindFramebuffer(activeGl.FRAMEBUFFER, null);
-    activeGl.readPixels(0, 0, w, h, activeGl.RGBA, activeGl.UNSIGNED_BYTE, glPixelBuf);
-    bytes = glPixelBuf;
+    if (activeGl.getBufferSubData) {
+      bytes = asyncReadPixels(activeGl, w, h);
+      if (!bytes) return;
+    } else {
+      activeGl.readPixels(0, 0, w, h, activeGl.RGBA, activeGl.UNSIGNED_BYTE, glPixelBuf);
+      bytes = glPixelBuf;
+    }
     flip = 1;
   } else {
     const imgData = ctx2d.getImageData(0, 0, w, h);
@@ -475,6 +523,17 @@ function pushCurrentFrame(activeGl) {
 
   frameInFlight = true;
   lastPushMs = now;
+  if (window.ObsVtuberFrames) {
+    if (!messageBuffer || messageBuffer.byteLength !== byteLen + 16) messageBuffer = new ArrayBuffer(byteLen + 16);
+    const header = new DataView(messageBuffer);
+    header.setUint32(0, 0x4f425352, true); header.setUint32(4, w, true);
+    header.setUint32(8, h, true); header.setUint32(12, flip, true);
+    new Uint8Array(messageBuffer, 16).set(bytes);
+    window.ObsVtuberFrames.onmessage = () => { frameInFlight = false; };
+    try { window.ObsVtuberFrames.postMessage(messageBuffer); }
+    catch (_) { frameInFlight = false; }
+    return;
+  }
   fetch('/vtuber-frame/' + instanceId + '?w=' + w + '&h=' + h + '&flip=' + flip, {
     method: 'POST',
     headers: {'X-OBS-Token': new URLSearchParams(location.hash.slice(1)).get('localToken') || ''},
@@ -482,8 +541,13 @@ function pushCurrentFrame(activeGl) {
   }).catch(() => {}).finally(() => { frameInFlight = false; });
 }
 
-function animate() {
+let renderBudgetFps = 60;
+let lastRenderTime = 0;
+function animate(now) {
   requestAnimationFrame(animate);
+  if (now - lastRenderTime < 1000 / Math.max(1, Math.min(cfg.fps || 30, renderBudgetFps))) return;
+  lastRenderTime = now;
+
   const dt = Math.min(0.05, clock.getDelta());
   resizeAll();
 
@@ -632,6 +696,7 @@ function animate() {
 }
 
 window.OBS_VTUBER = {
+  setRenderBudget(fps) { renderBudgetFps = Math.max(1, Math.min(60, Number(fps) || 30)); },
   setConfig(next) {
     cfg = Object.assign(cfg, next || {});
     resizeAll();

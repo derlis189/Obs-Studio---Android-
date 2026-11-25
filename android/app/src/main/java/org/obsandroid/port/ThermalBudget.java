@@ -3,6 +3,15 @@ package org.obsandroid.port;
 
 /** Limits auxiliary work only; output/encoder resolution and FPS are independent. */
 final class ThermalBudget {
+    static int effectiveStatus(int status, float headroom, boolean powerSave) {
+        int effective = Math.max(0, Math.min(6, status));
+        // Headroom 1.0 corresponds to the severe throttling threshold. NaN
+        // means the device cannot forecast; keep the reported Android status.
+        if (!Float.isNaN(headroom) && headroom >= 0.9f) effective = Math.max(effective, 2);
+        else if (!Float.isNaN(headroom) && headroom >= 0.7f) effective = Math.max(effective, 1);
+        if (powerSave) effective = Math.max(effective, 1);
+        return effective;
+    }
     static int previewFps(int status) {
         if (status >= 4) return 5;
         if (status >= 3) return 10;

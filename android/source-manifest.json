@@ -34,7 +34,7 @@
         },
         {
             "path": "frontend/OBSApp.cpp",
-            "sha256Lf": "0938c013b525f43045238688dbae495620b335d25ab375583ae63f6a9d6fa5e7"
+            "sha256Lf": "3f612f4fbef1bf8ac7f3661c1e54559ebfcca87e73e495824fabefe3b7b29b75"
         },
         {
             "path": "frontend/cmake/feature-plugin-manager.cmake",
@@ -114,11 +114,11 @@
         },
         {
             "path": "frontend/utility/android-hardware-info.hpp",
-            "sha256Lf": "eab31dcc42bc0a04a20c1ca1f60ee856214706bda421060f8f2666baceddb8eb"
+            "sha256Lf": "9559a539ce27cf47104aa49c6a8d509c6408619d0a6ceac61738e80b74f28362"
         },
         {
             "path": "frontend/utility/android-tools.cpp",
-            "sha256Lf": "07c25b3ce713c4754248bdd77b23e2a6d9f04dd5c8d90cc0e3ce1c7e18ee6074"
+            "sha256Lf": "1e0ae5c07e975394b63bc58265010e4b2e92f4fcb011402ccf04fd5b1a6834e9"
         },
         {
             "path": "frontend/utility/audio-encoders.cpp",
@@ -134,7 +134,7 @@
         },
         {
             "path": "frontend/utility/system-info-android.cpp",
-            "sha256Lf": "9feceaa0abdb4efeda1970839444e7febe7f5fd331a2977eb422ebf5fc5649d3"
+            "sha256Lf": "7fc10a2d15267371c2cce17c097e8c6ad80b7a2972b240486e017cbde2f18e8e"
         },
         {
             "path": "frontend/widgets/AudioMixer.cpp",
@@ -142,7 +142,7 @@
         },
         {
             "path": "frontend/widgets/OBSBasic.cpp",
-            "sha256Lf": "1cf0765dbfe141ddd6bf6340ef71edd4518eebca759fcc38b84e03202ccfdd2e"
+            "sha256Lf": "8160f45eafd6bb8dc3a409a706059f2295d9f308c9875ce5cbd224176306243b"
         },
         {
             "path": "frontend/widgets/OBSBasicPreview.cpp",
@@ -154,7 +154,7 @@
         },
         {
             "path": "frontend/widgets/OBSBasicStatusBar.cpp",
-            "sha256Lf": "099a3d96cc1c00f9264392caf537101c312cd21c498e8218d6aacdaa375fdef0"
+            "sha256Lf": "d56f48b874da46832e623a1bb8a8a3f15e6c151fdb358e93442adaa5e5858e37"
         },
         {
             "path": "frontend/widgets/OBSBasic_Docks.cpp",
@@ -214,7 +214,7 @@
         },
         {
             "path": "frontend/wizards/AutoConfigTestPage.cpp",
-            "sha256Lf": "80b825bc8ff030717c6dc556c726f4488f68af49591d22b0ed303584e238a076"
+            "sha256Lf": "53478c391e875d4bbc6e585dfc93a52837e638b7616db1fbf226c815c2e3adee"
         },
         {
             "path": "frontend/wizards/AutoConfigTestPage.hpp",
@@ -411,6 +411,10 @@
         {
             "path": "shared/qt/wrappers/qt-wrappers.cpp",
             "sha256Lf": "7117c399433d9a2a4077e51c9a2327896ee0d7995249140f9c40dea8dd2bd626"
+        },
+        {
+            "path": "frontend/wizards/TestMode.hpp",
+            "sha256Lf": "6d941d54993ccedb0893000bb2d44a91aeacc938059dd71e0fec6a9e26d7cee7"
         }
     ]
 }

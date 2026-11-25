@@ -1,3 +1,4 @@
+#include "android-session-gate.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <jni.h>
 #include <obs.h>
@@ -22,6 +23,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <dlfcn.h>
 #include <vector>
 
 static std::atomic<bool (*)(void)> g_android_back_handler{nullptr};
@@ -42,6 +44,40 @@ static jmethodID g_broadcast_keepalive_method = nullptr;
 static jmethodID g_device_health_method = nullptr;
 static jmethodID g_hw_profile_method = nullptr;
 
+namespace { void detach_program_snapshot_now(); }
+
+extern "C" __attribute__((visibility("default"))) void obs_android_prepare_shutdown()
+{
+    static std::atomic<bool> prepared{false};
+    if (prepared.exchange(true)) return;
+    android_session_close();
+    detach_program_snapshot_now();
+    blog(LOG_INFO, "[android-session] Producer callbacks drained before OBS shutdown");
+    using ProbeStopFn = void (*)();
+    if (auto stop = reinterpret_cast<ProbeStopFn>(dlsym(RTLD_DEFAULT, "obs_android_performance_probe_shutdown"))) stop();
+    android_multistream_shutdown();
+    android_srt_shutdown();
+    JavaVM *jvm = g_activity_jvm;
+    if (!jvm || !g_activity_class) return;
+    JNIEnv *env = nullptr;
+    bool detach = false;
+    if (jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
+        if (jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        detach = true;
+    }
+    if (env) {
+        jmethodID mid = env->GetStaticMethodID(g_activity_class, "onNativeShutdown", "()V");
+        if (mid) env->CallStaticVoidMethod(g_activity_class, mid);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (detach) jvm->DetachCurrentThread();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_obsandroid_port_NativeBridge_quiesceCallbacks(JNIEnv *, jclass)
+{
+    android_session_close();
+}
 extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_setPreviewFpsLimit(JNIEnv *, jclass, jint fps)
 {
@@ -56,6 +92,7 @@ static void (*g_save_state_cb)(void) = nullptr;
 // Lazy Program snapshot capture (480x270 RGBA via libobs raw video callback)
 namespace {
 std::mutex g_prog_mutex;
+std::mutex g_prog_detach_mutex;
 std::vector<uint8_t> g_prog_rgba;
 int g_prog_w = 0;
 int g_prog_h = 0;
@@ -75,6 +112,7 @@ void on_program_raw_video(void *, struct video_data *frame);
 
 void detach_program_snapshot_now()
 {
+    std::lock_guard<std::mutex> detach_lock(g_prog_detach_mutex);
     bool wasAttached = false;
     {
         std::lock_guard<std::mutex> lock(g_prog_mutex);
@@ -93,6 +131,8 @@ void detach_program_snapshot_now()
 
 void on_program_raw_video(void *, struct video_data *frame)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return;
     if (!frame || !frame->data[0]) return;
     bool idle = false;
     {
@@ -118,7 +158,11 @@ void on_program_raw_video(void *, struct video_data *frame)
     if (idle) {
         bool expected = false;
         if (g_prog_detach_pending.compare_exchange_strong(expected, true)) {
-            std::thread([]() { detach_program_snapshot_now(); }).detach();
+            std::thread([]() {
+                AndroidCallbackScope callback;
+                if (callback) detach_program_snapshot_now();
+                else g_prog_detach_pending.store(false, std::memory_order_release);
+            }).detach();
         }
     }
 }
@@ -126,6 +170,7 @@ void on_program_raw_video(void *, struct video_data *frame)
 void ensure_program_snapshot_attached()
 {
     if (!obs_initialized()) return;
+    std::lock_guard<std::mutex> detach_lock(g_prog_detach_mutex);
     std::lock_guard<std::mutex> lock(g_prog_mutex);
     g_prog_last_req_ms = now_ms_steady();
     if (!g_prog_attached) {
@@ -451,6 +496,28 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_get_device_he
     return ok;
 }
 
+extern "C" bool obs_android_select_video_codec(const char *request, char *result, size_t capacity)
+{
+    jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        if (g_activity_class && g_activity_jvm) {
+            JNIEnv *env = nullptr;
+            bool detach = false;
+            if (g_activity_jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
+                if (g_activity_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return false;
+                detach = true;
+            }
+            if (env) {
+                mid = env->GetStaticMethodID(g_activity_class, "getVideoCodecConfigJson", "(Ljava/lang/String;)Ljava/lang/String;");
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            if (detach) g_activity_jvm->DetachCurrentThread();
+        }
+    }
+    return call_activity_string_method(mid, request, result, capacity);
+}
+
 extern "C" __attribute__((visibility("default"))) bool obs_android_get_hardware_profile(char *out_buf, size_t out_cap)
 {
     if (!out_buf || out_cap == 0) return false;
@@ -586,6 +653,8 @@ Java_org_obsandroid_port_NativeBridge_saveAllState(JNIEnv *, jclass)
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_org_obsandroid_port_NativeBridge_captureProgramRgba(JNIEnv *env, jclass, jintArray outDims)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return nullptr;
     ensure_program_snapshot_attached();
     std::lock_guard<std::mutex> lock(g_prog_mutex);
     if (g_prog_w <= 0 || g_prog_h <= 0 || g_prog_rgba.empty()) return nullptr;

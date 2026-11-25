@@ -481,6 +481,17 @@ final class AudioCaptureController {
                 framesRead += frames;
             }
         } catch (Exception error) { if (running) { Log.e("ObsAudio", "Audio capture failed", error); failure.run(); } }
+        finally {
+            synchronized (lifecycle) {
+                // stop() may time out while a blocking AudioRecord read is unwinding.
+                // Keep the recorder alive until this thread has left the native read call.
+                if (!running && recorder == active) {
+                    try { active.release(); } catch (IllegalStateException ignored) { }
+                    recorder = null;
+                    if (thread == Thread.currentThread()) thread = null;
+                }
+            }
+        }
     }
 
     void stop() {
@@ -496,8 +507,11 @@ final class AudioCaptureController {
             if (thread != null && thread != Thread.currentThread()) {
                 try { thread.join(1500); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
             }
-            if (recorder != null) { recorder.release(); recorder = null; }
-            thread = null;
+            if (recorder != null && (thread == null || !thread.isAlive())) {
+                try { recorder.release(); } catch (IllegalStateException ignored) { }
+                recorder = null;
+                thread = null;
+            }
             if (notifyDisable) {
                 EngineRuntime.EXECUTOR.execute(() -> NativeBridge.enableCapture(kind, false));
             }

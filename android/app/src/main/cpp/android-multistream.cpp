@@ -15,6 +15,8 @@
 #include <util/bmem.h>
 #include <cstring>
 #include <map>
+#include <tuple>
+#include <nlohmann/json.hpp>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -299,11 +301,20 @@ bool write_backtrack_snapshot_to_mp4(const char *path,
 std::mutex g_ms_mutex;
 std::map<std::string, MultiTarget> g_targets;
 VerticalEngine g_vert;
+using VideoPoolKey = std::tuple<video_t *, int, uint32_t, uint32_t, uint32_t, uint32_t, int, int, int>;
+std::map<VideoPoolKey, obs_weak_encoder_t *> g_video_pool;
+obs_weak_encoder_t *g_audio_pool{};
+void clear_encoder_pool() {
+    for (auto &entry : g_video_pool) obs_weak_encoder_release(entry.second);
+    g_video_pool.clear();
+    if (g_audio_pool) obs_weak_encoder_release(g_audio_pool);
+    g_audio_pool = nullptr;
+}
 
 void release_multi_target(MultiTarget &t)
 {
     if (t.output) {
-        if (obs_output_active(t.output)) obs_output_stop(t.output);
+        if (obs_output_active(t.output) || obs_output_reconnecting(t.output)) obs_output_force_stop(t.output);
         obs_output_release(t.output);
         t.output = nullptr;
     }
@@ -314,22 +325,51 @@ void release_multi_target(MultiTarget &t)
 
 obs_encoder_t *create_video_encoder(const char *name, video_t *video, int bitrate_kbps)
 {
+    const int bitrate = bitrate_kbps > 300 ? bitrate_kbps : 3500;
+    const video_output_info *vi = video_output_get_info(video);
+    if (!vi) return nullptr;
+    const VideoPoolKey key{video, bitrate, vi->width, vi->height, vi->fps_num, vi->fps_den, int(vi->format), int(vi->colorspace), int(vi->range)};
+    for (auto it = g_video_pool.begin(); it != g_video_pool.end();) {
+        obs_encoder_t *enc = obs_weak_encoder_get_encoder(it->second);
+        if (!enc) {
+            obs_weak_encoder_release(it->second);
+            it = g_video_pool.erase(it);
+        } else {
+            if (it->first == key) {
+                blog(LOG_INFO, "[android-multistream] Reusing H.264 encoder %s (%d kbps)", obs_encoder_get_name(enc), bitrate);
+                return enc;
+            }
+            obs_encoder_release(enc);
+            ++it;
+        }
+    }
     obs_data_t *vs = obs_data_create();
-    obs_data_set_int(vs, "bitrate", bitrate_kbps > 300 ? bitrate_kbps : 3500);
+    obs_data_set_int(vs, "bitrate", bitrate);
     obs_data_set_int(vs, "keyint_sec", 2);
     obs_encoder_t *enc = obs_video_encoder_create("android_mediacodec_h264", name, vs, nullptr);
     obs_data_release(vs);
-    if (enc) obs_encoder_set_video(enc, video);
+    if (enc) {
+        obs_encoder_set_video(enc, video);
+        g_video_pool.emplace(key, obs_encoder_get_weak_encoder(enc));
+    }
     return enc;
 }
 
 obs_encoder_t *create_audio_encoder(const char *name)
 {
+    if (g_audio_pool) {
+        if (auto *shared = obs_weak_encoder_get_encoder(g_audio_pool)) return shared;
+        obs_weak_encoder_release(g_audio_pool);
+        g_audio_pool = nullptr;
+    }
     obs_data_t *as = obs_data_create();
     obs_data_set_int(as, "bitrate", 128);
     obs_encoder_t *enc = obs_audio_encoder_create("android_mediacodec_aac", name, as, 0, nullptr);
     obs_data_release(as);
-    if (enc) obs_encoder_set_audio(enc, obs_get_audio());
+    if (enc) {
+        obs_encoder_set_audio(enc, obs_get_audio());
+        g_audio_pool = obs_encoder_get_weak_encoder(enc);
+    }
     return enc;
 }
 
@@ -711,14 +751,23 @@ bool ensure_vertical_canvas_locked(int width, int height, const char *scene_name
     int w = (width >= 360 && width <= 1080) ? (width & ~1) : 720;
     int h = (height >= 640 && height <= 1920) ? (height & ~1) : 1280;
 
+    bool consumed = g_vert.stream_out || g_vert.rec_out || g_vert.bt_out;
+    for (const auto &entry : g_targets) consumed |= entry.second.uses_vertical && entry.second.output;
+    const std::string requested_scene = scene_name ? scene_name : "";
     if (g_vert.view && g_vert.video && g_vert.width == w && g_vert.height == h) {
+        if (consumed && (g_vert.scene_name != requested_scene || g_vert.fit_mode != fit_mode)) {
+            blog(LOG_WARNING, "[android-vertical] Stop existing vertical outputs before changing their shared scene or framing");
+            return false;
+        }
         update_vertical_wrapped_scene_locked(scene_name, fit_mode);
         return true;
     }
-
-    if (g_vert.stream_out && obs_output_active(g_vert.stream_out)) return false;
-    if (g_vert.rec_out && obs_output_active(g_vert.rec_out)) return false;
-    if (g_vert.bt_out && obs_output_active(g_vert.bt_out)) return false;
+    // Connecting/reconnecting outputs still own the video feed. Never free it
+    // underneath an encoder, even before its first packet has been delivered.
+    if (consumed) {
+        blog(LOG_WARNING, "[android-vertical] Stop existing vertical outputs before changing the shared canvas size");
+        return false;
+    }
 
     // Tear down any previous view
     if (g_vert.wrapped_item) { obs_sceneitem_release(g_vert.wrapped_item); g_vert.wrapped_item = nullptr; }
@@ -759,12 +808,12 @@ bool ensure_vertical_canvas_locked(int width, int height, const char *scene_name
 
 void maybe_teardown_vertical_canvas_locked()
 {
-    bool streaming = g_vert.stream_out && obs_output_active(g_vert.stream_out);
-    bool recording = g_vert.rec_out && obs_output_active(g_vert.rec_out);
-    bool backtrack = g_vert.bt_out && obs_output_active(g_vert.bt_out);
+    bool streaming = g_vert.stream_out != nullptr;
+    bool recording = g_vert.rec_out != nullptr;
+    bool backtrack = g_vert.bt_out != nullptr;
     bool multi_vert = false;
     for (const auto &kv : g_targets) {
-        if (kv.second.uses_vertical && kv.second.output && obs_output_active(kv.second.output)) {
+        if (kv.second.uses_vertical && kv.second.output) {
             multi_vert = true;
             break;
         }
@@ -1313,6 +1362,7 @@ extern "C" __attribute__((visibility("default"))) void obs_android_vertical_set_
 void android_multistream_shutdown()
 {
     std::lock_guard<std::mutex> lock(g_ms_mutex);
+    clear_encoder_pool();
     for (auto &kv : g_targets) release_multi_target(kv.second);
     g_targets.clear();
     if (g_vert.stream_out) {
@@ -1335,4 +1385,23 @@ void android_multistream_shutdown()
     if (g_vert.bt_venc) { obs_encoder_release(g_vert.bt_venc); g_vert.bt_venc = nullptr; }
     if (g_vert.bt_aenc) { obs_encoder_release(g_vert.bt_aenc); g_vert.bt_aenc = nullptr; }
     maybe_teardown_vertical_canvas_locked();
+}
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_multistream_target_stats(const char *id, char *out, size_t capacity)
+{
+    if (!id || !out || !capacity) return false;
+    std::lock_guard<std::mutex> lock(g_ms_mutex);
+    auto it = g_targets.find(id);
+    if (it == g_targets.end()) return false;
+    auto &target = it->second;
+    auto text = nlohmann::json{{"active", target.output && obs_output_active(target.output)},
+        {"reconnecting", target.output && obs_output_reconnecting(target.output)},
+        {"frames", target.output ? obs_output_get_total_frames(target.output) : 0},
+        {"dropped", target.output ? obs_output_get_frames_dropped(target.output) : 0},
+        {"bytes", target.output ? obs_output_get_total_bytes(target.output) : 0},
+        {"video_encoder", target.v_enc ? obs_encoder_get_name(target.v_enc) : ""},
+        {"audio_encoder", target.a_enc ? obs_encoder_get_name(target.a_enc) : ""}}.dump();
+    if (text.size() >= capacity) return false;
+    std::memcpy(out, text.c_str(), text.size() + 1);
+    return true;
 }

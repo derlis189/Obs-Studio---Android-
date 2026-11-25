@@ -7,6 +7,10 @@ public final class ThermalBudgetTest {
     }
 
     public static void main(String[] args) throws Exception {
+        check(ThermalBudget.effectiveStatus(0, Float.NaN, false) == 0, "Unknown headroom must not throttle");
+        check(ThermalBudget.effectiveStatus(0, 0.92f, false) == 2, "Forecast must reduce auxiliary work before severe heat");
+        check(ThermalBudget.effectiveStatus(3, 0.1f, false) == 3, "Forecast must not override a hotter actual status");
+        check(ThermalBudget.effectiveStatus(0, 0.1f, true) == 1, "Battery saver must cap auxiliary work");
         int previousPreview = 30, previousBrowser = 60;
         for (int status = 0; status <= 6; ++status) {
             int preview = ThermalBudget.previewFps(status), browser = ThermalBudget.browserFpsCap(status);

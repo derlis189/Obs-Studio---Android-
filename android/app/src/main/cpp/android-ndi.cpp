@@ -119,6 +119,17 @@ struct NDIlib_metadata_frame_t {
     char *p_data;
 };
 
+struct NDIlib_send_create_t { const char *p_ndi_name; const char *p_groups; bool clock_video; bool clock_audio; };
+struct NDIlib_send_video_v2_t {
+    int32_t xres, yres; uint32_t FourCC; int32_t frame_rate_N, frame_rate_D;
+    float picture_aspect_ratio; int32_t frame_format_type; int64_t timecode;
+    uint8_t *p_data; int32_t line_stride_in_bytes; const char *p_metadata; int64_t timestamp;
+};
+struct NDIlib_send_audio_v2_t {
+    int32_t sample_rate, no_channels, no_samples; int64_t timecode;
+    float *p_data; int32_t channel_stride_in_bytes; const char *p_metadata; int64_t timestamp;
+};
+
 struct NdiRuntime {
     void *handle{};
     bool initialized{false};
@@ -140,12 +151,20 @@ struct NdiRuntime {
     void (*recv_free_video_v2)(void *, const NDIlib_video_frame_v2_t *){};
     void (*recv_free_audio_v2)(void *, const NDIlib_audio_frame_v2_t *){};
     void (*recv_free_metadata)(void *, const NDIlib_metadata_frame_t *){};
+    void *(*send_create)(const NDIlib_send_create_t *){};
+    void (*send_destroy)(void *){};
+    void (*send_video_v2)(void *, const NDIlib_send_video_v2_t *){};
+    void (*send_audio_v2)(void *, const NDIlib_send_audio_v2_t *){};
 };
 
 std::mutex g_ndi_mutex;
 NdiRuntime g_rt;
 void *g_finder = nullptr;
 bool g_registered = false;
+bool g_output_registered = false;
+struct NdiOutputInstance { void *sender{}; std::string name; int width{}, height{}, fps_n{30}, fps_d{1}, sample_rate{48000}; std::mutex audio_mutex; std::vector<float> planar_audio; };
+std::mutex g_ndi_output_mutex;
+obs_output_t *g_ndi_tool_output{};
 std::vector<struct NdiSourceInstance *> g_active_ndi_instances;
 
 JavaVM *g_ndi_jvm = nullptr;
@@ -200,6 +219,10 @@ bool load_ndi_runtime_locked(const char *explicit_path = nullptr)
         tmp.recv_free_video_v2 = reinterpret_cast<void (*)(void *, const NDIlib_video_frame_v2_t *)>(dlsym(h, "NDIlib_recv_free_video_v2"));
         tmp.recv_free_audio_v2 = reinterpret_cast<void (*)(void *, const NDIlib_audio_frame_v2_t *)>(dlsym(h, "NDIlib_recv_free_audio_v2"));
         tmp.recv_free_metadata = reinterpret_cast<void (*)(void *, const NDIlib_metadata_frame_t *)>(dlsym(h, "NDIlib_recv_free_metadata"));
+        tmp.send_create = reinterpret_cast<void *(*)(const NDIlib_send_create_t *)>(dlsym(h, "NDIlib_send_create"));
+        tmp.send_destroy = reinterpret_cast<void (*)(void *)>(dlsym(h, "NDIlib_send_destroy"));
+        tmp.send_video_v2 = reinterpret_cast<void (*)(void *, const NDIlib_send_video_v2_t *)>(dlsym(h, "NDIlib_send_send_video_v2"));
+        tmp.send_audio_v2 = reinterpret_cast<void (*)(void *, const NDIlib_send_audio_v2_t *)>(dlsym(h, "NDIlib_send_send_audio_v2"));
 
         if (!tmp.initialize || !tmp.recv_create_v3 || !tmp.recv_capture_v2 || !tmp.recv_destroy ||
             !tmp.recv_free_video_v2 || !tmp.recv_free_audio_v2) {
@@ -625,6 +648,121 @@ void ndi_destroy(void *data)
 }
 } // namespace
 
+namespace {
+const char *ndi_output_name(void *) { return "Salida NDI™"; }
+void *ndi_output_create(obs_data_t *settings, obs_output_t *output)
+{
+    auto *inst = new NdiOutputInstance{};
+    const char *name = obs_data_get_string(settings, "ndi_name");
+    inst->name = name && *name ? name : "OBS Android";
+    obs_video_info vi{};
+    if (obs_get_video_info(&vi)) {
+        video_scale_info video{}; video.format = VIDEO_FORMAT_RGBA; video.width = vi.output_width;
+        video.height = vi.output_height; video.colorspace = VIDEO_CS_709; video.range = VIDEO_RANGE_FULL;
+        obs_output_set_video_conversion(output, &video);
+    }
+    obs_audio_info ai{};
+    if (obs_get_audio_info(&ai)) {
+        inst->sample_rate = int(ai.samples_per_sec);
+        audio_convert_info audio{}; audio.samples_per_sec = ai.samples_per_sec;
+        audio.format = AUDIO_FORMAT_FLOAT_PLANAR; audio.speakers = SPEAKERS_STEREO;
+        obs_output_set_audio_conversion(output, &audio);
+    }
+    return inst;
+}
+void ndi_output_destroy(void *data) { delete static_cast<NdiOutputInstance *>(data); }
+bool ndi_output_start(void *data)
+{
+    auto *inst = static_cast<NdiOutputInstance *>(data);
+    std::lock_guard<std::mutex> lock(g_ndi_mutex);
+    if (!load_ndi_runtime_locked() || !g_rt.send_create || !g_rt.send_video_v2 || !g_rt.send_audio_v2 || !g_rt.send_destroy) {
+        blog(LOG_ERROR, "[android-ndi] Runtime NDI does not include sender functions");
+        return false;
+    }
+    obs_video_info vi{};
+    if (!obs_get_video_info(&vi)) return false;
+    inst->width = int(vi.output_width); inst->height = int(vi.output_height);
+    inst->fps_n = int(vi.fps_num); inst->fps_d = int(vi.fps_den);
+    NDIlib_send_create_t cfg{inst->name.c_str(), nullptr, false, false};
+    inst->sender = g_rt.send_create(&cfg);
+    if (!inst->sender) return false;
+    return true;
+}
+void ndi_output_stop(void *data, uint64_t)
+{
+    auto *inst = static_cast<NdiOutputInstance *>(data);
+    if (!inst || !inst->sender) return;
+    std::lock_guard<std::mutex> lock(g_ndi_mutex);
+    if (g_rt.send_destroy) g_rt.send_destroy(inst->sender);
+    inst->sender = nullptr;
+}
+void ndi_output_video(void *data, video_data *frame)
+{
+    auto *inst = static_cast<NdiOutputInstance *>(data);
+    if (!inst || !frame || !frame->data[0]) return;
+    NDIlib_send_video_v2_t v{}; v.xres = inst->width; v.yres = inst->height;
+    v.FourCC = MakeFourCC('R','G','B','A'); v.frame_rate_N = inst->fps_n; v.frame_rate_D = inst->fps_d;
+    v.picture_aspect_ratio = float(inst->width) / float(inst->height); v.frame_format_type = 1;
+    v.timecode = int64_t(frame->timestamp / 100); v.p_data = frame->data[0];
+    v.line_stride_in_bytes = int32_t(inst->width * 4);
+    std::lock_guard<std::mutex> lock(g_ndi_mutex);
+    if (inst->sender && g_rt.send_video_v2) g_rt.send_video_v2(inst->sender, &v);
+}
+void ndi_output_audio(void *data, audio_data *frames)
+{
+    auto *inst = static_cast<NdiOutputInstance *>(data);
+    if (!inst || !frames || !frames->frames || !frames->data[0] || !frames->data[1]) return;
+    auto *left = reinterpret_cast<float *>(frames->data[0]);
+    auto *right = reinterpret_cast<float *>(frames->data[1]);
+    std::lock_guard<std::mutex> audio_lock(inst->audio_mutex);
+    inst->planar_audio.resize(size_t(frames->frames) * 2);
+    std::copy(left, left + frames->frames, inst->planar_audio.begin());
+    std::copy(right, right + frames->frames, inst->planar_audio.begin() + frames->frames);
+    NDIlib_send_audio_v2_t a{}; a.sample_rate = inst->sample_rate; a.no_channels = 2;
+    a.no_samples = int32_t(frames->frames); a.timecode = int64_t(frames->timestamp / 100);
+    a.p_data = inst->planar_audio.data(); a.channel_stride_in_bytes = int32_t(frames->frames * sizeof(float));
+    std::lock_guard<std::mutex> lock(g_ndi_mutex);
+    if (inst->sender && g_rt.send_audio_v2) g_rt.send_audio_v2(inst->sender, &a);
+}
+void register_ndi_output()
+{
+    if (g_output_registered) return;
+    obs_output_info info{}; info.id = "android_ndi_output"; info.flags = OBS_OUTPUT_AV;
+    info.get_name = ndi_output_name; info.create = ndi_output_create; info.destroy = ndi_output_destroy;
+    info.start = ndi_output_start; info.stop = ndi_output_stop; info.raw_video = ndi_output_video; info.raw_audio = ndi_output_audio;
+    obs_register_output(&info); g_output_registered = true;
+}
+} // namespace
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_ndi_output_start(const char *name)
+{
+    obs_android_ndi_output_stop();
+    std::lock_guard<std::mutex> lock(g_ndi_output_mutex);
+    if (!obs_initialized()) return false;
+    obs_data_t *settings = obs_data_create(); obs_data_set_string(settings, "ndi_name", name && *name ? name : "OBS Android");
+    g_ndi_tool_output = obs_output_create("android_ndi_output", "android_ndi_tool_output", settings, nullptr);
+    obs_data_release(settings);
+    if (!g_ndi_tool_output) return false;
+    const bool started = obs_output_start(g_ndi_tool_output);
+    if (!started) { obs_output_release(g_ndi_tool_output); g_ndi_tool_output = nullptr; }
+    return started;
+}
+extern "C" __attribute__((visibility("default"))) void obs_android_ndi_output_stop()
+{
+    std::lock_guard<std::mutex> lock(g_ndi_output_mutex);
+    if (g_ndi_tool_output) {
+        if (obs_output_active(g_ndi_tool_output)) obs_output_stop(g_ndi_tool_output);
+        obs_output_release(g_ndi_tool_output); g_ndi_tool_output = nullptr;
+    }
+}
+extern "C" __attribute__((visibility("default"))) bool obs_android_ndi_output_status(char *out, size_t cap)
+{
+    if (!out || cap < 16) return false;
+    std::lock_guard<std::mutex> lock(g_ndi_output_mutex);
+    std::snprintf(out, cap, "{\"active\":%s}", g_ndi_tool_output && obs_output_active(g_ndi_tool_output) ? "true" : "false");
+    return true;
+}
+
 void android_ndi_register()
 {
     std::lock_guard<std::mutex> lock(g_ndi_mutex);
@@ -644,11 +782,13 @@ void android_ndi_register()
     info.get_properties = ndi_get_properties;
     info.icon_type = OBS_ICON_TYPE_MEDIA;
     obs_register_source(&info);
+    register_ndi_output();
     g_registered = true;
 }
 
 void android_ndi_shutdown()
 {
+    obs_android_ndi_output_stop();
     std::vector<NdiSourceInstance *> active;
     {
         std::lock_guard<std::mutex> lock(g_ndi_mutex);

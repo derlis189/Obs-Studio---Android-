@@ -6,6 +6,39 @@ import android.media.MediaFormat;
 import org.json.JSONObject;
 
 final class CodecSelector {
+    static String videoConfig(String json) {
+        JSONObject out = new JSONObject();
+        try {
+            JSONObject req = new JSONObject(json);
+            String mime = req.getString("mime");
+            int w = req.getInt("width"), h = req.getInt("height");
+            double fps = req.getDouble("fps");
+            int bitrate = req.getInt("bitrate");
+            int mode = req.getInt("mode");
+            String requested = req.optString("codec", "");
+            for (MediaCodecInfo codec : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+                if (!codec.isEncoder() || !codec.isHardwareAccelerated() || codec.isAlias()) continue;
+                if (!requested.isEmpty() && !"auto".equals(requested) && !requested.equals(codec.getName())) continue;
+                try {
+                    MediaCodecInfo.CodecCapabilities caps = codec.getCapabilitiesForType(mime);
+                    MediaCodecInfo.VideoCapabilities vc = caps.getVideoCapabilities();
+                    if (vc == null || !vc.areSizeAndRateSupported(w, h, fps) || !vc.getBitrateRange().contains(bitrate)) continue;
+                    boolean surface = false;
+                    for (int cf : caps.colorFormats) if (cf == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surface = true;
+                    if (!surface || !caps.getEncoderCapabilities().isBitrateModeSupported(mode)) continue;
+                    out.put("codec", codec.getName());
+                    out.put("max_instances", Math.max(1, caps.getMaxSupportedInstances()));
+                    out.put("hardware", true);
+                    return out.toString();
+                } catch (IllegalArgumentException ignored) { }
+            }
+            out.put("error", "No hay codificador hardware Surface compatible con la resolución, FPS, bitrate y modo seleccionados");
+        } catch (Exception e) {
+            try { out.put("error", "No se pudieron consultar las capacidades del codificador"); } catch (Exception ignored) { }
+        }
+        return out.toString();
+    }
+
     static JSONObject settings(String server, String key, int bitrate, int keyint) throws Exception {
         JSONObject result = new JSONObject();
         MediaCodecInfo[] codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();

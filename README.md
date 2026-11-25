@@ -27,7 +27,7 @@ Requiere Git, Android SDK 36, NDK `29.0.14206865`, JDK 21, Ninja y Gradle 8.13. 
 
 El APK queda en `android/app/build/outputs/apk/debug/app-debug.apk`. Instalar mediante `adb -s '<serial>' install -r <apk>` y abrir `org.obsandroid.port/.QtObsActivity`. En **Fuentes** se habilitan cámara/micrófono/pantalla; MediaProjection requiere consentimiento nuevo en el teléfono. Una vez habilitada pantalla + audio interno, `scripts/test-capture-device.ps1 -Serial '<serial>'` reproduce un tono y comprueba píxeles GPU y mezcla real. No transmite a ningún servidor.
 
-La ruta inicial de capturas usa buffers CPU hacia las fuentes asíncronas originales y composición GPU; todavía no implementa texturas externas/encoder de superficie sin copias. GLES 3.2 y las extensiones sRGB requeridas se verifican al arrancar. No se presupone compatibilidad universal entre fabricantes.
+Cámara, pantalla, presentación y codificación disponen de rutas GPU con AHardwareBuffer y MediaCodec Surface. Navegador y VTuber usan entregas acotadas y conservan las copias CPU necesarias; las rutas y sus límites están descritos en el informe de rendimiento. GLES 3.2 y las extensiones sRGB requeridas se verifican al arrancar. No se presupone compatibilidad universal entre fabricantes.
 
 ## OMT en Android ARM64
 
@@ -48,6 +48,7 @@ La compilación opcional incorpora la fuente y la salida de [OMT para OBS](https
 - Para SRT con datos móviles, usa **Caller** hacia un receptor alcanzable. **Listener** requiere un puerto UDP entrante accesible, algo que CGNAT generalmente impide.
 - Para Control Remoto, abre su diálogo QR desde Herramientas y conecta el navegador en la misma red al puerto TCP 4455. El diálogo permite volver a desactivar el acceso LAN. Usa una red de confianza, ya que el transporte es HTTP.
 - Para descubrir NDI, el teléfono y los emisores deben compartir una red que permita mDNS en UDP 5353. Importa el runtime ARM64 por separado desde el selector de la aplicación.
+- Para enviar el Programa por NDI, abre **Herramientas → Salida NDI en red…**, asigna el nombre visible y pulsa **Iniciar salida**. La función transmite video RGBA y audio estéreo. El runtime ARM64 importado debe incluir `NDIlib_send_create`, `NDIlib_send_send_video_v2` y `NDIlib_send_send_audio_v2`; un runtime únicamente receptor no basta. La salida se detiene desde ese mismo diálogo.
 - Concede permisos de cámara, micrófono, USB y captura de pantalla al activar las fuentes correspondientes.
 
 ## Reproducir la fase 1 en PowerShell
@@ -75,8 +76,9 @@ El resultado completo queda en `out/phase1/report.json`, con comandos y errores 
 - [Capturas y mezclador comprobados](docs/VERIFICACION-FASE4.md).
 - [Navegador GPU y video real de VDO.Ninja](docs/VERIFICACION-NAVEGADOR-VDO-NINJA.md).
 - [Ahorro térmico de capturas y vistas previas](docs/VERIFICACION-AHORRO-TERMICO.md).
+- [Rendimiento, codificadores compartidos y ciclo de vida](docs/VERIFICACION-RENDIMIENTO-2026-11-25.md).
 - [Director automático: plugin original y prueba Android](docs/VERIFICACION-DIRECTOR-AUTOMATICO.md).
 - [MediaCodec y RTMP comprobados](docs/VERIFICACION-FASE5.md).
 - [Licencias y distribución](docs/LICENCIAS.md).
 
-La interfaz actual controla el motor OBS dentro del proceso Android. Las fases siguientes incorporarán codificadores hardware y salidas originales, con pruebas independientes antes de avanzar.
+La interfaz actual controla el motor OBS dentro del proceso Android. Los informes documentan por separado implementación y pruebas observadas de cada ruta; los documentos de fases iniciales conservan su contexto histórico.

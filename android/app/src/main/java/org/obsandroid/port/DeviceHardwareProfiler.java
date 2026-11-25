@@ -377,7 +377,7 @@ final class DeviceHardwareProfiler {
             out.put("net_metered", netMetered);
 
             // Compute objective device performance tier (1..4)
-            boolean h264Hw = out.optBoolean("h264_hw", false);
+            boolean h264Hw = out.optBoolean("h264_hw", false) && out.optBoolean("h264_surface", false);
             boolean h264_1080p60 = out.optBoolean("h264_1080p60", false);
             boolean h264_1080p30 = out.optBoolean("h264_1080p30", false);
 
@@ -426,6 +426,7 @@ final class DeviceHardwareProfiler {
                         }
                     }
                 }
+                if (!surfaceOk) continue;
                 MediaCodecInfo.EncoderCapabilities ecaps = caps.getEncoderCapabilities();
                 boolean cbrOk = ecaps != null && ecaps.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
                 boolean vbrOk = ecaps != null && ecaps.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
@@ -433,6 +434,7 @@ final class DeviceHardwareProfiler {
                 out.put(prefix + "_hw", true);
                 out.put(prefix + "_codec", codec.getName());
                 out.put(prefix + "_surface", surfaceOk);
+                out.put(prefix + "_max_instances", caps.getMaxSupportedInstances());
                 out.put(prefix + "_cbr", cbrOk);
                 out.put(prefix + "_vbr", vbrOk);
                 out.put(prefix + "_max_w", vcaps.getSupportedWidths().getUpper());

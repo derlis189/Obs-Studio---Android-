@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 struct metrics { int frames, keys, first_y, last_y; int64_t samples; double start, end, key_time, max_key_gap, sumsq; int64_t values; };
 static int drain(AVCodecContext *decoder, AVStream *stream, struct metrics *m, AVFrame *frame) {
@@ -33,7 +34,12 @@ static int drain(AVCodecContext *decoder, AVStream *stream, struct metrics *m, A
     return result == AVERROR(EAGAIN) || result == AVERROR_EOF ? 0 : result;
 }
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    const int generic = argc == 6 && strcmp(argv[2], "--generic") == 0;
+    if (argc != 2 && !generic) return 2;
+    const int expected_width = generic ? atoi(argv[3]) : 1280;
+    const int expected_height = generic ? atoi(argv[4]) : 720;
+    const double minimum_seconds = generic ? atof(argv[5]) : 0;
+    if (generic && (expected_width <= 0 || expected_height <= 0 || minimum_seconds <= 0)) return 2;
     av_log_set_level(AV_LOG_ERROR);
     AVFormatContext *input = NULL;
     if (avformat_open_input(&input, argv[1], NULL, NULL) < 0 || avformat_find_stream_info(input, NULL) < 0) { fprintf(stderr, "Cannot open received media\n"); return 3; }
@@ -60,6 +66,12 @@ int main(int argc, char **argv) {
     int pass = decoders[0]->codec_id == AV_CODEC_ID_H264 && decoders[1]->codec_id == AV_CODEC_ID_AAC &&
         width == 1280 && height == 720 && rate == 48000 && channels == 2 && stats[0].frames > 500 && stats[1].samples > 900000 &&
         stats[0].keys >= 8 && stats[0].max_key_gap < 2.2 && abs(stats[0].last_y - stats[0].first_y) > 15 && fabs(vd-ad) < .5 && !errors;
+    if (generic) {
+        pass = decoders[0]->codec_id == AV_CODEC_ID_H264 && decoders[1]->codec_id == AV_CODEC_ID_AAC &&
+            width == expected_width && height == expected_height && rate == 48000 && channels == 2 &&
+            vd >= minimum_seconds && ad >= minimum_seconds && stats[0].frames >= minimum_seconds * 20 &&
+            stats[0].keys >= 2 && stats[0].max_key_gap < 2.2 && fabs(vd-ad) < .5 && !errors;
+    }
     printf("{\"pass\":%s,\"video_frames\":%d,\"width\":%d,\"height\":%d,\"video_duration\":%.3f,\"keyframes\":%d,\"max_keyframe_gap\":%.3f,\"first_y\":%d,\"last_y\":%d,\"audio_samples\":%lld,\"audio_rate\":%d,\"audio_channels\":%d,\"audio_duration\":%.3f,\"audio_rms\":%.7f,\"decode_errors\":%d}\n",
         pass ? "true" : "false", stats[0].frames,width,height,vd,stats[0].keys,stats[0].max_key_gap,stats[0].first_y,stats[0].last_y,(long long)stats[1].samples,rate,channels,ad,stats[1].values ? sqrt(stats[1].sumsq/stats[1].values) : 0,errors);
     av_frame_free(&frame); av_packet_free(&packet); for (int i=0;i<2;++i) avcodec_free_context(&decoders[i]); avformat_close_input(&input);

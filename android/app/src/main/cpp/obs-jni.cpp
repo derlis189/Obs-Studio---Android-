@@ -1,3 +1,4 @@
+#include "android-session-gate.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <jni.h>
 #include <obs.h>
@@ -48,6 +49,8 @@ Java_org_obsandroid_port_NativeBridge_inspectCore(JNIEnv *env, jclass, jstring f
 extern "C" JNIEXPORT jint JNICALL
 Java_org_obsandroid_port_NativeBridge_targetVideoFps(JNIEnv *, jclass)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return 0;
     obs_video_info ovi{};
     if (obs_initialized() && obs_get_video_info(&ovi) && ovi.fps_num > 0 && ovi.fps_den > 0) {
         int fps = int(ovi.fps_num / ovi.fps_den);

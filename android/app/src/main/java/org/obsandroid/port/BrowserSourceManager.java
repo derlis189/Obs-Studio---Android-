@@ -31,6 +31,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.ConsoleMessage;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceError;
@@ -38,6 +39,9 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
+import androidx.webkit.WebMessageCompat;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -53,6 +57,7 @@ public final class BrowserSourceManager {
     private static final Handler sMain = new Handler(Looper.getMainLooper());
     private static final Map<Long, BrowserInstance> sInstances = new HashMap<>();
     private static volatile int sThermalFpsCap = 60;
+    private static String audioScript;
     private static final HandlerThread sCaptureThread = new HandlerThread("OBS-BrowserCapture");
     private static final Handler sCapture;
     static {
@@ -64,7 +69,6 @@ public final class BrowserSourceManager {
         final long id;
         WebView webView;
         Bitmap bitmap;
-        ByteBuffer rgbaBuffer;
         Presentation presentation;
         FrameLayout presentationRoot;
         VirtualDisplay virtualDisplay;
@@ -84,11 +88,14 @@ public final class BrowserSourceManager {
         int height = 720;
         int fps = 30;
         boolean transparent = true;
+        volatile boolean captureAudio;
+        PageAudioBridge audioBridge;
         volatile boolean visible = true;
         volatile boolean interacting = false;
         boolean pausePageWhenHidden;
         volatile boolean destroyed = false;
         Dialog interactDialog;
+        Runnable onPageReady;
 
         final Runnable tickRunnable = new Runnable() {
             @Override
@@ -108,7 +115,7 @@ public final class BrowserSourceManager {
             this.id = id;
         }
 
-        boolean captureActive() { return visible || interacting; }
+        boolean captureActive() { return id > 0 && (visible || interacting); }
 
         void markFrameChanged() {
             frameGate.changed();
@@ -121,10 +128,14 @@ public final class BrowserSourceManager {
         }
 
         void updateVisibility() {
-            boolean active = captureActive();
+            boolean active = visible || interacting;
             if (webView != null) {
                 if (active || !pausePageWhenHidden) webView.onResume();
                 else webView.onPause();
+            }
+            if (webView != null && captureAudio) {
+                webView.evaluateJavascript("if(window.__obsAudioCapture)window.__obsAudioCapture.context."
+                    + (active ? "resume" : "suspend") + "().catch(function(){});", null);
             }
             if (presentation != null) {
                 if (visible && !interacting) presentation.show();
@@ -142,7 +153,7 @@ public final class BrowserSourceManager {
         void ensureBuffers(int w, int h) {
             int cw = Math.max(64, Math.min(3840, w));
             int ch = Math.max(64, Math.min(2160, h));
-            if (bitmap != null && bitmap.getWidth() == cw && bitmap.getHeight() == ch && rgbaBuffer != null) {
+            if (bitmap != null && bitmap.getWidth() == cw && bitmap.getHeight() == ch) {
                 return;
             }
             if (bitmap != null) {
@@ -150,7 +161,6 @@ public final class BrowserSourceManager {
                 bitmap = null;
             }
             bitmap = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888);
-            rgbaBuffer = ByteBuffer.allocateDirect(cw * ch * 4);
             width = cw;
             height = ch;
         }
@@ -158,7 +168,6 @@ public final class BrowserSourceManager {
         void releaseBuffers() {
             if (bitmap != null) bitmap.recycle();
             bitmap = null;
-            rgbaBuffer = null;
         }
 
         void releasePresentation() {
@@ -271,7 +280,6 @@ public final class BrowserSourceManager {
                         webView.getWidth() <= 0 || webView.getHeight() <= 0) return;
                 ensureBuffers(width, height);
                 final Bitmap frameBitmap = bitmap;
-                final ByteBuffer frameBuffer = rgbaBuffer;
                 int[] location = new int[2];
                 webView.getLocationInWindow(location);
                 Rect rect = new Rect(location[0], location[1], location[0] + webView.getWidth(),
@@ -284,10 +292,9 @@ public final class BrowserSourceManager {
                 PixelCopy.request(target, rect, frameBitmap, result -> {
                     try {
                         if (!destroyed && captureActive() && result == PixelCopy.SUCCESS) {
-                            frameBuffer.clear();
-                            frameBitmap.copyPixelsToBuffer(frameBuffer);
-                            NativeBridge.pushBrowserFrame(id, frameBuffer, frameBitmap.getWidth(),
-                                frameBitmap.getHeight(), System.nanoTime());
+                            boolean accepted = id < 0 ? NativeBridge.pushVtuberBitmap(-id, frameBitmap)
+                                : NativeBridge.pushBrowserBitmap(id, frameBitmap);
+                            if (!accepted) return;
                             frameGate.delivered(copiedRevision);
                             ++capturedFrames;
                             long now = SystemClock.uptimeMillis();
@@ -355,6 +362,25 @@ public final class BrowserSourceManager {
             // interaction WebView belongs to the main dialog's window instead.
             if (inst.interacting) inst.markFrameChanged();
         });
+        if (inst.id < 0 && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+                && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)) {
+            String origin = "http://127.0.0.1:" + WebRemoteServer.getPort();
+            WebViewCompat.addWebMessageListener(wv, "ObsVtuberFrames", java.util.Collections.singleton(origin),
+                (view, message, sourceOrigin, mainFrame, reply) -> {
+                    if (inst.destroyed || !inst.visible || !mainFrame || !origin.equals(sourceOrigin.toString())
+                            || message.getType() != WebMessageCompat.TYPE_ARRAY_BUFFER) { reply.postMessage("drop"); return; }
+                    byte[] bytes = message.getArrayBuffer();
+                    if (bytes.length >= 16 && bytes.length <= 1280 * 1280 * 4 + 16) {
+                        java.nio.ByteBuffer header = java.nio.ByteBuffer.wrap(bytes, 0, 16).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                        int magic = header.getInt(), w = header.getInt(), h = header.getInt(), flip = header.getInt();
+                        if (magic == 0x4f425352 && w > 0 && h > 0 && w <= 1280 && h <= 1280
+                                && bytes.length == w * h * 4 + 16) {
+                            NativeBridge.pushVtuberArray(-inst.id, bytes, 16, w, h, flip != 0);
+                        }
+                    }
+                    reply.postMessage("ok"); // One frame in flight, including the JNI handoff.
+                });
+        }
         wv.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -365,6 +391,8 @@ public final class BrowserSourceManager {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 inst.injectCustomCss();
+                if (inst.captureAudio && audioScript != null) view.evaluateJavascript(audioScript, null);
+                if (inst.onPageReady != null) inst.onPageReady.run();
             }
 
             @Override
@@ -391,7 +419,7 @@ public final class BrowserSourceManager {
     }
 
     public static void createOrUpdate(long id, String url, int width, int height, int fps,
-                                      boolean transparent, String customCss, boolean visible, boolean pausePageWhenHidden) {
+                                      boolean transparent, String customCss, boolean visible, boolean pausePageWhenHidden, boolean captureAudio) {
         sMain.post(() -> {
             QtObsActivity activity = QtObsActivity.getActiveInstance();
             if (activity == null || activity.isFinishing()) return;
@@ -404,17 +432,29 @@ public final class BrowserSourceManager {
             inst.width = Math.max(64, Math.min(3840, width));
             inst.height = Math.max(64, Math.min(2160, height));
             inst.fps = Math.max(1, Math.min(60, fps));
+            boolean audioChanged = inst.captureAudio != captureAudio;
+            inst.captureAudio = captureAudio;
             inst.transparent = transparent;
             inst.visible = visible;
             inst.pausePageWhenHidden = pausePageWhenHidden;
             boolean cssChanged = (customCss != null && !customCss.equals(inst.customCss));
             inst.customCss = customCss != null ? customCss : "";
             String targetUrl = (url != null && !url.isEmpty()) ? url : "about:blank";
-            boolean urlChanged = isNew || !targetUrl.equals(inst.url);
+            boolean urlChanged = isNew || audioChanged || !targetUrl.equals(inst.url);
             inst.url = targetUrl;
 
+            if (audioScript == null) {
+                try (java.io.InputStream input = activity.getAssets().open("browser-audio.js")) {
+                    java.io.ByteArrayOutputStream scriptBytes = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[4096]; int count;
+                    while ((count = input.read(chunk)) != -1) scriptBytes.write(chunk, 0, count);
+                    audioScript = scriptBytes.toString("UTF-8");
+                } catch (java.io.IOException error) { Log.w(TAG, "Browser audio script unavailable"); }
+            }
             if (inst.webView == null) {
                 inst.webView = createConfiguredWebView(activity, inst);
+                inst.audioBridge = new PageAudioBridge(inst);
+                inst.webView.addJavascriptInterface(inst.audioBridge, "ObsPageAudio");
             } else {
                 inst.webView.setBackgroundColor(inst.transparent ? Color.TRANSPARENT : Color.WHITE);
             }
@@ -424,12 +464,24 @@ public final class BrowserSourceManager {
 
             if (urlChanged) {
                 Log.i(TAG, "Loading browser source id=" + id + " (" + inst.width + "x" + inst.height + " @" + inst.fps + "fps) host=" + Uri.parse(targetUrl).getHost());
+                inst.audioBridge.reset();
                 inst.webView.loadUrl(targetUrl);
             } else if (cssChanged) {
                 inst.injectCustomCss();
             }
 
             inst.updateVisibility();
+        });
+    }
+
+    // Negative IDs reserve an independent namespace for the local VTuber renderer.
+    static void createVtuber(long id, String url, int width, int height, int fps,
+                             java.util.function.Consumer<WebView> ready) {
+        createOrUpdate(-id, url, width, height, fps, true, "", true, true, false);
+        sMain.post(() -> {
+            BrowserInstance inst = sInstances.get(-id);
+            if (inst == null || inst.destroyed) return;
+            inst.onPageReady = () -> ready.accept(inst.webView);
         });
     }
 
@@ -587,6 +639,36 @@ public final class BrowserSourceManager {
                 destroy(id);
             }
         });
+    }
+
+    // The page receives only a bounded PCM sink for its own source: no files,
+    // navigation, credentials, or application control are exposed to JavaScript.
+    private static final class PageAudioBridge {
+        final BrowserInstance instance;
+        long base, frames, lastDelivery, nextAllowed;
+        int previousRate;
+        PageAudioBridge(BrowserInstance instance) { this.instance = instance; }
+        synchronized void reset() { base = frames = lastDelivery = nextAllowed = 0; }
+        @JavascriptInterface public synchronized void pcm(String encoded, int sampleRate, int channels) {
+            if (!instance.captureAudio || instance.destroyed || !instance.captureActive() || instance.id <= 0
+                    || encoded == null || encoded.length() > 12000 || sampleRate < 8000 || sampleRate > 96000
+                    || channels < 1 || channels > 2) return;
+            try {
+                byte[] pcm = Base64.decode(encoded, Base64.DEFAULT);
+                if (pcm.length < 128 || pcm.length > 8192 || pcm.length % (channels * 2) != 0) return;
+                long now = System.nanoTime();
+                if (now + 100_000_000L < nextAllowed) return;
+                int count = pcm.length / (channels * 2);
+                long duration = count * 1_000_000_000L / sampleRate;
+                nextAllowed = Math.max(now - 100_000_000L, nextAllowed) + duration;
+                if (base == 0 || sampleRate != previousRate || now - lastDelivery > 250_000_000L) {
+                    base = now - duration; frames = 0; previousRate = sampleRate;
+                }
+                long timestamp = base + frames * 1_000_000_000L / sampleRate;
+                NativeBridge.pushBrowserAudio(instance.id, pcm, channels, sampleRate, timestamp);
+                frames += count; lastDelivery = now;
+            } catch (IllegalArgumentException ignored) { }
+        }
     }
 
     private BrowserSourceManager() {}

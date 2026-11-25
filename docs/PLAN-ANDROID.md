@@ -1,6 +1,6 @@
 # Plan de adaptación por fases
 
-Este es el plan de implementación, separado del código ya entregado. La fase 1 está validada; las fases 2–9 no se han iniciado. No se eliminan funciones del motor por no estar en el objetivo mínimo: se habilitarán conforme se comprueben sus dependencias y adaptadores.
+Este documento conserva el plan inicial y sus criterios por fase. El estado de implementación y la evidencia posterior están en los informes `VERIFICACION-FASE*.md`; para los ajustes actuales de recursos y estabilidad, consulta [rendimiento y ciclo de vida](VERIFICACION-RENDIMIENTO-2026-11-25.md). Las descripciones de trabajo previsto de las fases iniciales no representan el estado actual del port.
 
 ## Fase 1 — entregada
 

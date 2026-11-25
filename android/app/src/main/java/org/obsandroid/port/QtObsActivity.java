@@ -349,6 +349,26 @@ public final class QtObsActivity extends QtActivity {
         }
     }
 
+    // Runs from Qt. Native deliveries are already gated; UI cleanup must not block Qt.
+    public static void onNativeShutdown() {
+        Context ctx = sAppCtx;
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            FloatingSceneOverlay.hide();
+            ThermalController.stop();
+            VtuberSourceManager.destroyAll();
+            BrowserSourceManager.destroyAll();
+            LiveGraphicsManager.destroyAll();
+            CustomBrowserDockManager.destroyAll();
+            FaceTrackerManager.stopBackgroundFrontCamera();
+            FaceTrackerManager.stopVmcReceiver();
+            NdiDiscoveryManager.stopDiscovery();
+            WebRemoteServer.stop();
+            if (ctx != null) ctx.stopService(new Intent(ctx, CaptureService.class));
+        });
+    }
+
+    public static String getVideoCodecConfigJson(String request) { return CodecSelector.videoConfig(request); }
+
     public static String getDeviceHardwareProfileJson() {
         Context ctx = sAppCtx != null ? sAppCtx : sInstance;
         return DeviceHardwareProfiler.collectJson(ctx);
@@ -381,10 +401,18 @@ public final class QtObsActivity extends QtActivity {
                 }
             } catch (Throwable ignored) {}
         }
-        return String.format(Locale.US,
-            "{\"thermal\":%d,\"temp_c\":%.1f,\"battery\":%d,\"charging\":%s,\"preview_fps_limit\":%d,\"browser_fps_limit\":%d}",
-            thermal, tempC, battery, charging ? "true" : "false",
-            ThermalController.previewFpsLimit(), ThermalController.browserFpsLimit());
+        org.json.JSONObject result = new org.json.JSONObject();
+        try {
+            result.put("thermal", thermal); result.put("temp_c", tempC);
+            result.put("battery", battery); result.put("charging", charging);
+            result.put("preview_fps_limit", ThermalController.previewFpsLimit());
+            result.put("browser_fps_limit", ThermalController.browserFpsLimit());
+            float headroom = ThermalController.thermalHeadroom();
+            if (Float.isFinite(headroom)) result.put("thermal_headroom", headroom);
+            result.put("java_heap_mb", (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / 1048576);
+            result.put("native_heap_mb", android.os.Debug.getNativeHeapAllocatedSize() / 1048576);
+        } catch (org.json.JSONException ignored) { }
+        return result.toString();
     }
 
     public static void pickNdiLibrary() {
@@ -420,6 +448,8 @@ public final class QtObsActivity extends QtActivity {
     public static void vtuberCreateOrUpdate(long id, String configJson, int width, int height, int fps) {
         VtuberSourceManager.createOrUpdate(id, configJson, width, height, fps);
     }
+
+    public static void vtuberSetVisible(long id, boolean visible) { VtuberSourceManager.setVisible(id, visible); }
 
     public static void vtuberDestroy(long id) {
         VtuberSourceManager.destroy(id);
@@ -1139,6 +1169,7 @@ public final class QtObsActivity extends QtActivity {
 
     @Override
     protected void onDestroy() {
+        if (isFinishing()) NativeBridge.quiesceCallbacks();
         try { NativeBridge.saveAllState(); } catch (Throwable ignored) {}
         LiveGraphicsManager.saveState();
         FloatingSceneOverlay.hide();

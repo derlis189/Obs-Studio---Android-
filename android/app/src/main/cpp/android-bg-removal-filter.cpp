@@ -1,3 +1,4 @@
+#include "android-session-gate.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "android-bg-removal-filter.h"
 #include <obs-module.h>
@@ -762,6 +763,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_pushBgMask(JNIEnv *env, jclass, jlong instanceId,
 						 jbyteArray maskBytes, jint width, jint height)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
 	if (!maskBytes || width <= 0 || height <= 0)
 		return;
 	jsize len = env->GetArrayLength(maskBytes);

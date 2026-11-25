@@ -16,11 +16,31 @@
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
+#include <util/platform.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+extern "C" bool obs_android_select_video_codec(const char *, char *, size_t);
 namespace {
+std::mutex codec_budget_mutex;
+std::unordered_map<std::string, int> active_codec_counts;
+std::atomic<int> active_surface_codecs{0};
+std::atomic<int> active_buffer_codecs{0};
+std::atomic<uint64_t> surface_frames{0}, cpu_frames{0}, encode_ns{0}, encode_calls{0}, encode_max_ns{0};
+struct EncodeTiming {
+    uint64_t start{os_gettime_ns()};
+    ~EncodeTiming() {
+        uint64_t elapsed = os_gettime_ns() - start;
+        encode_ns.fetch_add(elapsed, std::memory_order_relaxed);
+        encode_calls.fetch_add(1, std::memory_order_relaxed);
+        auto old = encode_max_ns.load();
+        while (elapsed > old && !encode_max_ns.compare_exchange_weak(old, elapsed)) {}
+    }
+};
+
 #ifndef EGL_RECORDABLE_ANDROID
 #define EGL_RECORDABLE_ANDROID 0x3142
 #endif
@@ -116,6 +136,9 @@ struct Encoder {
     std::atomic<int32_t> pending_bitrate_kbps{0};
     std::string codec_name;
     bool hardware{true};
+    bool budget_reserved{false};
+    bool counted_surface{false};
+    bool counted_buffer{false};
     std::vector<uint8_t> extra, packet;
     std::deque<QueuedPacket> output_queue;
     std::atomic<bool> extra_ready{};
@@ -184,6 +207,14 @@ struct Encoder {
             AMediaCodec_delete(codec);
             codec = nullptr;
         }
+        if (budget_reserved) {
+            std::lock_guard<std::mutex> lock(codec_budget_mutex);
+            auto it = active_codec_counts.find(codec_name);
+            if (it != active_codec_counts.end() && --it->second <= 0) active_codec_counts.erase(it);
+            budget_reserved = false;
+        }
+        if (counted_surface) { --active_surface_codecs; counted_surface = false; }
+        if (counted_buffer) { --active_buffer_codecs; counted_buffer = false; }
         started = false;
         output_queue.clear();
         extra.clear();
@@ -258,9 +289,30 @@ struct Encoder {
         if (!resolve_video_params()) return fail("Invalid encoder video dimensions");
 
         const char *mime = mime_type();
+        nlohmann::json req{{"mime", mime}, {"width", width}, {"height", height},
+            {"fps", double(fps_num) / std::max(1u, fps_den)}, {"bitrate", bitrate_kbps * 1000},
+            {"mode", bitrate_mode}, {"codec", codec_name}};
+        char selected[1024] = {};
+        if (!obs_android_select_video_codec(req.dump().c_str(), selected, sizeof(selected)))
+            return fail("No se pudieron verificar las capacidades MediaCodec de Android");
+        auto choice = nlohmann::json::parse(selected, nullptr, false);
+        if (choice.is_discarded() || !choice.contains("codec"))
+            return fail("No hay códec hardware Surface compatible con los ajustes seleccionados");
+        codec_name = choice.value("codec", "");
+        const int limit = choice.value("max_instances", 1);
+        {
+            std::lock_guard<std::mutex> lock(codec_budget_mutex);
+            int &count = active_codec_counts[codec_name];
+            if (count >= limit) return fail("Límite de codificadores simultáneos alcanzado; comparte la salida o reduce destinos independientes");
+            ++count;
+            budget_reserved = true;
+        }
+        blog(LOG_INFO, "[android-encoder] Verified hardware codec %s; Surface %ux%u; concurrency hint=%d", codec_name.c_str(), width, height, limit);
         if (!codec_name.empty()) codec = AMediaCodec_createCodecByName(codec_name.c_str());
-        if (!codec) codec = AMediaCodec_createEncoderByType(mime);
-        if (!codec) return fail("AMediaCodec creation failed (surface)");
+        if (!codec) {
+            reset_codec(); // Release the concurrency reservation before a later retry.
+            return fail("No se pudo crear el codificador hardware verificado (recursos no disponibles)");
+        }
 
         AMediaFormat *format = AMediaFormat_new();
         AMediaFormat_setString(format, "mime", mime);
@@ -379,6 +431,8 @@ struct Encoder {
 
         eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         surface_mode = true;
+        counted_surface = true;
+        ++active_surface_codecs;
         blog(LOG_INFO, "MediaCodec ZERO-COPY GPU Surface active: %s %ux%u@%ufps bitrate=%dkbps mode=%d (%s)",
              mime_type(), width, height, fps_num / std::max(1u, fps_den), bitrate_kbps, bitrate_mode,
              codec_name.empty() ? (hevc ? "default-hevc" : "default-avc") : codec_name.c_str());
@@ -443,6 +497,7 @@ struct Encoder {
         if (!audio) read_input_layout();
         started = true;
         surface_mode = false;
+        if (!audio) { counted_buffer = true; ++active_buffer_codecs; }
         return true;
     }
 
@@ -560,7 +615,13 @@ void *create(obs_data_t *settings, obs_encoder_t *obs) {
 
 bool update(void *data, obs_data_t *settings) {
     auto &encoder = *static_cast<Encoder *>(data);
-    encoder.apply_settings(settings);
+    // OBS serializes encoder initialization, but live bitrate updates can arrive
+    // from an output's networking thread while MediaCodec is encoding.
+    if (obs_encoder_active(encoder.obs)) {
+        const int64_t bitrate = obs_data_get_int(settings, "bitrate");
+        if (!encoder.audio && bitrate > 0 && bitrate <= 1000000)
+            encoder.pending_bitrate_kbps.store(int32_t(bitrate), std::memory_order_release);
+    } else encoder.apply_settings(settings);
     return true;
 }
 
@@ -586,6 +647,7 @@ bool extra_data(void *data, uint8_t **extra, size_t *size) {
 bool encode_texture2(void *data, struct encoder_texture *texture, int64_t pts, uint64_t, uint64_t *,
                      struct encoder_packet *packet, bool *received)
 {
+    EncodeTiming timing;
     auto &encoder = *static_cast<Encoder *>(data);
     *received = false;
     if (!texture || !texture->tex[0] || !texture->tex[1]) return true;
@@ -671,12 +733,14 @@ bool encode_texture2(void *data, struct encoder_texture *texture, int64_t pts, u
     if (!swapped) {
         return encoder.fail("eglSwapBuffers failed on MediaCodec Surface");
     }
+    ++surface_frames;
 
     if (!encoder.drain_outputs(encoder.output_queue.empty() ? 2000 : 0)) return false;
     return encoder.pop_output_packet(packet, received);
 }
 
 bool encode(void *data, encoder_frame *frame, encoder_packet *packet, bool *received) {
+    EncodeTiming timing;
     auto &encoder = *static_cast<Encoder *>(data); *received = false;
     if (!frame) return true;
     if (encoder.started && !encoder.audio) {
@@ -738,6 +802,7 @@ bool encode(void *data, encoder_frame *frame, encoder_packet *packet, bool *rece
     }
     int64_t pts_us = encoder.audio ? frame->pts * 1000000 / encoder.rate : frame->pts * 1000000 / encoder.fps_num;
     if (AMediaCodec_queueInputBuffer(encoder.codec, input, 0, bytes, pts_us, 0) != AMEDIA_OK) return encoder.fail("MediaCodec queueInputBuffer failed");
+    if (!encoder.audio) ++cpu_frames;
 
     if (!encoder.drain_outputs(encoder.output_queue.empty() ? 2000 : 0)) return false;
     return encoder.pop_output_packet(packet, received);
@@ -836,4 +901,17 @@ void android_encoders_register() {
     audio.get_defaults = audio_defaults;
     audio.get_properties = audio_properties;
     obs_register_encoder(&audio);
+}
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_encoder_stats(char *out, size_t capacity)
+{
+    if (!out || !capacity) return false;
+    const uint64_t calls = encode_calls.load();
+    auto json = nlohmann::json{{"active_surface_codecs", active_surface_codecs.load()},
+        {"active_cpu_video_codecs", active_buffer_codecs.load()}, {"surface_frames", surface_frames.load()},
+        {"cpu_video_frames", cpu_frames.load()}, {"encode_avg_ms", calls ? double(encode_ns.load()) / calls / 1e6 : 0.0},
+        {"encode_max_ms", double(encode_max_ns.load()) / 1e6}}.dump();
+    if (json.size() >= capacity) return false;
+    std::memcpy(out, json.c_str(), json.size() + 1);
+    return true;
 }

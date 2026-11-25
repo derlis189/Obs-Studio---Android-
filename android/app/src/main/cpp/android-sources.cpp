@@ -1,3 +1,4 @@
+#include "android-session-gate.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "android-sources.h"
 #include "android-uvc.h"
@@ -1136,6 +1137,8 @@ Java_org_obsandroid_port_NativeBridge_registerCaptureHost(JNIEnv *env, jclass, j
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_obsandroid_port_NativeBridge_enableCapture(JNIEnv *, jclass, jint kind, jboolean enabled)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return false;
     if (kind < 0 || kind >= kNumCaptureKinds) return false;
     std::unique_lock<std::mutex> guard(source_mutex);
     auto &capture = captures[kind];
@@ -1180,6 +1183,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_cameraHardwareBuffer(JNIEnv *env, jclass, jobject buffer,
     jint width, jint height, jlong timestamp, jint rotation, jboolean mirror)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (!buffer) return;
     AHardwareBuffer *ahb = AHardwareBuffer_fromHardwareBuffer(env, buffer);
     if (!ahb) return;
@@ -1190,6 +1195,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_screenHardwareBuffer(JNIEnv *env, jclass, jobject buffer,
     jint width, jint height, jlong timestamp)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (!buffer) return;
     AHardwareBuffer *ahb = AHardwareBuffer_fromHardwareBuffer(env, buffer);
     if (!ahb) return;
@@ -1201,6 +1208,8 @@ Java_org_obsandroid_port_NativeBridge_cameraFrame(JNIEnv *env, jclass, jobject y
     jint y_stride, jint u_stride, jint v_stride, jint u_pixel_stride, jint v_pixel_stride,
     jint width, jint height, jlong timestamp, jint rotation, jboolean mirror, jboolean full_range, jboolean rec709)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || width % 2 || height % 2) return;
     uint8_t *planes[] = {static_cast<uint8_t *>(env->GetDirectBufferAddress(y)), static_cast<uint8_t *>(env->GetDirectBufferAddress(u)), static_cast<uint8_t *>(env->GetDirectBufferAddress(v))};
     jlong capacities[] = {env->GetDirectBufferCapacity(y), env->GetDirectBufferCapacity(u), env->GetDirectBufferCapacity(v)};
@@ -1275,6 +1284,8 @@ Java_org_obsandroid_port_NativeBridge_cameraFrame(JNIEnv *env, jclass, jobject y
 extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_screenFrame(JNIEnv *env, jclass, jobject rgba, jint stride, jint width, jint height, jlong timestamp)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (width <= 0 || height <= 0 || stride < width * 4) return;
     auto *pixels = static_cast<uint8_t *>(env->GetDirectBufferAddress(rgba));
     if (!pixels || int64_t(height - 1) * stride + int64_t(width) * 4 > env->GetDirectBufferCapacity(rgba)) return;
@@ -1322,6 +1333,8 @@ Java_org_obsandroid_port_NativeBridge_screenFrame(JNIEnv *env, jclass, jobject r
 extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_audioFrame(JNIEnv *env, jclass, jint kind, jobject pcm, jint bytes, jint channels, jint sample_rate, jlong timestamp)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (kind != 1 && kind != 3) return;
     if (bytes <= 0 || channels < 1 || channels > 2 || bytes % (2 * channels)) return;
     const auto *samples = static_cast<const int16_t *>(env->GetDirectBufferAddress(pcm));
@@ -1398,6 +1411,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_audioFrameForDevice(
     JNIEnv *env, jclass, jstring jDeviceSpec, jobject pcm, jint bytes, jint channels, jint sample_rate, jlong timestamp)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (bytes <= 0 || channels < 1 || channels > 2 || bytes % (2 * channels)) return;
     const auto *samples = static_cast<const int16_t *>(env->GetDirectBufferAddress(pcm));
     if (!samples || bytes > env->GetDirectBufferCapacity(pcm)) return;
@@ -1475,6 +1490,8 @@ Java_org_obsandroid_port_NativeBridge_audioFrameForDevice(
 extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_captureGain(JNIEnv *, jclass, jint kind, jfloat gain, jboolean mute)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (kind < 0 || kind >= kNumCaptureKinds) return;
     std::vector<obs_source_t *> targets;
     {

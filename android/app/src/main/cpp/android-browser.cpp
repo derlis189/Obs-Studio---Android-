@@ -1,3 +1,5 @@
+#include "android-session-gate.h"
+#include "android-rgba-frame.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "android-browser.h"
 #include <obs-module.h>
@@ -24,6 +26,7 @@ std::atomic<int64_t> g_browser_id_seq{0};
 bool g_browser_registered = false;
 
 struct BrowserSourceInstance {
+    AndroidRgbaFrame frame;
     int64_t id{};
     obs_source_t *source{};
     bool is_local_file{false};
@@ -34,6 +37,7 @@ struct BrowserSourceInstance {
     int height{720};
     int fps{30};
     bool transparent{true};
+    bool capture_audio{false};
     bool shutdown_when_hidden{false};
     bool showing{true};
 };
@@ -108,7 +112,7 @@ void push_config_to_java(const BrowserSourceInstance *inst)
         cls, mid,
         jlong(inst->id), jUrl,
         jint(inst->width), jint(inst->height), jint(inst->fps),
-        jboolean(inst->transparent), jCss, jboolean(visible), jboolean(inst->shutdown_when_hidden));
+        jboolean(inst->transparent), jCss, jboolean(visible), jboolean(inst->shutdown_when_hidden), jboolean(inst->capture_audio));
     if (guard.env->ExceptionCheck()) guard.env->ExceptionClear();
     guard.env->DeleteLocalRef(jUrl);
     guard.env->DeleteLocalRef(jCss);
@@ -160,6 +164,7 @@ void browser_get_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, "height", 720);
     obs_data_set_default_int(settings, "fps", 30);
     obs_data_set_default_bool(settings, "transparent", true);
+    obs_data_set_default_bool(settings, "capture_audio", false);
     obs_data_set_default_string(
         settings, "css",
         "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
@@ -209,6 +214,8 @@ obs_properties_t *browser_get_properties(void *data)
     obs_properties_add_int(props, "height", "Alto", 64, 2160, 1);
     obs_properties_add_int(props, "fps", "FPS", 1, 60, 1);
     obs_properties_add_bool(props, "transparent", "Fondo transparente (RGBA)");
+    obs_properties_add_bool(props, "capture_audio", "Capturar audio de esta página (Web Audio)");
+    obs_properties_add_text(props, "audio_help", "Audio HTML5 y WebRTC accesible a la página. Los medios de otro origen necesitan permiso CORS. Evita duplicarlo con Audio interno.", OBS_TEXT_INFO);
     obs_properties_add_text(props, "css", "CSS personalizado", OBS_TEXT_MULTILINE);
     obs_properties_add_bool(props, "shutdown", "Pausar también la página cuando no esté visible");
     obs_properties_add_text(props, "capture_savings",
@@ -242,6 +249,7 @@ void apply_settings(BrowserSourceInstance *inst, obs_data_t *settings)
     if (inst->height < 64) inst->height = 720;
     if (inst->fps < 1) inst->fps = 30;
     inst->transparent = obs_data_get_bool(settings, "transparent");
+    inst->capture_audio = obs_data_get_bool(settings, "capture_audio");
     inst->shutdown_when_hidden = obs_data_get_bool(settings, "shutdown");
 }
 
@@ -260,7 +268,6 @@ void *browser_create(obs_data_t *settings, obs_source_t *source)
     inst->source = source;
     inst->showing = obs_source_showing(source);
     apply_settings(inst, settings);
-    obs_source_set_async_unbuffered(source, true);
     {
         std::lock_guard<std::mutex> lock(g_browser_mutex);
         g_instances[inst->id] = inst;
@@ -307,7 +314,7 @@ void android_browser_register()
     obs_source_info info{};
     info.id = "browser_source";
     info.type = OBS_SOURCE_TYPE_INPUT;
-    info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE;
+    info.output_flags = OBS_SOURCE_AUDIO | OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_SRGB | OBS_SOURCE_DO_NOT_DUPLICATE;
     info.get_name = browser_get_name;
     info.create = browser_create;
     info.destroy = browser_destroy;
@@ -316,6 +323,9 @@ void android_browser_register()
     info.get_properties = browser_get_properties;
     info.show = browser_show;
     info.hide = browser_hide;
+    info.get_width = [](void *data) -> uint32_t { auto *inst = static_cast<BrowserSourceInstance *>(data); return inst->frame.width() ? inst->frame.width() : uint32_t(inst->width); };
+    info.get_height = [](void *data) -> uint32_t { auto *inst = static_cast<BrowserSourceInstance *>(data); return inst->frame.height() ? inst->frame.height() : uint32_t(inst->height); };
+    info.video_render = [](void *data, gs_effect_t *) { static_cast<BrowserSourceInstance *>(data)->frame.render(); };
     info.icon_type = OBS_ICON_TYPE_BROWSER;
     obs_register_source(&info);
     g_browser_registered = true;
@@ -349,7 +359,7 @@ Java_org_obsandroid_port_NativeBridge_registerBrowserHost(JNIEnv *env, jclass, j
     g_browser_host_class = static_cast<jclass>(env->NewGlobalRef(hostClass));
     if (!g_browser_host_class) return;
     g_mid_create_update = env->GetStaticMethodID(
-        g_browser_host_class, "createOrUpdate", "(JLjava/lang/String;IIIZLjava/lang/String;ZZ)V");
+        g_browser_host_class, "createOrUpdate", "(JLjava/lang/String;IIIZLjava/lang/String;ZZZ)V");
     g_mid_set_visible = env->GetStaticMethodID(g_browser_host_class, "setVisible", "(JZ)V");
     g_mid_reload = env->GetStaticMethodID(g_browser_host_class, "reload", "(JZ)V");
     g_mid_interact = env->GetStaticMethodID(g_browser_host_class, "interact", "(J)V");
@@ -365,43 +375,55 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_pushBrowserFrame(
     JNIEnv *env, jclass, jlong instanceId, jobject rgbaBuf, jint width, jint height, jlong timestampNs)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (!rgbaBuf || width <= 0 || height <= 0) return;
     auto *ptr = static_cast<uint8_t *>(env->GetDirectBufferAddress(rgbaBuf));
     jlong cap = env->GetDirectBufferCapacity(rgbaBuf);
     if (!ptr || cap < jlong(width) * jlong(height) * 4) return;
 
+    std::lock_guard<std::mutex> lock(g_browser_mutex);
+    auto it = g_instances.find(int64_t(instanceId));
+    if (it != g_instances.end()) it->second->frame.submit(ptr, uint32_t(width), uint32_t(height), uint32_t(width) * 4, true);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_obsandroid_port_NativeBridge_pushBrowserBitmap(JNIEnv *env, jclass, jlong id, jobject bitmap)
+{
+    AndroidCallbackScope callback;
+    if (!callback) return false;
+    std::lock_guard<std::mutex> lock(g_browser_mutex);
+    auto it = g_instances.find(int64_t(id));
+    return it != g_instances.end() && it->second->frame.submitBitmap(env, bitmap);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_obsandroid_port_NativeBridge_pushBrowserAudio(JNIEnv *env, jclass, jlong id, jbyteArray pcm,
+    jint channels, jint rate, jlong timestamp)
+{
+    AndroidCallbackScope callback;
+    if (!callback || !pcm || channels < 1 || channels > 2 || rate < 8000 || rate > 96000) return;
+    jsize bytes = env->GetArrayLength(pcm);
+    if (bytes <= 0 || bytes > 8192 || bytes % (channels * 2)) return;
     obs_source_t *source = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_browser_mutex);
-        auto it = g_instances.find(int64_t(instanceId));
-        if (it != g_instances.end() && it->second && it->second->source) {
+        auto it = g_instances.find(int64_t(id));
+        if (it != g_instances.end() && it->second->capture_audio && it->second->showing)
             source = obs_source_get_ref(it->second->source);
-        }
     }
     if (!source) return;
-
-    const size_t pixel_count = size_t(width) * size_t(height);
-    for (size_t i = 0; i < pixel_count; ++i) {
-        uint8_t *p = ptr + i * 4;
-        uint8_t a = p[3];
-        if (a > 0 && a < 255) {
-            uint32_t r = (uint32_t(p[0]) * 255u + (a >> 1)) / a;
-            uint32_t g = (uint32_t(p[1]) * 255u + (a >> 1)) / a;
-            uint32_t b = (uint32_t(p[2]) * 255u + (a >> 1)) / a;
-            p[0] = uint8_t(r > 255u ? 255u : r);
-            p[1] = uint8_t(g > 255u ? 255u : g);
-            p[2] = uint8_t(b > 255u ? 255u : b);
-        }
+    jbyte *data = env->GetByteArrayElements(pcm, nullptr);
+    if (data) {
+        obs_source_audio audio{};
+        audio.data[0] = reinterpret_cast<const uint8_t *>(data);
+        audio.frames = uint32_t(bytes / (channels * 2));
+        audio.samples_per_sec = uint32_t(rate);
+        audio.format = AUDIO_FORMAT_16BIT;
+        audio.speakers = channels == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO;
+        audio.timestamp = uint64_t(timestamp);
+        obs_source_output_audio(source, &audio);
+        env->ReleaseByteArrayElements(pcm, data, JNI_ABORT);
     }
-
-    obs_source_frame frame{};
-    frame.width = uint32_t(width);
-    frame.height = uint32_t(height);
-    frame.format = VIDEO_FORMAT_RGBA;
-    frame.timestamp = uint64_t(timestampNs);
-    frame.data[0] = ptr;
-    frame.linesize[0] = uint32_t(width) * 4u;
-    frame.full_range = true;
-    obs_source_output_video(source, &frame);
     obs_source_release(source);
 }

@@ -1,3 +1,5 @@
+#include "android-session-gate.h"
+#include "android-rgba-frame.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "android-vtuber.h"
 #include "android-sources.h"
@@ -17,6 +19,7 @@ JavaVM *g_vt_jvm = nullptr;
 jclass g_vt_host_class = nullptr;
 jmethodID g_mid_vt_update = nullptr;
 jmethodID g_mid_vt_destroy = nullptr;
+jmethodID g_mid_vt_visible = nullptr;
 jmethodID g_mid_vt_destroy_all = nullptr;
 jmethodID g_mid_vt_pick_cubism = nullptr;
 std::atomic<int64_t> g_vt_seq{0};
@@ -24,6 +27,7 @@ std::atomic<int> g_vt_active_count{0};
 bool g_vt_registered = false;
 
 struct VtuberInstance {
+    AndroidRgbaFrame frame;
     int64_t id{};
     obs_source_t *source{};
     std::string mode{"png"};
@@ -250,7 +254,6 @@ void *vtuber_create(obs_data_t *s, obs_source_t *source)
     auto *inst = new VtuberInstance{};
     inst->id = ++g_vt_seq;
     inst->source = source;
-    obs_source_set_async_unbuffered(source, true);
     build_config_json(inst, s);
     {
         std::lock_guard<std::mutex> lock(g_vt_mutex);
@@ -288,13 +291,38 @@ void android_vtuber_register()
     obs_source_info info{};
     info.id = "vtuber_source";
     info.type = OBS_SOURCE_TYPE_INPUT;
-    info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE;
+    info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_SRGB | OBS_SOURCE_DO_NOT_DUPLICATE;
     info.get_name = vtuber_get_name;
     info.create = vtuber_create;
     info.destroy = vtuber_destroy;
+    info.show = [](void *data) {
+        auto *inst = static_cast<VtuberInstance *>(data);
+        JNIEnv *env = nullptr; bool detach = false;
+        if (!g_vt_jvm || !g_mid_vt_visible) return;
+        if (g_vt_jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
+            if (g_vt_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+            detach = true;
+        }
+        if (env) { env->CallStaticVoidMethod(g_vt_host_class, g_mid_vt_visible, jlong(inst->id), JNI_TRUE); if (env->ExceptionCheck()) env->ExceptionClear(); }
+        if (detach) g_vt_jvm->DetachCurrentThread();
+    };
+    info.hide = [](void *data) {
+        auto *inst = static_cast<VtuberInstance *>(data);
+        JNIEnv *env = nullptr; bool detach = false;
+        if (!g_vt_jvm || !g_mid_vt_visible) return;
+        if (g_vt_jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
+            if (g_vt_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+            detach = true;
+        }
+        if (env) { env->CallStaticVoidMethod(g_vt_host_class, g_mid_vt_visible, jlong(inst->id), JNI_FALSE); if (env->ExceptionCheck()) env->ExceptionClear(); }
+        if (detach) g_vt_jvm->DetachCurrentThread();
+    };
     info.update = vtuber_update;
     info.get_defaults = vtuber_get_defaults;
     info.get_properties = vtuber_get_properties;
+    info.get_width = [](void *data) -> uint32_t { auto *inst = static_cast<VtuberInstance *>(data); return inst->frame.width() ? inst->frame.width() : uint32_t(inst->width); };
+    info.get_height = [](void *data) -> uint32_t { auto *inst = static_cast<VtuberInstance *>(data); return inst->frame.height() ? inst->frame.height() : uint32_t(inst->height); };
+    info.video_render = [](void *data, gs_effect_t *) { static_cast<VtuberInstance *>(data)->frame.render(); };
     info.icon_type = OBS_ICON_TYPE_CUSTOM;
     obs_register_source(&info);
     g_vt_registered = true;
@@ -328,6 +356,7 @@ Java_org_obsandroid_port_NativeBridge_registerVtuberHost(JNIEnv *env, jclass, jc
     g_vt_host_class = static_cast<jclass>(env->NewGlobalRef(hostClass));
     if (!g_vt_host_class) return;
     g_mid_vt_update = env->GetStaticMethodID(g_vt_host_class, "vtuberCreateOrUpdate", "(JLjava/lang/String;III)V");
+    g_mid_vt_visible = env->GetStaticMethodID(g_vt_host_class, "vtuberSetVisible", "(JZ)V");
     g_mid_vt_destroy = env->GetStaticMethodID(g_vt_host_class, "vtuberDestroy", "(J)V");
     g_mid_vt_destroy_all = env->GetStaticMethodID(g_vt_host_class, "vtuberDestroyAll", "()V");
     g_mid_vt_pick_cubism = env->GetStaticMethodID(g_vt_host_class, "pickLive2dCubismCore", "()V");
@@ -337,6 +366,8 @@ Java_org_obsandroid_port_NativeBridge_registerVtuberHost(JNIEnv *env, jclass, jc
 extern "C" JNIEXPORT jfloat JNICALL
 Java_org_obsandroid_port_NativeBridge_getMicLevel(JNIEnv *, jclass)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return 0;
     return jfloat(android_sources_get_mic_level());
 }
 
@@ -344,43 +375,42 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_pushVtuberFrame(
     JNIEnv *env, jclass, jlong id, jobject rgbaBuf, jint width, jint height, jlong timestampNs)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (!rgbaBuf || width <= 0 || height <= 0) return;
     auto *ptr = static_cast<uint8_t *>(env->GetDirectBufferAddress(rgbaBuf));
     jlong cap = env->GetDirectBufferCapacity(rgbaBuf);
     if (!ptr || cap < jlong(width) * jlong(height) * 4) return;
 
-    obs_source_t *source = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_vt_mutex);
-        auto it = g_vt_instances.find(int64_t(id));
-        if (it != g_vt_instances.end() && it->second && it->second->source) {
-            source = obs_source_get_ref(it->second->source);
-        }
-    }
-    if (!source) return;
+    std::lock_guard<std::mutex> lock(g_vt_mutex);
+    auto it = g_vt_instances.find(int64_t(id));
+    if (it != g_vt_instances.end()) it->second->frame.submit(ptr, uint32_t(width), uint32_t(height), uint32_t(width) * 4, true);
+}
 
-    const size_t pixels = size_t(width) * size_t(height);
-    for (size_t i = 0; i < pixels; ++i) {
-        uint8_t *p = ptr + i * 4;
-        uint8_t a = p[3];
-        if (a > 0 && a < 255) {
-            uint32_t r = (uint32_t(p[0]) * 255u + (a >> 1)) / a;
-            uint32_t g = (uint32_t(p[1]) * 255u + (a >> 1)) / a;
-            uint32_t b = (uint32_t(p[2]) * 255u + (a >> 1)) / a;
-            p[0] = uint8_t(r > 255u ? 255u : r);
-            p[1] = uint8_t(g > 255u ? 255u : g);
-            p[2] = uint8_t(b > 255u ? 255u : b);
-        }
-    }
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_obsandroid_port_NativeBridge_pushVtuberBitmap(JNIEnv *env, jclass, jlong id, jobject bitmap)
+{
+    AndroidCallbackScope callback;
+    if (!callback) return false;
+    std::lock_guard<std::mutex> lock(g_vt_mutex);
+    auto it = g_vt_instances.find(int64_t(id));
+    return it != g_vt_instances.end() && it->second->frame.submitBitmap(env, bitmap);
+}
 
-    obs_source_frame frame{};
-    frame.width = uint32_t(width);
-    frame.height = uint32_t(height);
-    frame.format = VIDEO_FORMAT_RGBA;
-    frame.timestamp = uint64_t(timestampNs);
-    frame.data[0] = ptr;
-    frame.linesize[0] = uint32_t(width) * 4u;
-    frame.full_range = true;
-    obs_source_output_video(source, &frame);
-    obs_source_release(source);
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_obsandroid_port_NativeBridge_pushVtuberArray(JNIEnv *env, jclass, jlong id, jbyteArray bytes,
+    jint offset, jint width, jint height, jboolean flip)
+{
+    AndroidCallbackScope callback;
+    if (!callback || !bytes || offset < 0 || width < 1 || height < 1 || width > 1280 || height > 1280) return false;
+    if (int64_t(width) * height * 4 + offset != env->GetArrayLength(bytes)) return false;
+    std::lock_guard<std::mutex> lock(g_vt_mutex);
+    auto it = g_vt_instances.find(int64_t(id));
+    if (it == g_vt_instances.end()) return false;
+    jbyte *raw = env->GetByteArrayElements(bytes, nullptr);
+    if (!raw) return false;
+    const bool accepted = it->second->frame.submit(reinterpret_cast<uint8_t *>(raw) + offset,
+        uint32_t(width), uint32_t(height), uint32_t(width) * 4, true, flip);
+    env->ReleaseByteArrayElements(bytes, raw, JNI_ABORT);
+    return accepted;
 }

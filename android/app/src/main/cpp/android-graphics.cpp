@@ -1,3 +1,4 @@
+#include "android-session-gate.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "android-graphics.h"
 #include <obs-module.h>
@@ -929,6 +930,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_pushGraphicsFrame(
     JNIEnv *env, jclass, jlong id, jobject rgbaBuf, jint width, jint height, jlong timestampNs)
 {
+    AndroidCallbackScope callback;
+    if (!callback) return ;
     if (!rgbaBuf || width <= 0 || height <= 0) return;
     auto *bytes = static_cast<uint8_t *>(env->GetDirectBufferAddress(rgbaBuf));
     jlong cap = env->GetDirectBufferCapacity(rgbaBuf);

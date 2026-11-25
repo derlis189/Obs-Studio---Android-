@@ -3,7 +3,7 @@ project(obs_android_jni LANGUAGES CXX)
 get_filename_component(PORT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../.." ABSOLUTE)
 add_library(obs SHARED IMPORTED)
 set_target_properties(obs PROPERTIES IMPORTED_LOCATION "${PORT_ROOT}/out/libobs-arm64/libobs/libobs.so")
-add_library(obs-android-jni SHARED obs-jni.cpp obs-session.cpp android-sources.cpp android-encoders.cpp android-hw-video.cpp android-uvc.cpp android-browser.cpp android-browser-docks.cpp android-ndi.cpp android-multistream.cpp android-vtuber.cpp android-graphics.cpp android-srt.cpp android-move-transition.cpp android-frame-style-filter.cpp android-bg-removal-filter.cpp)
+add_library(obs-android-jni SHARED obs-jni.cpp obs-session.cpp android-rgba-frame.cpp android-sources.cpp android-encoders.cpp android-hw-video.cpp android-uvc.cpp android-browser.cpp android-browser-docks.cpp android-ndi.cpp android-multistream.cpp android-vtuber.cpp android-graphics.cpp android-srt.cpp android-move-transition.cpp android-frame-style-filter.cpp android-bg-removal-filter.cpp)
 target_compile_features(obs-android-jni PRIVATE cxx_std_17)
 target_include_directories(obs-android-jni PRIVATE
     "${PORT_ROOT}/out/src/obs-studio/libobs"
@@ -25,7 +25,13 @@ target_link_libraries(obs-android-jni PRIVATE
     "${PORT_ROOT}/out/deps/arm64-v8a/lib/libp256m.a"
     z
     android
+    jnigraphics
     EGL
     GLESv3
     log
     mediandk)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_sources(obs-android-jni PRIVATE ../../debug/cpp/performance-probe.cpp)
+    target_include_directories(obs-android-jni PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+endif()

@@ -56,6 +56,7 @@ android {
 tasks.named("preBuild") { dependsOn(distributableAssets) }
 
 dependencies {
+    implementation("androidx.webkit:webkit:1.14.0")
     implementation(files(
         "../../tools/qt6/6.9.3/android_arm64_v8a/jar/Qt6Android.jar",
         "../../tools/qt6/6.9.3/android_arm64_v8a/jar/Qt6AndroidNetwork.jar"

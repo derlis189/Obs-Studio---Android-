@@ -47,6 +47,8 @@ public final class VtuberSourceManager {
     private static final Handler sMain = new Handler(Looper.getMainLooper());
     private static final Map<Long, VtuberInstance> sInstances = new ConcurrentHashMap<>();
     private static FrameLayout sHost;
+    private static volatile int thermalFpsCap = 60;
+    static void setThermalFpsCap(int fps) { thermalFpsCap = Math.max(1, Math.min(60, fps)); }
 
     private static final class VtuberInstance {
         final long id;
@@ -78,6 +80,7 @@ public final class VtuberSourceManager {
         // WebView WebGL2 state (for VRM 3D & Live2D)
         WebView webView;
         boolean pageReady = false;
+        boolean visible = true;
         String pendingConfigJson = "{}";
         final Object webGlBufLock = new Object();
         ByteBuffer webGlRgba;
@@ -88,9 +91,9 @@ public final class VtuberSourceManager {
         final Runnable nativeTick = new Runnable() {
             @Override
             public void run() {
-                if (destroyed || !"png".equals(mode)) return;
+                if (destroyed || !visible || !"png".equals(mode)) return;
                 renderNativePngFrame();
-                long delay = Math.max(16L, 1000L / Math.max(1, Math.min(60, fps)));
+                long delay = Math.max(16L, 1000L / Math.max(1, Math.min(thermalFpsCap, fps)));
                 sMain.postDelayed(this, delay);
             }
         };
@@ -98,7 +101,7 @@ public final class VtuberSourceManager {
         final Runnable webTrackTick = new Runnable() {
             @Override
             public void run() {
-                if (destroyed || "png".equals(mode) || webView == null) return;
+                if (destroyed || !visible || "png".equals(mode) || webView == null) return;
                 if (pageReady) {
                     FaceTrackerManager.TrackingState ts = FaceTrackerManager.getState();
                     float mic = NativeBridge.getMicLevel();
@@ -107,9 +110,9 @@ public final class VtuberSourceManager {
                         ts.yaw, ts.pitch, ts.roll, ts.eyeL, ts.eyeR, ts.mouthOpen, ts.happy,
                         ts.faceX, ts.faceY, mic, ts.faceDetected ? "true" : "false",
                         ts.handL, ts.handR, ts.waveOsc);
-                    webView.evaluateJavascript(js, null);
+                    webView.evaluateJavascript(js + "if(window.OBS_VTUBER)window.OBS_VTUBER.setRenderBudget(" + Math.min(fps, thermalFpsCap) + ");", null);
                 }
-                long delay = Math.max(16L, 1000L / Math.max(1, Math.min(60, fps)));
+                long delay = Math.max(16L, 1000L / Math.max(1, Math.min(thermalFpsCap, fps)));
                 sMain.postDelayed(this, delay);
             }
         };
@@ -119,11 +122,11 @@ public final class VtuberSourceManager {
         void ensureNativeBuffers(int w, int h) {
             int cw = Math.max(128, Math.min(1920, w));
             int ch = Math.max(128, Math.min(1920, h));
-            if (outBitmap != null && outBitmap.getWidth() == cw && outBitmap.getHeight() == ch && outRgba != null) return;
+            if (outBitmap != null && outBitmap.getWidth() == cw && outBitmap.getHeight() == ch) return;
             if (outBitmap != null) outBitmap.recycle();
             outBitmap = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888);
             outCanvas = new Canvas(outBitmap);
-            outRgba = ByteBuffer.allocateDirect(cw * ch * 4);
+
             width = cw;
             height = ch;
         }
@@ -189,9 +192,7 @@ public final class VtuberSourceManager {
                     drawNativeFallbackAvatar(outCanvas, width, height, talking, blink, ts);
                 }
 
-                outRgba.clear();
-                outBitmap.copyPixelsToBuffer(outRgba);
-                NativeBridge.pushVtuberFrame(id, outRgba, width, height, System.nanoTime());
+                NativeBridge.pushVtuberBitmap(id, outBitmap);
             } catch (Throwable t) {
                 Log.w(TAG, "renderNativePngFrame error: " + t.getMessage());
             }
@@ -255,26 +256,8 @@ public final class VtuberSourceManager {
     public static void onWebGlRgbaFrame(long id, byte[] raw, int w, int h, boolean flipVertical) {
         VtuberInstance inst = sInstances.get(id);
         if (inst == null || inst.destroyed || "png".equals(inst.mode)) return;
-        int byteLen = w * h * 4;
-        if (raw == null || raw.length < byteLen) return;
-        synchronized (inst.webGlBufLock) {
-            if (inst.webGlRgba == null || inst.webGlW != w || inst.webGlH != h) {
-                inst.webGlRgba = ByteBuffer.allocateDirect(byteLen);
-                inst.webGlW = w;
-                inst.webGlH = h;
-            }
-            inst.webGlRgba.clear();
-            if (flipVertical) {
-                int stride = w * 4;
-                for (int y = h - 1; y >= 0; --y) {
-                    inst.webGlRgba.put(raw, y * stride, stride);
-                }
-            } else {
-                inst.webGlRgba.put(raw, 0, byteLen);
-            }
-            inst.webGlRgba.flip();
-            NativeBridge.pushVtuberFrame(id, inst.webGlRgba, w, h, System.nanoTime());
-        }
+        if (!inst.visible || raw == null || w < 1 || h < 1 || w > 1280 || h > 1280 || raw.length != w * h * 4) return;
+        NativeBridge.pushVtuberArray(id, raw, 0, w, h, flipVertical);
     }
 
     private static FrameLayout ensureHost(Activity activity) {
@@ -567,7 +550,7 @@ public final class VtuberSourceManager {
 
     public static boolean isFaceTrackingNeeded() {
         for (VtuberInstance inst : sInstances.values()) {
-            if (inst != null && !inst.destroyed && inst.faceTracking) {
+            if (inst != null && !inst.destroyed && inst.visible && inst.faceTracking) {
                 return true;
             }
         }
@@ -577,7 +560,7 @@ public final class VtuberSourceManager {
     private static void updateHeadlessFaceTracking(Context ctx) {
         boolean needBgFace = false;
         for (VtuberInstance inst : sInstances.values()) {
-            if (inst != null && !inst.destroyed && inst.faceTracking && !"png".equals(inst.mode)) {
+            if (inst != null && !inst.destroyed && inst.visible && inst.faceTracking && !"png".equals(inst.mode)) {
                 needBgFace = true;
                 break;
             }
@@ -684,64 +667,53 @@ public final class VtuberSourceManager {
                     if (inst.bmpBlinkTalk != null) inst.bmpBlinkTalk.recycle();
                     inst.bmpBlinkTalk = loadSafeBitmap(pBlinkTalk);
                 }
+                BrowserSourceManager.destroy(-id);
+                inst.webView = null;
+                inst.pageReady = false;
                 sMain.removeCallbacks(inst.nativeTick);
                 sMain.post(inst.nativeTick);
                 updateHeadlessFaceTracking(activity);
                 return;
             }
 
-            // VRM 3D or Live2D mode: WebView WebGL2 + loopback raw RGBA frame push
+            // Accelerated private window: capture WebGL without JS readPixels/HTTP frame uploads.
             sMain.removeCallbacks(inst.nativeTick);
             updateHeadlessFaceTracking(activity);
             inst.pendingConfigJson = resolvedJson;
-            FrameLayout host = ensureHost(activity);
-            if (host == null) return;
-
             final VtuberInstance target = inst;
-            if (inst.webView == null) {
-                WebView wv = new WebView(activity);
-                WebSettings ws = wv.getSettings();
-                ws.setJavaScriptEnabled(true);
-                ws.setDomStorageEnabled(true);
-                ws.setAllowFileAccess(false);
-                ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-                wv.setBackgroundColor(Color.TRANSPARENT);
-                wv.setWebViewClient(new WebViewClient() {
-                    @Override
-                    public void onPageFinished(WebView view, String url) {
-                        target.pageReady = true;
-                        Log.i(TAG, "VTuber WebGL page ready for id=" + target.id);
-                        view.evaluateJavascript(
-                            "window.__OBS_VTUBER_PENDING_CFG=" + target.pendingConfigJson + ";if(window.OBS_VTUBER)window.OBS_VTUBER.setConfig(window.__OBS_VTUBER_PENDING_CFG);",
-                            null);
-                    }
-
-                    @Override
-                    public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
-                        Log.e(TAG, "VTuber WebView error: " + (err != null ? err.getDescription() : "unknown"));
-                    }
-                });
-                wv.setWebChromeClient(new WebChromeClient() {
-                    @Override
-                    public boolean onConsoleMessage(ConsoleMessage cm) {
-                        if (cm != null) Log.i("ObsVtuberJS", cm.message());
-                        return true;
-                    }
-                });
-                inst.webView = wv;
-                host.addView(wv, new FrameLayout.LayoutParams(inst.width, inst.height));
-                wv.loadUrl(WebRemoteServer.getLocalLoopbackBase() + "/vtuber/index.html?id=" + inst.id + "#localToken=" + WebRemoteServer.getLocalToken());
-            } else {
-                inst.webView.setLayoutParams(new FrameLayout.LayoutParams(inst.width, inst.height));
-                if (inst.pageReady) {
-                    inst.webView.evaluateJavascript(
-                        "window.__OBS_VTUBER_PENDING_CFG=" + resolvedJson + ";if(window.OBS_VTUBER)window.OBS_VTUBER.setConfig(window.__OBS_VTUBER_PENDING_CFG);",
-                        null);
-                }
+            String pageUrl = WebRemoteServer.getLocalLoopbackBase() + "/vtuber/index.html?id=" + inst.id
+                + "&transport=bridge#localToken=" + WebRemoteServer.getLocalToken();
+            BrowserSourceManager.createVtuber(inst.id, pageUrl, inst.width, inst.height, inst.fps, view -> {
+                if (target.destroyed || "png".equals(target.mode)) return;
+                target.webView = view;
+                target.pageReady = true;
+                BrowserSourceManager.setVisible(-target.id, target.visible);
+                view.evaluateJavascript("window.__OBS_VTUBER_PENDING_CFG=" + target.pendingConfigJson
+                    + ";if(window.OBS_VTUBER)window.OBS_VTUBER.setConfig(window.__OBS_VTUBER_PENDING_CFG);", null);
+                sMain.removeCallbacks(target.webTrackTick);
+                sMain.post(target.webTrackTick);
+            });
+            if (inst.webView != null && inst.pageReady) {
+                inst.webView.evaluateJavascript("window.__OBS_VTUBER_PENDING_CFG=" + resolvedJson
+                    + ";if(window.OBS_VTUBER)window.OBS_VTUBER.setConfig(window.__OBS_VTUBER_PENDING_CFG);", null);
             }
 
             sMain.removeCallbacks(inst.webTrackTick);
             sMain.post(inst.webTrackTick);
+        });
+    }
+
+    public static void setVisible(long id, boolean visible) {
+        sMain.post(() -> {
+            VtuberInstance inst = sInstances.get(id);
+            if (inst == null || inst.destroyed) return;
+            inst.visible = visible;
+            sMain.removeCallbacks(inst.nativeTick);
+            sMain.removeCallbacks(inst.webTrackTick);
+            BrowserSourceManager.setVisible(-id, visible);
+            if (visible) sMain.post("png".equals(inst.mode) ? inst.nativeTick : inst.webTrackTick);
+            QtObsActivity activity = QtObsActivity.getActiveInstance();
+            if (activity != null) updateHeadlessFaceTracking(activity);
         });
     }
 
@@ -755,13 +727,8 @@ public final class VtuberSourceManager {
             inst.releaseNativeImages();
             if (inst.outBitmap != null) { inst.outBitmap.recycle(); inst.outBitmap = null; }
             inst.outRgba = null;
-            if (inst.webView != null) {
-                ViewGroup p = (ViewGroup) inst.webView.getParent();
-                if (p != null) p.removeView(inst.webView);
-                inst.webView.loadUrl("about:blank");
-                inst.webView.destroy();
-                inst.webView = null;
-            }
+            BrowserSourceManager.destroy(-id);
+            inst.webView = null;
             QtObsActivity activity = QtObsActivity.getActiveInstance();
             if (activity != null) updateHeadlessFaceTracking(activity);
         });
