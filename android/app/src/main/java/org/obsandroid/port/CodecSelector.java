@@ -40,6 +40,12 @@ final class CodecSelector {
     }
 
     static JSONObject settings(String server, String key, int bitrate, int keyint) throws Exception {
+        return settings(server, key, bitrate, keyint, 160);
+    }
+
+    static JSONObject settings(String server, String key, int bitrate, int keyint, int audioBitrate) throws Exception {
+        if (audioBitrate < 128 || audioBitrate > 320 || audioBitrate % 32 != 0)
+            throw new IllegalArgumentException("El bitrate AAC debe estar entre 128 y 320 kbps, en pasos de 32");
         JSONObject result = new JSONObject();
         MediaCodecInfo[] codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
         for (MediaCodecInfo codec : codecs) {
@@ -64,7 +70,7 @@ final class CodecSelector {
         }
         if (!result.has("codec_name")) throw new IllegalStateException("No hay codificador H.264 hardware compatible con 720p30 y buffers YUV");
         MediaFormat audio = MediaFormat.createAudioFormat("audio/mp4a-latm", 48000, 2);
-        audio.setInteger(MediaFormat.KEY_AAC_PROFILE, 2); audio.setInteger(MediaFormat.KEY_BIT_RATE, 160000);
+        audio.setInteger(MediaFormat.KEY_AAC_PROFILE, 2); audio.setInteger(MediaFormat.KEY_BIT_RATE, audioBitrate * 1000);
         // Prefer hardware AAC. Most phones expose AAC as an efficient system software codec.
         String aac = null; boolean hardware = false;
         for (MediaCodecInfo codec : codecs) {
@@ -75,8 +81,9 @@ final class CodecSelector {
                 }
             } catch (IllegalArgumentException ignored) { }
         }
-        if (aac == null) throw new IllegalStateException("No hay codificador AAC LC estéreo 48 kHz");
+        if (aac == null) throw new IllegalStateException("El dispositivo no ofrece AAC LC estéreo 48 kHz a " + audioBitrate + " kbps; prueba una tasa menor");
         result.put("audio_codec", aac); result.put("audio_hardware", hardware);
+        result.put("audio_bitrate", audioBitrate);
         result.put("server", server); result.put("key", key); result.put("bitrate", bitrate); result.put("keyint_sec", keyint);
         return result;
     }

@@ -1141,7 +1141,10 @@ Java_org_obsandroid_port_NativeBridge_startStream(JNIEnv *env, jclass, jstring j
         obs_encoder_set_video(video_encoder, obs_get_video());
         obs_data_t *audio = obs_data_create();
         obs_data_set_string(audio, "codec_name", obs_data_get_string(settings, "audio_codec"));
-        obs_data_set_int(audio, "bitrate", 160);
+        int64_t audio_bitrate = obs_data_get_int(settings, "audio_bitrate");
+        if (audio_bitrate < 128 || audio_bitrate > 320 || audio_bitrate % 32 != 0)
+            audio_bitrate = 160;
+        obs_data_set_int(audio, "bitrate", audio_bitrate);
         obs_data_set_bool(audio, "hardware", obs_data_get_bool(settings, "audio_hardware"));
         audio_encoder = obs_audio_encoder_create("android_mediacodec_aac", "MediaCodec AAC", audio, 0, nullptr);
         obs_data_release(audio);

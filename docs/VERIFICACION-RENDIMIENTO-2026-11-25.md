@@ -38,6 +38,12 @@ Opción **Capturar audio de esta página (Web Audio)**, desactivada por defecto 
 - La inyección repetida no duplica el grafo y los cambios de URL reutilizan el nodo del elemento y retiran los listeners anteriores.
 - Evitar mezclar la misma señal también mediante Audio interno para no duplicarla.
 
+### Bitrate AAC configurable en RTMP
+
+La pantalla **Transmitir desde libobs** permite elegir AAC LC estéreo a 48 kHz entre 128 y 320 kbps, en pasos de 32, y recuerda la selección. Antes de iniciar, Android consulta si algún codificador acepta el formato solicitado; si ninguno lo anuncia, muestra un error y permite escoger una tasa menor. La configuración llega al encoder MediaCodec AAC en kbps.
+
+Esta mejora cubre la salida RTMP principal de esa pantalla. No cambia las salidas SRT, multistream ni verticales, que conservan sus propios encoders y valores. La interfaz compila, pero no se probó una emisión física con tasas superiores a 128 kbps en el Samsung; el soporte real depende del codificador y del servicio receptor.
+
 ### Salida NDI desde Herramientas
 
 - **Herramientas → Salida NDI en red…** transmite el Programa mediante una salida nativa de OBS, con video RGBA y audio estéreo flotante planar. El diálogo permite definir el nombre anunciado y detener la salida.

@@ -20,6 +20,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.SeekBar;
 import android.widget.EditText;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -247,15 +249,27 @@ public final class StudioActivity extends Activity {
         EditText key = new EditText(this); key.setHint("Clave de transmisión"); key.setInputType(129); form.addView(key);
         EditText bitrate = new EditText(this); bitrate.setHint("Bitrate de video (kbps)"); bitrate.setInputType(2); bitrate.setText(String.valueOf(prefs.getInt("bitrate", 3500))); form.addView(bitrate);
         EditText keyint = new EditText(this); keyint.setHint("Intervalo keyframes (segundos)"); keyint.setInputType(2); keyint.setText("2"); form.addView(keyint);
-        TextView format = label("H.264 hardware · 720p30 · AAC 48 kHz\nCBR o VBR según dispositivo", Color.BLACK, 13); form.addView(format);
+        form.addView(label("Bitrate de audio AAC · 48 kHz estéreo", Color.BLACK, 14));
+        Integer[] audioRates = {128, 160, 192, 224, 256, 288, 320};
+        Spinner audioBitrate = new Spinner(this);
+        ArrayAdapter<Integer> audioRateAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, audioRates);
+        audioRateAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        audioBitrate.setAdapter(audioRateAdapter);
+        int savedAudioRate = prefs.getInt("audio_bitrate", 160);
+        int selectedAudioIndex = 1;
+        for (int i = 0; i < audioRates.length; i++) if (audioRates[i] == savedAudioRate) selectedAudioIndex = i;
+        audioBitrate.setSelection(selectedAudioIndex);
+        form.addView(audioBitrate);
+        TextView format = label("H.264 hardware · 720p30 · AAC\nUna tasa mayor usa más datos; el dispositivo debe admitirla.", Color.BLACK, 13); form.addView(format);
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Transmitir desde libobs").setView(form).setPositiveButton("Iniciar", null).setNegativeButton("Cancelar", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             try {
                 int kbps = Integer.parseInt(bitrate.getText().toString()), interval = Integer.parseInt(keyint.getText().toString());
                 String url = server.getText().toString().trim();
                 if (!url.startsWith("rtmp://") || kbps < 250 || kbps > 20000 || interval < 1 || interval > 10) throw new IllegalArgumentException("Usa RTMP, 250–20000 kbps y keyframes de 1–10 s");
-                JSONObject config = CodecSelector.settings(url, key.getText().toString(), kbps, interval);
-                prefs.edit().putString("server", url).putInt("bitrate", kbps).apply();
+                int audioKbps = (Integer) audioBitrate.getSelectedItem();
+                JSONObject config = CodecSelector.settings(url, key.getText().toString(), kbps, interval, audioKbps);
+                prefs.edit().putString("server", url).putInt("bitrate", kbps).putInt("audio_bitrate", audioKbps).apply();
                 startForegroundService(new Intent(this, CaptureService.class).setAction(CaptureService.STREAM_START).putExtra("settings", config.toString()));
                 dialog.dismiss();
             } catch (Exception error) { format.setText(error.getMessage()); }

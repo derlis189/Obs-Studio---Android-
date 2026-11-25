@@ -46,6 +46,7 @@ La compilación opcional incorpora la fuente y la salida de [OMT para OBS](https
 ## Operación en red
 
 - Para SRT con datos móviles, usa **Caller** hacia un receptor alcanzable. **Listener** requiere un puerto UDP entrante accesible, algo que CGNAT generalmente impide.
+- La salida RTMP desde **Transmitir desde libobs** permite AAC estéreo a 128–320 kbps en pasos de 32. Se valida el formato contra los codificadores AAC del teléfono antes de iniciar; si el teléfono no anuncia soporte para la tasa elegida, selecciona una menor. Una tasa mayor aumenta el uso de datos y no garantiza por sí sola una mejora audible.
 - Para Control Remoto, abre su diálogo QR desde Herramientas y conecta el navegador en la misma red al puerto TCP 4455. El diálogo permite volver a desactivar el acceso LAN. Usa una red de confianza, ya que el transporte es HTTP.
 - Para descubrir NDI, el teléfono y los emisores deben compartir una red que permita mDNS en UDP 5353. Importa el runtime ARM64 por separado desde el selector de la aplicación.
 - Para enviar el Programa por NDI, abre **Herramientas → Salida NDI en red…**, asigna el nombre visible y pulsa **Iniciar salida**. La función transmite video RGBA y audio estéreo. El runtime ARM64 importado debe incluir `NDIlib_send_create`, `NDIlib_send_send_video_v2` y `NDIlib_send_send_audio_v2`; un runtime únicamente receptor no basta. La salida se detiene desde ese mismo diálogo.
