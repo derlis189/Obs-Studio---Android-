@@ -9583,6 +9583,103 @@ index 765bb29..7351ef1 100644
  		ui->simpleOutRecAEncoder->addItem(QTStr("Basic.Settings.Output.Simple.Codec.AAC.Default"), "aac");
  	}
  	if (EncoderAvailable("ffmpeg_opus")) {
+diff --git a/frontend/settings/OBSBasicSettings.hpp b/frontend/settings/OBSBasicSettings.hpp
+index 0922880..3875793 100644
+--- a/frontend/settings/OBSBasicSettings.hpp
++++ b/frontend/settings/OBSBasicSettings.hpp
+@@ -118,6 +118,9 @@ private:
+ 	uint32_t outputCY = 0;
+ 
+ 	QPointer<QCheckBox> simpleVodTrack;
++#ifdef __ANDROID__
++	QPointer<QComboBox> androidUiModeCombo;
++#endif
+ 
+ 	QPointer<QCheckBox> vodTrackCheckbox;
+ 	QPointer<QWidget> vodTrackContainer;
+diff --git a/frontend/settings/OBSBasicSettings_Appearance.cpp b/frontend/settings/OBSBasicSettings_Appearance.cpp
+index 64b1456..c530d75 100644
+--- a/frontend/settings/OBSBasicSettings_Appearance.cpp
++++ b/frontend/settings/OBSBasicSettings_Appearance.cpp
+@@ -5,6 +5,13 @@
+ 
+ #include <qt-wrappers.hpp>
+ 
++#ifdef __ANDROID__
++#include <widgets/OBSBasic.hpp>
++#include <QFormLayout>
++#include <QLabel>
++extern void ApplyAndroidUiMode(QWidget *mainWindow, bool mobile);
++#endif
++
+ void OBSBasicSettings::InitAppearancePage()
+ {
+ 	savedTheme = App()->GetTheme();
+@@ -29,6 +36,31 @@ void OBSBasicSettings::InitAppearancePage()
+ 		[this](int value) { ui->appearanceFontScaleText->setText(QString::number(value)); });
+ 	ui->appearanceFontScaleText->setText(QString::number(ui->appearanceFontScale->value()));
+ 
++#ifdef __ANDROID__
++	if (ui->appearanceGeneral) {
++		if (auto *form = qobject_cast<QFormLayout *>(ui->appearanceGeneral->layout())) {
++			androidUiModeCombo = new QComboBox(ui->appearanceGeneral);
++			androidUiModeCombo->addItem(QStringLiteral("Escritorio (OBS clasico)"),
++						    QStringLiteral("desktop"));
++			androidUiModeCombo->addItem(QStringLiteral("Movil (Adaptada a Android)"),
++						    QStringLiteral("mobile"));
++			form->insertRow(0, QStringLiteral("Modo de interfaz"), androidUiModeCombo);
++
++			auto *hint = new QLabel(
++				QStringLiteral("El modo Movil maximiza la vista previa, usa botones tactiles "
++					       "grandes (En Vivo, Grabar, Estudio) y agrupa los paneles en "
++					       "pestanas ocultables."),
++				ui->appearanceGeneral);
++			hint->setWordWrap(true);
++			hint->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 11px;"));
++			form->insertRow(1, QString(), hint);
++
++			connect(androidUiModeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
++				&OBSBasicSettings::AppearanceChanged);
++		}
++	}
++#endif
++
+ 	connect(App(), &OBSApp::StyleChanged, this, &OBSBasicSettings::updateAppearanceControls);
+ 	updateAppearanceControls();
+ }
+@@ -110,6 +142,15 @@ void OBSBasicSettings::LoadAppearanceSettings(bool reload)
+ 	if (densityButton) {
+ 		densityButton->setChecked(true);
+ 	}
++#ifdef __ANDROID__
++	if (androidUiModeCombo) {
++		const char *uiMode = config_get_string(App()->GetUserConfig(), "Appearance", "AndroidUiMode");
++		const bool isMobile = uiMode && std::strcmp(uiMode, "mobile") == 0;
++		androidUiModeCombo->blockSignals(true);
++		androidUiModeCombo->setCurrentIndex(isMobile ? 1 : 0);
++		androidUiModeCombo->blockSignals(false);
++	}
++#endif
+ 	updateAppearanceControls();
+ 
+ 	loading = false;
+@@ -130,6 +171,16 @@ void OBSBasicSettings::SaveAppearanceSettings()
+ 	config_set_int(config, "Appearance", "Density", densityId);
+ 
+ 	App()->SetTheme(currentTheme->id);
++
++#ifdef __ANDROID__
++	if (androidUiModeCombo) {
++		const QString mode = androidUiModeCombo->currentData().toString();
++		const bool isMobile = (mode == QStringLiteral("mobile"));
++		config_set_string(config, "Appearance", "AndroidUiMode", isMobile ? "mobile" : "desktop");
++		config_save_safe(config, "tmp", nullptr);
++		ApplyAndroidUiMode(main, isMobile);
++	}
++#endif
+ }
+ 
+ void OBSBasicSettings::on_theme_activated(int)
 diff --git a/frontend/settings/OBSBasicSettings_Stream.cpp b/frontend/settings/OBSBasicSettings_Stream.cpp
 index 1307e26..c6cfa0c 100644
 --- a/frontend/settings/OBSBasicSettings_Stream.cpp
@@ -9978,10 +10075,10 @@ index 0000000..5593789
 +AndroidHardwareProfile QueryAndroidHardwareProfile();
 diff --git a/frontend/utility/android-tools.cpp b/frontend/utility/android-tools.cpp
 new file mode 100644
-index 0000000..5d3f5e6
+index 0000000..25fc1bb
 --- /dev/null
 +++ b/frontend/utility/android-tools.cpp
-@@ -0,0 +1,6209 @@
+@@ -0,0 +1,7179 @@
 +#include <QSaveFile>
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +
@@ -10033,6 +10130,7 @@ index 0000000..5d3f5e6
 +#include <QPushButton>
 +#include <QResizeEvent>
 +#include <QScrollArea>
++#include <QScroller>
 +#include <QScreen>
 +#include <QSignalBlocker>
 +#include <QShowEvent>
@@ -10041,10 +10139,12 @@ index 0000000..5d3f5e6
 +#include <QSpinBox>
 +#include <QStatusBar>
 +#include <QStyle>
++#include <QTabBar>
 +#include <QTabWidget>
 +#include <QThread>
 +#include <QTimer>
 +#include <QToolBar>
++#include <QToolButton>
 +#include <QTouchEvent>
 +#include <QUuid>
 +#include <QVBoxLayout>
@@ -15545,6 +15645,17 @@ index 0000000..5d3f5e6
 +		// Install Undo button below Settings + compact touch resize handles + ensure visible Movies/OBS Studio recording folder
 +		InstallUndoButtonAndTouchDocks(mainWindow);
 +		QTimer::singleShot(550, mainWindow, []() { EnsureVisibleRecordingFolder(); });
++		QTimer::singleShot(650, mainWindow, [mainWindow]() {
++			extern void ApplyAndroidUiMode(QWidget *mainWindow, bool mobile);
++			extern void InstallAndroidMobileViewToggle(QWidget *mainWindow);
++			InstallAndroidMobileViewToggle(mainWindow);
++			const char *uiMode = config_get_string(App()->GetUserConfig(), "Appearance", "AndroidUiMode");
++			if (uiMode && std::strcmp(uiMode, "mobile") == 0) {
++				ApplyAndroidUiMode(mainWindow, true);
++			}
++			extern void MarkAndroidMobileUiStartupDone();
++			MarkAndroidMobileUiStartupDone();
++		});
 +	}
 +
 +	if (toolsMenu) {
@@ -15735,35 +15846,41 @@ index 0000000..5d3f5e6
 +	if (g_browserDocks.empty())
 +		return;
 +
-+	bool anyBlockingOverlay = g_browserDockDragSuspended ||
-+				  (QGuiApplication::applicationState() != Qt::ApplicationActive) ||
-+				  (QApplication::activePopupWidget() != nullptr) ||
-+				  (QApplication::activeModalWidget() != nullptr);
++	const bool globalSuspend =
++		g_browserDockDragSuspended || (QGuiApplication::applicationState() != Qt::ApplicationActive);
 +
-+	if (!anyBlockingOverlay && g_browserDockMainWin) {
-+		if (auto *mw = qobject_cast<QMainWindow *>(g_browserDockMainWin.data())) {
-+			if (QMenuBar *mb = mw->menuBar()) {
-+				if (mb->activeAction() != nullptr)
-+					anyBlockingOverlay = true;
-+			}
-+		}
++	if (globalSuspend != g_lastBrowserDocksSuspended) {
++		g_lastBrowserDocksSuspended = globalSuspend;
++		BrowserDockCallSuspended(globalSuspend);
 +	}
++	if (globalSuspend)
++		return;
 +
-+	if (!anyBlockingOverlay && g_browserDockMainWin) {
++	// Collect actual global rects of visible popups, menus, and dialogs so we only hide
++	// a custom browser dock when an overlay physically intersects that specific dock!
++	QList<QRect> overlayRects;
++	auto addOverlayWidget = [&overlayRects](QWidget *w) {
++		if (!w || !w->isVisible() || w->width() <= 0 || w->height() <= 0)
++			return;
++		QRect r(w->mapToGlobal(QPoint(0, 0)), w->size());
++		if (r.isValid())
++			overlayRects.append(r);
++	};
++
++	if (QWidget *pop = QApplication::activePopupWidget())
++		addOverlayWidget(pop);
++	if (QWidget *mod = QApplication::activeModalWidget())
++		addOverlayWidget(mod);
++
++	if (g_browserDockMainWin) {
 +		for (QWidget *tlw : QApplication::topLevelWidgets()) {
 +			if (!tlw || !tlw->isVisible() || tlw == g_browserDockMainWin)
 +				continue;
 +			const Qt::WindowType wt = tlw->windowType();
 +			if (wt == Qt::Dialog || wt == Qt::Popup || wt == Qt::Sheet || wt == Qt::Drawer) {
-+				anyBlockingOverlay = true;
-+				break;
++				addOverlayWidget(tlw);
 +			}
 +		}
-+	}
-+
-+	if (anyBlockingOverlay != g_lastBrowserDocksSuspended) {
-+		g_lastBrowserDocksSuspended = anyBlockingOverlay;
-+		BrowserDockCallSuspended(anyBlockingOverlay);
 +	}
 +
 +	QRect winGlobalRect;
@@ -15785,7 +15902,16 @@ index 0000000..5d3f5e6
 +		if (winGlobalRect.isValid()) {
 +			logicalRect = logicalRect.intersected(winGlobalRect);
 +		}
-+		const bool visible = !anyBlockingOverlay && e.webSlot->isVisible() && (!dock || dock->isVisible()) &&
++		bool occluded = false;
++		if (logicalRect.isValid()) {
++			for (const QRect &ov : overlayRects) {
++				if (ov.intersects(logicalRect)) {
++					occluded = true;
++					break;
++				}
++			}
++		}
++		const bool visible = !occluded && e.webSlot->isVisible() && (!dock || dock->isVisible()) &&
 +				     !e.webSlot->visibleRegion().isEmpty() && logicalRect.width() >= 32 &&
 +				     logicalRect.height() >= 32;
 +		QRect phys;
@@ -16189,6 +16315,947 @@ index 0000000..5d3f5e6
 +			}
 +		} catch (...) {
 +		}
++	}
++}
++
++// ==================== ANDROID MOBILE STUDIO UI MODE ====================
++
++void ApplyAndroidUiMode(QWidget *mainWindow, bool mobile);
++void InstallAndroidMobileViewToggle(QWidget *mainWindow);
++void MarkAndroidMobileUiStartupDone();
++
++namespace {
++struct AndroidMobileUiState {
++	bool active = false;
++	bool drawerCollapsed = false;
++	bool frontendCbInstalled = false;
++	bool themeCbInstalled = false;
++	bool startupCompleted = false;
++	QPointer<QMainWindow> mw;
++	QPointer<QToolBar> topBar;
++	QPointer<QToolBar> bottomBar;
++	QPointer<QComboBox> sceneCombo;
++	QPointer<QLabel> statusBadge;
++	QPointer<QPushButton> btnStudio;
++	QPointer<QPushButton> btnRec;
++	QPointer<QPushButton> btnStream;
++	QPointer<QPushButton> btnUndo;
++	QPointer<QPushButton> btnDrawerToggle;
++	QPointer<QWidget> sceneStripHost;
++	QPointer<QHBoxLayout> sceneStripLayout;
++	QPointer<QAction> viewMenuToggle;
++	std::array<QPointer<QPushButton>, 4> mobileBugBtns{};
++	QPointer<QTimer> syncTimer;
++	QList<QPointer<QDockWidget>> savedDrawerDocks;
++	qint64 streamStartMs = 0;
++	qint64 recStartMs = 0;
++	bool wasStreaming = false;
++	bool wasRecording = false;
++};
++
++AndroidMobileUiState g_mobileUi;
++
++constexpr const char *kMobileCssBegin = "\n/* ANDROID_MOBILE_UI_CSS_BEGIN */\n";
++constexpr const char *kMobileCssEnd = "\n/* ANDROID_MOBILE_UI_CSS_END */\n";
++
++QString BuildMobileTouchStylesheet()
++{
++	return QString::fromUtf8(kMobileCssBegin) +
++	       QStringLiteral(
++		       "QListView::item, QTreeView::item { min-height: 34px; padding: 3px 8px; font-size: 12px; }\n"
++		       "QDockWidget::title { background: #272A33; color: #E1E1E1; padding: 4px 8px; font-size: 12px; font-weight: bold; border-bottom: 1px solid #323540; }\n"
++		       "QTabBar::tab { min-height: 30px; min-width: 78px; max-width: 152px; padding: 4px 10px; font-size: 11px; font-weight: 600; "
++		       "background: #272A33; color: #B4B4B4; border: 1px solid #323540; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; }\n"
++		       "QTabBar::tab:selected { background: #284CB8; color: #FFFFFF; border-color: #476BD7; }\n"
++		       "QTabBar::scroller { width: 68px; }\n"
++		       "QTabBar QToolButton { background: #3C404D; color: #E1E1E1; border: 1px solid #464B59; border-radius: 4px; min-width: 30px; min-height: 28px; margin: 1px; }\n"
++		       "QTabBar QToolButton:pressed { background: #284CB8; border-color: #476BD7; }\n"
++		       "QTabBar QToolButton:disabled { background: #272A33; color: #5B6273; border-color: #323540; }\n"
++		       "QToolBar#androidMobileTopBar, QToolBar#androidMobileBottomBar { background: #1D1F26; border: none; spacing: 0px; padding: 0px; margin: 0px; }\n"
++		       "QToolBar#androidMobileTopBar { border-bottom: 1px solid #323540; }\n"
++		       "QToolBar#androidMobileBottomBar { border-top: 1px solid #323540; }\n"
++		       "QSlider::handle:horizontal { width: 18px; height: 22px; margin: -7px 0; border-radius: 9px; }\n"
++		       "QAbstractButton[class=\"icon-plus\"], QAbstractButton[class=\"icon-trash\"], "
++		       "QAbstractButton[class=\"icon-cogs\"], QAbstractButton[class=\"icon-up\"], "
++		       "QAbstractButton[class=\"icon-down\"] { min-width: 28px; min-height: 28px; }\n") +
++	       QString::fromUtf8(kMobileCssEnd);
++}
++
++class AndroidTabBarSwipeFilter : public QObject {
++public:
++	explicit AndroidTabBarSwipeFilter(QTabBar *bar) : QObject(bar), tabBar(bar) {}
++
++protected:
++	bool stepScroll(bool scrollRight)
++	{
++		if (!tabBar)
++			return false;
++		QList<QToolButton *> btns = tabBar->findChildren<QToolButton *>(QString(), Qt::FindDirectChildrenOnly);
++		if (btns.size() < 2)
++			return false;
++		// Left scroll button has smaller x; right scroll button has larger x
++		QToolButton *leftBtn = btns[0];
++		QToolButton *rightBtn = btns[1];
++		if (leftBtn->x() > rightBtn->x())
++			std::swap(leftBtn, rightBtn);
++		QToolButton *target = scrollRight ? rightBtn : leftBtn;
++		if (target && target->isEnabled()) {
++			target->click();
++			return true;
++		}
++		return false;
++	}
++
++	bool eventFilter(QObject *obj, QEvent *ev) override
++	{
++		if (obj != tabBar || !tabBar)
++			return QObject::eventFilter(obj, ev);
++		const QEvent::Type t = ev->type();
++		if (t == QEvent::MouseButtonPress) {
++			auto *me = static_cast<QMouseEvent *>(ev);
++			if (me->button() == Qt::LeftButton) {
++				pressing = true;
++				swiped = false;
++				lastX = me->globalPosition().x();
++			}
++		} else if (t == QEvent::MouseMove && pressing) {
++			auto *me = static_cast<QMouseEvent *>(ev);
++			const qreal curX = me->globalPosition().x();
++			const qreal dx = curX - lastX;
++			if (!swiped && std::abs(dx) >= 16.0) {
++				swiped = true;
++			}
++			if (swiped) {
++				if (dx <= -34.0) {
++					stepScroll(true);
++					lastX = curX;
++				} else if (dx >= 34.0) {
++					stepScroll(false);
++					lastX = curX;
++				}
++				return true;
++			}
++		} else if (t == QEvent::MouseButtonRelease && pressing) {
++			const bool wasSwiped = swiped;
++			pressing = false;
++			swiped = false;
++			if (wasSwiped) {
++				return true;
++			}
++		}
++		return QObject::eventFilter(obj, ev);
++	}
++
++private:
++	QPointer<QTabBar> tabBar;
++	bool pressing = false;
++	bool swiped = false;
++	qreal lastX = 0.0;
++};
++
++void EnhanceMobileDockTabBars(QMainWindow *mw)
++{
++	if (!mw)
++		return;
++	for (QTabBar *tb : mw->findChildren<QTabBar *>()) {
++		if (!tb)
++			continue;
++		tb->setExpanding(false);
++		tb->setElideMode(Qt::ElideRight);
++		tb->setUsesScrollButtons(true);
++		if (!tb->property("androidTabSwipe").toBool()) {
++			tb->setProperty("androidTabSwipe", true);
++			tb->installEventFilter(new AndroidTabBarSwipeFilter(tb));
++		}
++	}
++}
++
++void ApplyMobileStylesheetFlag(bool enable)
++{
++	if (!qApp)
++		return;
++	QString css = qApp->styleSheet();
++	const QString startTag = QString::fromUtf8(kMobileCssBegin);
++	const QString endTag = QString::fromUtf8(kMobileCssEnd);
++	const int sIdx = css.indexOf(startTag);
++	if (sIdx >= 0) {
++		const int eIdx = css.indexOf(endTag, sIdx);
++		if (eIdx >= 0) {
++			css.remove(sIdx, (eIdx + endTag.size()) - sIdx);
++		} else {
++			css.remove(sIdx, css.size() - sIdx);
++		}
++	}
++	if (enable) {
++		css += BuildMobileTouchStylesheet();
++	}
++	qApp->setStyleSheet(css);
++}
++
++QString FormatElapsedHms(qint64 ms)
++{
++	const qint64 sec = std::max<qint64>(0, ms / 1000);
++	const qint64 h = sec / 3600;
++	const qint64 m = (sec % 3600) / 60;
++	const qint64 s = sec % 60;
++	return QStringLiteral("%1:%2:%3")
++		.arg(h, 2, 10, QChar('0'))
++		.arg(m, 2, 10, QChar('0'))
++		.arg(s, 2, 10, QChar('0'));
++}
++
++void RefreshMobileSceneCombo()
++{
++	if (!g_mobileUi.active)
++		return;
++
++	obs_source_t *curScene = obs_frontend_get_current_scene();
++	const QString curName = curScene ? QString::fromUtf8(obs_source_get_name(curScene)) : QString();
++	if (curScene)
++		obs_source_release(curScene);
++
++	QString progName;
++	if (obs_frontend_preview_program_mode_active()) {
++		if (obs_source_t *pScene = obs_frontend_get_current_preview_scene()) {
++			// In Studio Mode: current_scene is Program, preview_scene is Preview
++			progName = curName;
++			obs_source_release(pScene);
++		}
++	}
++	QString activeSelectName = curName;
++	if (obs_frontend_preview_program_mode_active()) {
++		if (obs_source_t *prev = obs_frontend_get_current_preview_scene()) {
++			activeSelectName = QString::fromUtf8(obs_source_get_name(prev));
++			obs_source_release(prev);
++		}
++	}
++
++	QStringList sceneNames;
++	obs_frontend_source_list scenes{};
++	obs_frontend_get_scenes(&scenes);
++	for (size_t i = 0; i < scenes.sources.num; ++i) {
++		obs_source_t *s = scenes.sources.array[i];
++		if (!s)
++			continue;
++		sceneNames.append(QString::fromUtf8(obs_source_get_name(s)));
++	}
++	obs_frontend_source_list_free(&scenes);
++
++	// 1) Sync top dropdown
++	if (g_mobileUi.sceneCombo) {
++		g_mobileUi.sceneCombo->blockSignals(true);
++		g_mobileUi.sceneCombo->clear();
++		int curIdx = -1;
++		for (int i = 0; i < sceneNames.size(); ++i) {
++			g_mobileUi.sceneCombo->addItem(sceneNames[i]);
++			if (sceneNames[i] == activeSelectName)
++				curIdx = i;
++		}
++		if (curIdx >= 0) {
++			g_mobileUi.sceneCombo->setCurrentIndex(curIdx);
++		}
++		g_mobileUi.sceneCombo->blockSignals(false);
++	}
++
++	// 2) Rebuild 1-tap scene buttons in the Bottom Quick Bar
++	if (g_mobileUi.sceneStripLayout && g_mobileUi.sceneStripHost) {
++		while (QLayoutItem *item = g_mobileUi.sceneStripLayout->takeAt(0)) {
++			if (QWidget *w = item->widget())
++				w->deleteLater();
++			delete item;
++		}
++		const bool studio = obs_frontend_preview_program_mode_active();
++		for (const QString &name : sceneNames) {
++			auto *btn = new QPushButton(name, g_mobileUi.sceneStripHost);
++			btn->setFixedHeight(28);
++			btn->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
++			const bool isSelected = (name == activeSelectName);
++			const bool isProgram = studio && (name == progName) && !isSelected;
++			if (isSelected) {
++				btn->setStyleSheet(QStringLiteral(
++					"QPushButton { background: #284CB8; color: #FFFFFF; border: 1px solid #476BD7; "
++					"border-radius: 4px; padding: 0 11px; font-size: 11px; font-weight: bold; }"));
++			} else if (isProgram) {
++				btn->setStyleSheet(QStringLiteral(
++					"QPushButton { background: #3C404D; color: #FFFFFF; border: 1px solid #C01C37; "
++					"border-radius: 4px; padding: 0 11px; font-size: 11px; font-weight: 600; }"
++					"QPushButton:pressed { background: #464B59; }"));
++			} else {
++				btn->setStyleSheet(QStringLiteral(
++					"QPushButton { background: #272A33; color: #E1E1E1; border: 1px solid #3C404D; "
++					"border-radius: 4px; padding: 0 11px; font-size: 11px; font-weight: 600; }"
++					"QPushButton:pressed { background: #3C404D; }"));
++			}
++			QObject::connect(btn, &QPushButton::clicked, g_mobileUi.sceneStripHost, [name]() {
++				obs_frontend_source_list sl{};
++				obs_frontend_get_scenes(&sl);
++				for (size_t i = 0; i < sl.sources.num; ++i) {
++					obs_source_t *s = sl.sources.array[i];
++					if (s && QString::fromUtf8(obs_source_get_name(s)) == name) {
++						if (obs_frontend_preview_program_mode_active()) {
++							obs_frontend_set_current_preview_scene(s);
++						} else {
++							obs_frontend_set_current_scene(s);
++						}
++						break;
++					}
++				}
++				obs_frontend_source_list_free(&sl);
++				QTimer::singleShot(30, []() { RefreshMobileSceneCombo(); });
++			});
++			g_mobileUi.sceneStripLayout->addWidget(btn);
++		}
++		g_mobileUi.sceneStripLayout->addStretch(1);
++	}
++}
++
++void RefreshMobileBugButtons()
++{
++	for (size_t i = 0; i < g_mobileUi.mobileBugBtns.size(); ++i) {
++		QPushButton *b = g_mobileUi.mobileBugBtns[i];
++		if (!b)
++			continue;
++		const auto &slot = bugSlots[i];
++		b->blockSignals(true);
++		b->setChecked(slot.hasContent() && slot.visible);
++		b->setProperty("bugAssigned", slot.hasContent());
++		b->style()->unpolish(b);
++		b->style()->polish(b);
++		b->blockSignals(false);
++	}
++}
++
++void RefreshMobileChromeState()
++{
++	if (!g_mobileUi.active || !g_mobileUi.mw)
++		return;
++
++	const bool streaming = obs_frontend_streaming_active();
++	const bool recording = obs_frontend_recording_active();
++	const bool studio = obs_frontend_preview_program_mode_active();
++	const qint64 now = QDateTime::currentMSecsSinceEpoch();
++
++	if (streaming && !g_mobileUi.wasStreaming)
++		g_mobileUi.streamStartMs = now;
++	if (!streaming)
++		g_mobileUi.streamStartMs = 0;
++	g_mobileUi.wasStreaming = streaming;
++
++	if (recording && !g_mobileUi.wasRecording)
++		g_mobileUi.recStartMs = now;
++	if (!recording)
++		g_mobileUi.recStartMs = 0;
++	g_mobileUi.wasRecording = recording;
++
++	if (g_mobileUi.btnStudio) {
++		g_mobileUi.btnStudio->setStyleSheet(
++			studio ? QStringLiteral("QPushButton { background: #284CB8; color: #FFFFFF; border: 1px solid #476BD7; border-radius: 4px; padding: 0 11px; font-weight: bold; font-size: 12px; }")
++			       : QStringLiteral("QPushButton { background: #3C404D; color: #E1E1E1; border: 1px solid #464B59; border-radius: 4px; padding: 0 11px; font-weight: 600; font-size: 12px; }"));
++	}
++	if (g_mobileUi.btnRec) {
++		g_mobileUi.btnRec->setText(recording ? QStringLiteral("Detener REC") : QStringLiteral("Grabar"));
++		g_mobileUi.btnRec->setStyleSheet(
++			recording ? QStringLiteral("QPushButton { background: #C01C37; color: #FFFFFF; border: 1px solid #E33B57; border-radius: 4px; padding: 0 12px; font-weight: bold; font-size: 12px; }")
++				  : QStringLiteral("QPushButton { background: #3C404D; color: #E1E1E1; border: 1px solid #464B59; border-radius: 4px; padding: 0 12px; font-weight: 600; font-size: 12px; }"));
++	}
++	if (g_mobileUi.btnStream) {
++		g_mobileUi.btnStream->setText(streaming ? QStringLiteral("Detener Vivo") : QStringLiteral("En Vivo"));
++		g_mobileUi.btnStream->setStyleSheet(
++			streaming ? QStringLiteral("QPushButton { background: #C01C37; color: #FFFFFF; border: 1px solid #E33B57; border-radius: 4px; padding: 0 14px; font-weight: bold; font-size: 12px; }")
++				  : QStringLiteral("QPushButton { background: #284CB8; color: #FFFFFF; border: 1px solid #476BD7; border-radius: 4px; padding: 0 14px; font-weight: bold; font-size: 12px; }"));
++	}
++	if (g_mobileUi.btnUndo) {
++		if (QAction *undoAct = g_mobileUi.mw->findChild<QAction *>(QStringLiteral("actionMainUndo"))) {
++			g_mobileUi.btnUndo->setEnabled(undoAct->isEnabled());
++		}
++	}
++	if (g_mobileUi.statusBadge) {
++		const double fps = obs_get_active_fps();
++		QString pill;
++		QString bg = QStringLiteral("#272A33");
++		QString fg = QStringLiteral("#D2D2D2");
++		QString bd = QStringLiteral("#3C404D");
++		if (streaming) {
++			pill = QStringLiteral("EN VIVO %1  |  %2 FPS")
++				       .arg(FormatElapsedHms(now - g_mobileUi.streamStartMs))
++				       .arg(QString::number(fps, 'f', 0));
++			bg = QStringLiteral("#7D1224");
++			fg = QStringLiteral("#FFFFFF");
++			bd = QStringLiteral("#C01C37");
++		} else if (recording) {
++			pill = QStringLiteral("REC %1  |  %2 FPS")
++				       .arg(FormatElapsedHms(now - g_mobileUi.recStartMs))
++				       .arg(QString::number(fps, 'f', 0));
++			bg = QStringLiteral("#7D1224");
++			fg = QStringLiteral("#FFFFFF");
++			bd = QStringLiteral("#C01C37");
++		} else {
++			pill = QStringLiteral("Listo  |  %1 FPS").arg(QString::number(fps, 'f', 0));
++		}
++
++		// Append thermal/battery badge concisely
++		if (void *h = FindAndroidJni()) {
++			using HealthFn = bool (*)(char *, size_t);
++			auto fn = reinterpret_cast<HealthFn>(dlsym(h, "obs_android_get_device_health"));
++			char buf[256] = {};
++			if (fn && fn(buf, sizeof(buf)) && buf[0]) {
++				try {
++					const auto j = nlohmann::json::parse(buf);
++					const int bat = j.value("battery", -1);
++					const double tempC = j.value("temp_c", 0.0);
++					const int thermal = j.value("thermal", 0);
++					if (bat >= 0)
++						pill += QStringLiteral("  |  %1%").arg(bat);
++					if (tempC > 0.1)
++						pill += QStringLiteral(" %1C").arg(QString::number(tempC, 'f', 0));
++					if (thermal >= 3 && !streaming && !recording) {
++						bg = QStringLiteral("#A1172E");
++						fg = QStringLiteral("#FFFFFF");
++						bd = QStringLiteral("#E33B57");
++					}
++				} catch (...) {
++				}
++			}
++		}
++
++		g_mobileUi.statusBadge->setText(pill);
++		g_mobileUi.statusBadge->setStyleSheet(
++			QStringLiteral("background: %1; color: %2; border: 1px solid %3; border-radius: 4px; "
++				       "padding: 3px 10px; font-size: 11px; font-weight: bold;")
++				.arg(bg, fg, bd));
++	}
++	RefreshMobileBugButtons();
++}
++
++void ToggleMobileDrawerCollapsed(bool collapse)
++{
++	if (!g_mobileUi.mw)
++		return;
++	QMainWindow *mw = g_mobileUi.mw;
++	g_mobileUi.drawerCollapsed = collapse;
++
++	if (collapse) {
++		g_mobileUi.savedDrawerDocks.clear();
++		for (QDockWidget *dock : mw->findChildren<QDockWidget *>()) {
++			if (!dock || !dock->isVisible())
++				continue;
++			if (mw->dockWidgetArea(dock) == Qt::RightDockWidgetArea) {
++				g_mobileUi.savedDrawerDocks.append(dock);
++				dock->hide();
++			}
++		}
++	} else {
++		if (g_mobileUi.savedDrawerDocks.isEmpty()) {
++			for (const char *n : {"scenesDock", "sourcesDock", "mixerDock", "transitionsDock"}) {
++				if (auto *d = mw->findChild<QDockWidget *>(QString::fromLatin1(n))) {
++					d->show();
++				}
++			}
++		} else {
++			for (const auto &d : g_mobileUi.savedDrawerDocks) {
++				if (d)
++					d->show();
++			}
++		}
++		if (auto *scenes = mw->findChild<QDockWidget *>(QStringLiteral("scenesDock"))) {
++			const int targetW = std::clamp(mw->width() * 32 / 100, 310, 440);
++			mw->resizeDocks({scenes}, {targetW}, Qt::Horizontal);
++		}
++	}
++
++	if (g_mobileUi.btnDrawerToggle) {
++		g_mobileUi.btnDrawerToggle->setText(collapse ? QStringLiteral("< Panel") : QStringLiteral("Panel >"));
++	}
++	ClampMainWindowToScreen(mw);
++	QTimer::singleShot(60, mw, [mw]() {
++		EnhanceMobileDockTabBars(mw);
++		SyncAllAndroidBrowserDocks();
++	});
++}
++
++void OnMobileFrontendEvent(enum obs_frontend_event event, void *)
++{
++	if (!g_mobileUi.active || !g_mobileUi.mw)
++		return;
++	if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED ||
++	    event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
++	    event == OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED) {
++		QMetaObject::invokeMethod(
++			g_mobileUi.mw, []() { RefreshMobileSceneCombo(); }, Qt::QueuedConnection);
++	}
++	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED ||
++	    event == OBS_FRONTEND_EVENT_RECORDING_STARTED || event == OBS_FRONTEND_EVENT_RECORDING_STOPPED ||
++	    event == OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED || event == OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED) {
++		QMetaObject::invokeMethod(
++			g_mobileUi.mw,
++			[]() {
++				RefreshMobileChromeState();
++				RefreshMobileSceneCombo();
++			},
++			Qt::QueuedConnection);
++	}
++}
++
++void EnsureMobileChromeCreated(QMainWindow *mw)
++{
++	if (!mw)
++		return;
++	g_mobileUi.mw = mw;
++
++	if (!g_mobileUi.frontendCbInstalled) {
++		g_mobileUi.frontendCbInstalled = true;
++		obs_frontend_add_event_callback(OnMobileFrontendEvent, nullptr);
++	}
++	if (!g_mobileUi.themeCbInstalled && App()) {
++		g_mobileUi.themeCbInstalled = true;
++		QObject::connect(App(), &OBSApp::StyleChanged, mw, []() {
++			if (g_mobileUi.active) {
++				QTimer::singleShot(20, []() {
++					if (g_mobileUi.active)
++						ApplyMobileStylesheetFlag(true);
++				});
++			}
++		});
++	}
++
++	if (!g_mobileUi.topBar) {
++		auto *tb = new QToolBar(QStringLiteral("Barra movil superior"), mw);
++		tb->setObjectName(QStringLiteral("androidMobileTopBar"));
++		tb->setMovable(false);
++		tb->setFloatable(false);
++		tb->setContentsMargins(0, 0, 0, 0);
++		tb->setFixedHeight(44);
++
++		auto *host = new QWidget(tb);
++		host->setFixedHeight(42);
++		auto *h = new QHBoxLayout(host);
++		h->setContentsMargins(6, 4, 6, 4);
++		h->setSpacing(6);
++
++		auto makeTopBtn = [host](const QString &txt, int minW) {
++			auto *b = new QPushButton(txt, host);
++			b->setFixedHeight(30);
++			b->setMinimumWidth(minW);
++			b->setStyleSheet(QStringLiteral(
++				"QPushButton { background: #3C404D; color: #E1E1E1; border: 1px solid #464B59; "
++				"border-radius: 4px; padding: 0 10px; font-size: 12px; font-weight: 600; }"
++				"QPushButton:pressed { background: #4E5566; }"));
++			return b;
++		};
++
++		auto *btnMenu = makeTopBtn(QStringLiteral("Menu"), 58);
++		QObject::connect(btnMenu, &QPushButton::clicked, mw, [mw, btnMenu]() {
++			QMenu popup(mw);
++			if (QMenuBar *mb = mw->menuBar()) {
++				for (QAction *a : mb->actions()) {
++					if (a && a->menu()) {
++						popup.addMenu(a->menu());
++					}
++				}
++			}
++			popup.addSeparator();
++			QAction *toDesk = popup.addAction(QStringLiteral("Cambiar a interfaz Escritorio (OBS clasico)"));
++			QObject::connect(toDesk, &QAction::triggered, mw, [mw]() {
++				config_set_string(App()->GetUserConfig(), "Appearance", "AndroidUiMode", "desktop");
++				config_save_safe(App()->GetUserConfig(), "tmp", nullptr);
++				::ApplyAndroidUiMode(mw, false);
++			});
++			popup.exec(btnMenu->mapToGlobal(QPoint(0, btnMenu->height())));
++			QTimer::singleShot(40, []() { SyncAllAndroidBrowserDocks(); });
++		});
++
++		auto *sceneCb = new QComboBox(host);
++		sceneCb->setFixedHeight(30);
++		sceneCb->setMinimumWidth(130);
++		sceneCb->setMaximumWidth(230);
++		sceneCb->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
++		sceneCb->setStyleSheet(QStringLiteral(
++			"QComboBox { background: #272A33; color: #E1E1E1; border: 1px solid #464B59; "
++			"border-radius: 4px; padding: 0 8px; font-size: 12px; font-weight: 600; }"));
++		QObject::connect(sceneCb, qOverload<int>(&QComboBox::activated), mw, [sceneCb](int idx) {
++			if (idx < 0)
++				return;
++			const QString want = sceneCb->itemText(idx);
++			obs_frontend_source_list scenes{};
++			obs_frontend_get_scenes(&scenes);
++			for (size_t i = 0; i < scenes.sources.num; ++i) {
++				obs_source_t *s = scenes.sources.array[i];
++				if (s && QString::fromUtf8(obs_source_get_name(s)) == want) {
++					if (obs_frontend_preview_program_mode_active()) {
++						obs_frontend_set_current_preview_scene(s);
++					} else {
++						obs_frontend_set_current_scene(s);
++					}
++					break;
++				}
++			}
++			obs_frontend_source_list_free(&scenes);
++			QTimer::singleShot(30, []() { RefreshMobileSceneCombo(); });
++		});
++		g_mobileUi.sceneCombo = sceneCb;
++
++		auto *badge = new QLabel(QStringLiteral("Listo"), host);
++		badge->setFixedHeight(28);
++		badge->setAlignment(Qt::AlignCenter);
++		g_mobileUi.statusBadge = badge;
++
++		auto *btnStudio = makeTopBtn(QStringLiteral("Estudio"), 68);
++		QObject::connect(btnStudio, &QPushButton::clicked, mw, [mw]() {
++			if (auto *b = mw->findChild<QPushButton *>(QStringLiteral("modeSwitch"))) {
++				b->click();
++			} else {
++				obs_frontend_set_preview_program_mode(!obs_frontend_preview_program_mode_active());
++			}
++			QTimer::singleShot(60, []() { RefreshMobileChromeState(); });
++		});
++		g_mobileUi.btnStudio = btnStudio;
++
++		auto *btnRec = makeTopBtn(QStringLiteral("Grabar"), 72);
++		QObject::connect(btnRec, &QPushButton::clicked, mw, [mw]() {
++			if (auto *b = mw->findChild<QPushButton *>(QStringLiteral("recordButton"))) {
++				b->click();
++			}
++			QTimer::singleShot(120, []() { RefreshMobileChromeState(); });
++		});
++		g_mobileUi.btnRec = btnRec;
++
++		auto *btnStream = makeTopBtn(QStringLiteral("En Vivo"), 78);
++		QObject::connect(btnStream, &QPushButton::clicked, mw, [mw]() {
++			if (auto *b = mw->findChild<QPushButton *>(QStringLiteral("streamButton"))) {
++				b->click();
++			}
++			QTimer::singleShot(120, []() { RefreshMobileChromeState(); });
++		});
++		g_mobileUi.btnStream = btnStream;
++
++		auto *btnSettings = makeTopBtn(QStringLiteral("Ajustes"), 66);
++		QObject::connect(btnSettings, &QPushButton::clicked, mw, [mw]() {
++			if (auto *act = mw->findChild<QAction *>(QStringLiteral("action_Settings"))) {
++				act->trigger();
++			} else if (auto *b = mw->findChild<QPushButton *>(QStringLiteral("settingsButton"))) {
++				b->click();
++			}
++		});
++
++		h->addWidget(btnMenu);
++		h->addWidget(sceneCb);
++		h->addStretch(1);
++		h->addWidget(badge);
++		h->addStretch(1);
++		h->addWidget(btnStudio);
++		h->addWidget(btnRec);
++		h->addWidget(btnStream);
++		h->addWidget(btnSettings);
++
++		tb->addWidget(host);
++		mw->addToolBar(Qt::TopToolBarArea, tb);
++		g_mobileUi.topBar = tb;
++	}
++
++	if (!g_mobileUi.bottomBar) {
++		auto *bb = new QToolBar(QStringLiteral("Barra movil inferior"), mw);
++		bb->setObjectName(QStringLiteral("androidMobileBottomBar"));
++		bb->setMovable(false);
++		bb->setFloatable(false);
++		bb->setContentsMargins(0, 0, 0, 0);
++		bb->setFixedHeight(40);
++
++		auto *host = new QWidget(bb);
++		host->setFixedHeight(38);
++		auto *h = new QHBoxLayout(host);
++		h->setContentsMargins(6, 4, 6, 4);
++		h->setSpacing(5);
++
++		auto *lblM = new QLabel(QStringLiteral("Moscas"), host);
++		lblM->setStyleSheet(QStringLiteral("color: #B4B4B4; font-size: 11px; font-weight: bold;"));
++		h->addWidget(lblM);
++
++		const QString bugCss = QStringLiteral(
++			"QPushButton { min-width: 28px; max-width: 30px; min-height: 26px; max-height: 26px;"
++			" padding: 0; font-size: 11px; font-weight: bold; border-radius: 4px;"
++			" border: 1px solid #3C404D; background: #272A33; color: #969696; }"
++			"QPushButton[bugAssigned=\"true\"] { border: 1px solid #5B6273; color: #E1E1E1; }"
++			"QPushButton:checked { background: #1E8528; border: 1px solid #37D247; color: #FFFFFF; }");
++
++		for (size_t i = 0; i < g_mobileUi.mobileBugBtns.size(); ++i) {
++			auto *b = new QPushButton(QString::number(i + 1), host);
++			b->setCheckable(true);
++			b->setStyleSheet(bugCss);
++			g_mobileUi.mobileBugBtns[i] = b;
++			h->addWidget(b);
++
++			auto *tapTimer = new QTimer(b);
++			tapTimer->setSingleShot(true);
++			tapTimer->setInterval(QApplication::doubleClickInterval());
++			QObject::connect(tapTimer, &QTimer::timeout, b, [mw, i]() {
++				auto &slot = bugSlots[i];
++				if (!slot.hasContent()) {
++					ConfigureBugSlot(mw, i);
++					RefreshMobileBugButtons();
++					return;
++				}
++				slot.visible = !slot.visible;
++				if (!ApplyBugSlot(i))
++					slot.visible = false;
++				RefreshBugButtons();
++				RefreshMobileBugButtons();
++				SaveBugConfigFile();
++				SaveAllObsStateOnGuiThread();
++			});
++			QObject::connect(b, &QPushButton::clicked, host, [mw, i, tapTimer]() {
++				RefreshMobileBugButtons();
++				if (tapTimer->isActive()) {
++					tapTimer->stop();
++					ConfigureBugSlot(mw, i);
++					RefreshMobileBugButtons();
++				} else {
++					tapTimer->start();
++				}
++			});
++		}
++
++		auto makeBotBtn = [host](const QString &txt) {
++			auto *b = new QPushButton(txt, host);
++			b->setFixedHeight(28);
++			b->setStyleSheet(QStringLiteral(
++				"QPushButton { background: #3C404D; color: #E1E1E1; border: 1px solid #464B59; "
++				"border-radius: 4px; padding: 0 10px; font-size: 11px; font-weight: 600; }"
++				"QPushButton:pressed { background: #284CB8; color: #FFFFFF; border-color: #476BD7; }"
++				"QPushButton:disabled { color: #5B6273; background: #272A33; border-color: #323540; }"));
++			return b;
++		};
++
++		auto *btnAddSrc = makeBotBtn(QStringLiteral("+ Fuente"));
++		QObject::connect(btnAddSrc, &QPushButton::clicked, mw, [mw]() {
++			if (auto *act = mw->findChild<QAction *>(QStringLiteral("actionAddSource"))) {
++				act->trigger();
++			}
++		});
++
++		auto *btnUndo = makeBotBtn(QStringLiteral("Deshacer"));
++		QObject::connect(btnUndo, &QPushButton::clicked, mw, [mw]() {
++			if (auto *act = mw->findChild<QAction *>(QStringLiteral("actionMainUndo"))) {
++				act->trigger();
++			}
++		});
++		g_mobileUi.btnUndo = btnUndo;
++
++		// Vertical subtle OBS divider before the live 1-tap scene buttons strip
++		auto *div1 = new QFrame(host);
++		div1->setFixedSize(1, 22);
++		div1->setStyleSheet(QStringLiteral("background: #323540;"));
++
++		auto *sceneScroll = new QScrollArea(host);
++		sceneScroll->setFrameShape(QFrame::NoFrame);
++		sceneScroll->setWidgetResizable(true);
++		sceneScroll->setFixedHeight(30);
++		sceneScroll->setMinimumWidth(80);
++		sceneScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
++		sceneScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++		sceneScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++		sceneScroll->setStyleSheet(QStringLiteral("background: transparent;"));
++		QScroller::grabGesture(sceneScroll->viewport(), QScroller::LeftMouseButtonGesture);
++
++		auto *sceneStrip = new QWidget(sceneScroll);
++		sceneStrip->setStyleSheet(QStringLiteral("background: transparent;"));
++		auto *sceneLay = new QHBoxLayout(sceneStrip);
++		sceneLay->setContentsMargins(0, 1, 0, 1);
++		sceneLay->setSpacing(5);
++		sceneScroll->setWidget(sceneStrip);
++		g_mobileUi.sceneStripHost = sceneStrip;
++		g_mobileUi.sceneStripLayout = sceneLay;
++
++		auto *div2 = new QFrame(host);
++		div2->setFixedSize(1, 22);
++		div2->setStyleSheet(QStringLiteral("background: #323540;"));
++
++		auto *btnDrawer = makeBotBtn(QStringLiteral("Panel >"));
++		btnDrawer->setMinimumWidth(68);
++		QObject::connect(btnDrawer, &QPushButton::clicked, mw,
++				 []() { ToggleMobileDrawerCollapsed(!g_mobileUi.drawerCollapsed); });
++		g_mobileUi.btnDrawerToggle = btnDrawer;
++
++		h->addSpacing(4);
++		h->addWidget(btnAddSrc);
++		h->addWidget(btnUndo);
++		h->addWidget(div1);
++		h->addWidget(sceneScroll, 1);
++		h->addWidget(div2);
++		h->addWidget(btnDrawer);
++
++		bb->addWidget(host);
++		mw->addToolBar(Qt::BottomToolBarArea, bb);
++		g_mobileUi.bottomBar = bb;
++	}
++
++	if (!g_mobileUi.syncTimer) {
++		g_mobileUi.syncTimer = new QTimer(mw);
++		g_mobileUi.syncTimer->setInterval(1000);
++		QObject::connect(g_mobileUi.syncTimer, &QTimer::timeout, mw, []() { RefreshMobileChromeState(); });
++	}
++}
++} // namespace
++
++void InstallAndroidMobileViewToggle(QWidget *mainWindow)
++{
++	auto *mw = qobject_cast<QMainWindow *>(mainWindow);
++	if (!mw || g_mobileUi.viewMenuToggle)
++		return;
++	if (QMenu *viewMenu = mw->findChild<QMenu *>(QStringLiteral("menuView"))) {
++		viewMenu->addSeparator();
++		QAction *act = viewMenu->addAction(QStringLiteral("Modo interfaz movil (Android)"));
++		act->setCheckable(true);
++		const char *uiMode = config_get_string(App()->GetUserConfig(), "Appearance", "AndroidUiMode");
++		act->setChecked(uiMode && std::strcmp(uiMode, "mobile") == 0);
++		QObject::connect(act, &QAction::triggered, mw, [mw](bool checked) {
++			config_set_string(App()->GetUserConfig(), "Appearance", "AndroidUiMode",
++					  checked ? "mobile" : "desktop");
++			config_save_safe(App()->GetUserConfig(), "tmp", nullptr);
++			extern void ApplyAndroidUiMode(QWidget *mainWindow, bool mobile);
++			ApplyAndroidUiMode(mw, checked);
++		});
++		g_mobileUi.viewMenuToggle = act;
++	}
++}
++
++void MarkAndroidMobileUiStartupDone()
++{
++	g_mobileUi.startupCompleted = true;
++}
++
++void ApplyAndroidUiMode(QWidget *mainWindow, bool mobile)
++{
++	auto *mw = qobject_cast<QMainWindow *>(mainWindow);
++	if (!mw)
++		return;
++	EnsureMobileChromeCreated(mw);
++
++	const bool wasActive = g_mobileUi.active;
++	g_mobileUi.active = mobile;
++	if (g_mobileUi.viewMenuToggle) {
++		g_mobileUi.viewMenuToggle->blockSignals(true);
++		g_mobileUi.viewMenuToggle->setChecked(mobile);
++		g_mobileUi.viewMenuToggle->blockSignals(false);
++	}
++
++	config_t *cfg = App()->GetUserConfig();
++
++	if (mobile) {
++		// Save desktop dock layout before rearranging into Mobile Drawer (without overwriting it on mobile restart)
++		if (!wasActive && cfg) {
++			const char *existingDesktop = config_get_string(cfg, "BasicWindow", "DesktopDockState");
++			if (!existingDesktop || !*existingDesktop || g_mobileUi.startupCompleted) {
++				config_set_string(cfg, "BasicWindow", "DesktopDockState",
++						  mw->saveState().toBase64().constData());
++				config_save_safe(cfg, "tmp", nullptr);
++			}
++		}
++
++		if (QMenuBar *mb = mw->menuBar())
++			mb->hide();
++		if (QStatusBar *sb = mw->statusBar())
++			sb->hide();
++		if (g_mobileUi.topBar)
++			g_mobileUi.topBar->show();
++		if (g_mobileUi.bottomBar)
++			g_mobileUi.bottomBar->show();
++
++		ApplyMobileStylesheetFlag(true);
++
++		// Hide desktop Controls dock (replaced by big Top Studio Bar pills)
++		if (auto *ctrl = mw->findChild<QDockWidget *>(QStringLiteral("controlsDock"))) {
++			ctrl->hide();
++		}
++
++		// Consolidate interactive docks into one clean tabbed Right Drawer with North tabs
++		mw->setTabPosition(Qt::RightDockWidgetArea, QTabWidget::North);
++		QDockWidget *anchor = mw->findChild<QDockWidget *>(QStringLiteral("scenesDock"));
++		QList<QDockWidget *> orderedDocks;
++		for (const char *coreName : {"scenesDock", "sourcesDock", "mixerDock", "transitionsDock"}) {
++			if (auto *d = mw->findChild<QDockWidget *>(QString::fromLatin1(coreName))) {
++				orderedDocks.append(d);
++			}
++		}
++		for (QDockWidget *d : mw->findChildren<QDockWidget *>()) {
++			if (!d || orderedDocks.contains(d))
++				continue;
++			const QString n = d->objectName();
++			if (n == "controlsDock" || n == "statsDock")
++				continue;
++			if (d->isVisible() || n.startsWith(QStringLiteral("obs_android_webdock_"))) {
++				orderedDocks.append(d);
++			}
++		}
++
++		if (anchor) {
++			HardenAndroidDock(anchor);
++			mw->addDockWidget(Qt::RightDockWidgetArea, anchor);
++			anchor->show();
++			for (QDockWidget *d : orderedDocks) {
++				if (!d || d == anchor)
++					continue;
++				HardenAndroidDock(d);
++				mw->addDockWidget(Qt::RightDockWidgetArea, d);
++				mw->tabifyDockWidget(anchor, d);
++				d->show();
++			}
++			anchor->raise();
++			const int drawerW = std::clamp(mw->width() * 32 / 100, 310, 440);
++			mw->resizeDocks({anchor}, {drawerW}, Qt::Horizontal);
++		}
++
++		g_mobileUi.drawerCollapsed = false;
++		if (g_mobileUi.btnDrawerToggle)
++			g_mobileUi.btnDrawerToggle->setText(QStringLiteral("Panel >"));
++
++		RefreshMobileSceneCombo();
++		RefreshMobileChromeState();
++		if (g_mobileUi.syncTimer && !g_mobileUi.syncTimer->isActive())
++			g_mobileUi.syncTimer->start();
++
++		ClampMainWindowToScreen(mw);
++		QTimer::singleShot(100, mw, [mw]() {
++			EnhanceMobileDockTabBars(mw);
++			SyncAllAndroidBrowserDocks();
++		});
++	} else {
++		if (g_mobileUi.syncTimer)
++			g_mobileUi.syncTimer->stop();
++		if (g_mobileUi.topBar)
++			g_mobileUi.topBar->hide();
++		if (g_mobileUi.bottomBar)
++			g_mobileUi.bottomBar->hide();
++
++		ApplyMobileStylesheetFlag(false);
++
++		if (QMenuBar *mb = mw->menuBar())
++			mb->show();
++		if (QStatusBar *sb = mw->statusBar())
++			sb->show();
++
++		mw->setTabPosition(Qt::RightDockWidgetArea, QTabWidget::South);
++
++		bool restored = false;
++		if (cfg) {
++			const char *deskState = config_get_string(cfg, "BasicWindow", "DesktopDockState");
++			if (deskState && *deskState) {
++				restored = mw->restoreState(QByteArray::fromBase64(QByteArray(deskState)));
++			}
++		}
++		if (!restored) {
++			if (auto *obsWin = qobject_cast<OBSBasic *>(mw)) {
++				QMetaObject::invokeMethod(obsWin, "on_resetDocks_triggered", Qt::DirectConnection,
++							  Q_ARG(bool, true));
++			}
++		}
++		for (QDockWidget *d : mw->findChildren<QDockWidget *>()) {
++			HardenAndroidDock(d);
++		}
++		ClampMainWindowToScreen(mw);
++		QTimer::singleShot(100, mw, [mw]() {
++			EnhanceMobileDockTabBars(mw);
++			SyncAllAndroidBrowserDocks();
++		});
 +	}
 +}
 diff --git a/frontend/utility/audio-encoders.cpp b/frontend/utility/audio-encoders.cpp

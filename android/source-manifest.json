@@ -81,6 +81,14 @@
             "sha256Lf": "a22a0e30117533c407be72b144a9e5b075e2d80a49e983aeec9ee760c6066353"
         },
         {
+            "path": "frontend/settings/OBSBasicSettings.hpp",
+            "sha256Lf": "bb26c4029dac08561a00af8baaf968c102044748004ea30494595ac365ea342d"
+        },
+        {
+            "path": "frontend/settings/OBSBasicSettings_Appearance.cpp",
+            "sha256Lf": "c2e44d164aa5b37c1287934099f0c1c3930f70cb15735ba556eca0bbe7a02704"
+        },
+        {
             "path": "frontend/settings/OBSBasicSettings_Stream.cpp",
             "sha256Lf": "da3d71f0a988e2e46a74bd4960a41c75936e11a8235827286b273ea535822e37"
         },
@@ -110,7 +118,7 @@
         },
         {
             "path": "frontend/utility/android-tools.cpp",
-            "sha256Lf": "82b0e681ea0d480f68f77c4f68751892d4a185b00c3c9d29ff5977baeb41e440"
+            "sha256Lf": "07c25b3ce713c4754248bdd77b23e2a6d9f04dd5c8d90cc0e3ce1c7e18ee6074"
         },
         {
             "path": "frontend/utility/audio-encoders.cpp",
