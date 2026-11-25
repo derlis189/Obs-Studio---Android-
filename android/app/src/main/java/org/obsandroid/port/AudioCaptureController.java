@@ -499,22 +499,30 @@ final class AudioCaptureController {
     }
 
     void stop(boolean notifyDisable) {
+        AudioRecord active;
+        Thread worker;
         synchronized (lifecycle) {
             running = false;
-            if (recorder != null) {
-                try { recorder.stop(); } catch (IllegalStateException ignored) { }
-            }
-            if (thread != null && thread != Thread.currentThread()) {
-                try { thread.join(1500); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-            }
-            if (recorder != null && (thread == null || !thread.isAlive())) {
-                try { recorder.release(); } catch (IllegalStateException ignored) { }
+            active = recorder;
+            worker = thread;
+        }
+        if (active != null) {
+            try { active.stop(); } catch (IllegalStateException ignored) { }
+        }
+        if (worker != null && worker != Thread.currentThread()) {
+            try { worker.join(1500); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        }
+        boolean workerStopped = worker == null || !worker.isAlive();
+        synchronized (lifecycle) {
+            if (active != null && recorder == active && workerStopped) {
+                try { active.release(); } catch (IllegalStateException ignored) { }
                 recorder = null;
-                thread = null;
+                if (thread == worker) thread = null;
             }
-            if (notifyDisable) {
-                EngineRuntime.EXECUTOR.execute(() -> NativeBridge.enableCapture(kind, false));
-            }
+        }
+        if (!workerStopped) Log.e("ObsAudio", "Audio producer did not stop within 1500 ms (kind=" + kind + ")");
+        if (notifyDisable) {
+            EngineRuntime.EXECUTOR.execute(() -> NativeBridge.enableCapture(kind, false));
         }
     }
 }

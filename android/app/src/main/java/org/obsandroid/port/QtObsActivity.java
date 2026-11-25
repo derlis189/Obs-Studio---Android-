@@ -1169,7 +1169,10 @@ public final class QtObsActivity extends QtActivity {
 
     @Override
     protected void onDestroy() {
-        if (isFinishing()) NativeBridge.quiesceCallbacks();
+        if (isFinishing()) {
+            NativeBridge.quiesceCallbacks();
+            CaptureService.prepareForNativeShutdown();
+        }
         try { NativeBridge.saveAllState(); } catch (Throwable ignored) {}
         LiveGraphicsManager.saveState();
         FloatingSceneOverlay.hide();

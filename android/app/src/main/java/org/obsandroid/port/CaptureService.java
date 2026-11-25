@@ -25,7 +25,9 @@ public final class CaptureService extends Service {
         SESSION_KEEPALIVE = "org.obsandroid.port.SESSION_KEEPALIVE";
     static volatile boolean cameraActive, microphoneActive, screenActive, uvcActive, qtBroadcastActive, sessionBgActive;
     static volatile boolean streamRequested;
+    private static volatile boolean nativeShutdownRequested;
     static volatile String streamError = "";
+    private static volatile CaptureService instance;
     static final String STREAM_START = "org.obsandroid.port.STREAM_START", STREAM_STOP = "org.obsandroid.port.STREAM_STOP";
     private CameraController camera;
     private final java.util.Map<String, AudioCaptureController> microphones = new java.util.LinkedHashMap<>();
@@ -40,6 +42,31 @@ public final class CaptureService extends Service {
     private AudioDeviceCallback audioHotplugCb;
     private boolean audioHotplugPrimed;
     private final Handler main = new Handler(Looper.getMainLooper());
+
+    static void prepareForNativeShutdown() {
+        nativeShutdownRequested = true;
+        CaptureService service = instance;
+        if (service != null) service.stopAudioAndScreenSynchronously();
+    }
+
+    private void stopAudioAndScreenSynchronously() {
+        microphoneActive = false;
+        java.util.List<AudioCaptureController> old = new java.util.ArrayList<>(microphones.values());
+        microphones.clear();
+        for (AudioCaptureController mic : old) {
+            try { mic.stop(false); }
+            catch (Throwable error) { Log.e("ObsCaptureService", "Microphone shutdown", error); }
+        }
+        ScreenController oldScreen = screen;
+        screen = null;
+        screenActive = false;
+        if (oldScreen != null) {
+            try { oldScreen.stop(); }
+            catch (Throwable error) { Log.e("ObsCaptureService", "Screen/audio shutdown", error); }
+        }
+        Log.i("ObsCaptureService", "Audio and screen producers stopped before OBS shutdown (microphones=" + old.size()
+            + ", screen=" + (oldScreen != null) + ")");
+    }
     private static final java.util.concurrent.ExecutorService STOP_EXECUTOR =
         java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "OBS-CaptureStop");
@@ -100,6 +127,7 @@ public final class CaptureService extends Service {
     static boolean isCapturing() { return cameraActive || microphoneActive || screenActive || uvcActive || streamRequested || qtBroadcastActive || sessionBgActive; }
     @Override public void onCreate() {
         super.onCreate();
+        instance = this;
         wakeLock = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "obsandroid:capture");
         wakeLock.setReferenceCounted(false);
         getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("obs_capture", "Captura OBS", NotificationManager.IMPORTANCE_LOW));
@@ -255,6 +283,11 @@ public final class CaptureService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         if (intent == null) { stopSelf(); return START_NOT_STICKY; }
         String action = intent.getAction();
+        if (nativeShutdownRequested) {
+            Log.i("ObsCaptureService", "Ignoring capture command after native shutdown began: " + action);
+            stopSelf(id);
+            return START_NOT_STICKY;
+        }
         try {
             if (STOP.equals(action)) { stopSelf(); return START_NOT_STICKY; }
             if (STREAM_KEEPALIVE.equals(action)) {
@@ -487,15 +520,14 @@ public final class CaptureService extends Service {
             }
         } catch (Throwable ignored) {}
         CameraController oldCam = camera; camera = null;
-        ScreenController oldSc = screen; screen = null;
         UsbUvcController oldUvc = uvc; uvc = null;
         stopCameraAsync(oldCam);
-        stopAllMicsLocked();
-        stopScreenAsync(oldSc);
+        stopAudioAndScreenSynchronously();
         stopUvcAsync(oldUvc);
         try { stopForeground(STOP_FOREGROUND_REMOVE); } catch (Throwable ignored) {}
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         // NEVER call EngineRuntime.releaseIfIdle() / obs_shutdown() here: Qt OBS owns libobs lifecycle!
+        if (instance == this) instance = null;
         super.onDestroy();
     }
     @Override public IBinder onBind(Intent intent) { return null; }
