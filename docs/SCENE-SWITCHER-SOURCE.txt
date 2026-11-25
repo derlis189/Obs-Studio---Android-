@@ -1,0 +1,24 @@
+Advanced Scene Switcher Android experimental port
+Upstream: https://github.com/WarmUpTill/SceneSwitcher
+Version: 1.37.2
+Revision: 6b8e666d5826d3c0784d2bd16c1d309b296f1b7b
+License: GPL-2.0-or-later; original notices retained in LICENSE.
+
+Corresponding sources for this local build:
+  out/scene-switcher-src (pinned upstream plus Android patch)
+  patches/scene-switcher/0001-android-core-base.patch
+  android/scene-switcher/
+  scripts/build-scene-switcher.ps1
+  scripts/build-apk.ps1 -WithSceneSwitcher
+
+Included: original macro engine, original base extension, Qt settings.
+Excluded: optional external extensions; desktop window/process/input hooks.
+Android additions: native-library loading, static curl binding, no system tray,
+an explicitly requested temporary-scene demo and ARM64/16 KB build settings.
+Distribute the complete corresponding source and build scripts with binaries.
+
+Pinned dependencies used here:
+  nlohmann/json 55f93686c01528224f448c19128836e7df245f72
+  chriskohlhoff/asio 8806a6803cde7054c3049d3666d3ec36786568c5
+  websocketpp bundled in upstream revision above
+  libcurl/mbedTLS from the OBS Android project's dependency lock.

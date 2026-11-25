@@ -1,0 +1,45 @@
+plugin,category,reason,phase
+aja,3,SDK y dispositivos AJA de escritorio sin soporte Android demostrado,8
+aja-output-ui,3,Panel Qt y SDK AJA de escritorio,8
+asio-output-ui,3,ASIO y panel Qt Windows,8
+coreaudio-encoder,3,CoreAudio Apple; usar MediaCodec AAC,5
+decklink,3,SDK Blackmagic y dispositivos de escritorio sin soporte Android demostrado,8
+decklink-captions,3,Depende de DeckLink,8
+decklink-output-ui,3,Depende de DeckLink y frontend Qt,8
+frontend-tools,2,Depende del frontend Qt y scripting; adaptar herramientas tras UI,8
+image-source,1,C y API libobs; depende de decodificación FFmpeg y backend GLES funcionales,6
+linux-alsa,3,ALSA de escritorio; capturar mediante API Android,4
+linux-capture,3,X11 y captura de ventanas; sustituir fuente por MediaProjection,4
+linux-jack,3,Servidor JACK no disponible en Android estándar,8
+linux-pipewire,3,PipeWire de escritorio; usar MediaProjection y AudioRecord,4
+linux-pulseaudio,3,PulseAudio de escritorio; usar AudioRecord y AAudio,4
+linux-v4l2,3,Acceso V4L2 no equivale a Camera2 bajo sandbox Android,4
+mac-avcapture,3,AVFoundation Apple; crear fuente Camera2 para OBS,4
+mac-capture,3,Captura macOS; crear fuente MediaProjection para OBS,4
+mac-syphon,3,Syphon macOS,8
+mac-videotoolbox,3,VideoToolbox Apple; crear encoder MediaCodec,5
+mac-virtualcam,3,Extensión de cámara virtual macOS,8
+nv-filters,3,NVIDIA de Windows,8
+obs-browser,2,CEF de escritorio no tiene backend Android en este módulo; fuente WebView requeriría adaptación extensa,8
+obs-ffmpeg,2,Portar dependencias y helper de mux a modelo empaquetable Android; separar VAAPI y AMF,8
+obs-filters,2,Audio C muy reutilizable; shaders y RNNoise/SpeexDSP requieren validación ARM64 y GLES,6
+obs-libfdk,2,Compilar FDK-AAC y revisar licencia; preferir MediaCodec AAC inicialmente,8
+obs-nvenc,3,NVIDIA NVENC de escritorio no disponible por NDK estándar,8
+obs-outputs,2,Reutilizar RTMP y MP4; portar sockets TLS rutas y empaquetado,5
+obs-qsv11,3,Intel Quick Sync x86 de escritorio,8
+obs-text,3,GDI Windows; adaptar text-freetype2,6
+obs-transitions,1,Lógica C y API libobs reutilizables; efectos dependen del backend GLES y medios para stinger,6
+obs-vst,3,Hosts VST de escritorio sin ABI Android en este módulo,8
+obs-vst3,3,Plataformas y ABI de escritorio; no plugins binarios Windows,8
+obs-webrtc,2,Cross-compilar libdatachannel y curl; validar salida WHIP en Android,8
+obs-websocket,2,Dependencia Qt y frontend; pospuesto y no reemplaza motor local,8
+obs-x264,2,Compilable ARM64 con x264; codificación CPU opcional fuera del camino prioritario,8
+oss-audio,3,Dispositivos OSS de BSD no disponibles en Android estándar,4
+rtmp-services,2,Reutilizar servicio personalizado; adaptar curl actualizador certificados y rutas de datos,5
+sndio,3,Servidor sndio de escritorio no disponible en Android estándar,4
+text-freetype2,2,FreeType portable; falta selección de fuentes Android y assets sin Fontconfig,6
+vlc-video,2,Integración libVLC y carga dinámica de escritorio; revisar libVLC Android y empaquetado,8
+win-asio,3,ASIO Windows,4
+win-capture,3,Win32 D3D hooks e inyección; usar MediaProjection,4
+win-dshow,3,DirectShow y cámara virtual Windows; usar Camera2,4
+win-wasapi,3,WASAPI Windows; usar AudioRecord y playback capture,4

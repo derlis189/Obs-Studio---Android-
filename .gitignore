@@ -1,0 +1,17 @@
+/out/
+/tools/
+/upstream/
+**/local.properties
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/.cxx/
+/android/app/src/main/assets/libobs/
+/android/app/src/main/assets/obs-studio/
+/android/app/src/main/assets/obs-modules/
+/OBS-Studio-*-Windows-*-Installer.exe
+/aqtinstall.log
+*.apk
+*.aab
+**/node_modules/
+/android/app/src/main/assets/vtuber/**/live2dcubismcore.min.js

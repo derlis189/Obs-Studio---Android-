@@ -1,0 +1,593 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+package org.obsandroid.port;
+
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.app.Dialog;
+import android.app.Presentation;
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.drawable.ColorDrawable;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.util.Base64;
+import android.util.DisplayMetrics;
+import android.util.Log;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.PixelCopy;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
+import android.webkit.ConsoleMessage;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public final class BrowserSourceManager {
+    private static final String TAG = "ObsBrowserSource";
+    private static final Handler sMain = new Handler(Looper.getMainLooper());
+    private static final Map<Long, BrowserInstance> sInstances = new HashMap<>();
+    private static volatile int sThermalFpsCap = 60;
+    private static final HandlerThread sCaptureThread = new HandlerThread("OBS-BrowserCapture");
+    private static final Handler sCapture;
+    static {
+        sCaptureThread.start();
+        sCapture = new Handler(sCaptureThread.getLooper());
+    }
+
+    private static final class BrowserInstance {
+        final long id;
+        WebView webView;
+        Bitmap bitmap;
+        ByteBuffer rgbaBuffer;
+        Presentation presentation;
+        FrameLayout presentationRoot;
+        VirtualDisplay virtualDisplay;
+        ImageReader displayReader;
+        int surfaceWidth;
+        int surfaceHeight;
+        volatile boolean capturePending;
+        volatile long capturedFrames;
+        final BrowserFrameGate frameGate = new BrowserFrameGate();
+        final AtomicBoolean tickQueued = new AtomicBoolean();
+        volatile long nextCaptureAtMs;
+        long lastCaptureReportMs;
+        volatile long lastCaptureWarningMs;
+        String url = "";
+        String customCss = "";
+        int width = 1280;
+        int height = 720;
+        int fps = 30;
+        boolean transparent = true;
+        volatile boolean visible = true;
+        volatile boolean interacting = false;
+        boolean pausePageWhenHidden;
+        volatile boolean destroyed = false;
+        Dialog interactDialog;
+
+        final Runnable tickRunnable = new Runnable() {
+            @Override
+            public void run() {
+                tickQueued.set(false);
+                if (destroyed || !captureActive() || capturePending || !frameGate.hasFreshFrame()) return;
+                long delayMs = nextCaptureAtMs - SystemClock.uptimeMillis();
+                if (delayMs > 0) {
+                    if (tickQueued.compareAndSet(false, true)) sMain.postDelayed(this, delayMs);
+                    return;
+                }
+                captureFrame();
+            }
+        };
+
+        BrowserInstance(long id) {
+            this.id = id;
+        }
+
+        boolean captureActive() { return visible || interacting; }
+
+        void markFrameChanged() {
+            frameGate.changed();
+            scheduleTick();
+        }
+
+        void cancelTick() {
+            sMain.removeCallbacks(tickRunnable);
+            tickQueued.set(false);
+        }
+
+        void updateVisibility() {
+            boolean active = captureActive();
+            if (webView != null) {
+                if (active || !pausePageWhenHidden) webView.onResume();
+                else webView.onPause();
+            }
+            if (presentation != null) {
+                if (visible && !interacting) presentation.show();
+                else presentation.hide();
+            }
+            if (active) {
+                markFrameChanged();
+            } else {
+                cancelTick();
+            }
+            Log.i(TAG, "Browser capture " + (active ? "active" : "paused") + " id=" + id
+                + " frames=" + capturedFrames + " pageKept=" + !pausePageWhenHidden);
+        }
+
+        void ensureBuffers(int w, int h) {
+            int cw = Math.max(64, Math.min(3840, w));
+            int ch = Math.max(64, Math.min(2160, h));
+            if (bitmap != null && bitmap.getWidth() == cw && bitmap.getHeight() == ch && rgbaBuffer != null) {
+                return;
+            }
+            if (bitmap != null) {
+                bitmap.recycle();
+                bitmap = null;
+            }
+            bitmap = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888);
+            rgbaBuffer = ByteBuffer.allocateDirect(cw * ch * 4);
+            width = cw;
+            height = ch;
+        }
+
+        void releaseBuffers() {
+            if (bitmap != null) bitmap.recycle();
+            bitmap = null;
+            rgbaBuffer = null;
+        }
+
+        void releasePresentation() {
+            if (presentationRoot != null && webView != null && webView.getParent() == presentationRoot) {
+                presentationRoot.removeView(webView);
+            }
+            if (presentation != null) presentation.dismiss();
+            presentation = null;
+            presentationRoot = null;
+            if (virtualDisplay != null) virtualDisplay.release();
+            virtualDisplay = null;
+            if (displayReader != null) displayReader.close();
+            displayReader = null;
+        }
+
+        void ensurePresentation(Activity activity) {
+            if (interacting || destroyed) return;
+            if (presentation != null && presentation.isShowing() &&
+                    surfaceWidth == width && surfaceHeight == height) return;
+            releasePresentation();
+            try {
+                // Chromium's supported offscreen path: an actual accelerated window
+                // on a private display. This does not mirror or capture the phone screen.
+                displayReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
+                displayReader.setOnImageAvailableListener(reader -> {
+                    // Always drain the display consumer, including while PixelCopy is busy.
+                    // Blocking this queue would stall Android's shared render thread.
+                    try (Image image = reader.acquireLatestImage()) {
+                        if (image != null) markFrameChanged();
+                    } catch (IllegalStateException ignored) {
+                        // The display can be released while a callback is queued.
+                    }
+                }, sCapture);
+                DisplayManager manager = (DisplayManager) activity.getSystemService(Context.DISPLAY_SERVICE);
+                virtualDisplay = manager.createVirtualDisplay("OBS Browser " + id, width, height,
+                    activity.getResources().getDisplayMetrics().densityDpi, displayReader.getSurface(),
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY |
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION);
+                if (virtualDisplay == null) throw new IllegalStateException("VirtualDisplay no disponible");
+                presentation = new Presentation(activity, virtualDisplay.getDisplay(),
+                    android.R.style.Theme_Translucent_NoTitleBar);
+                presentation.setCancelable(false);
+                Window window = presentation.getWindow();
+                if (window == null) throw new IllegalStateException("Ventana de navegador no disponible");
+                window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                window.setFormat(PixelFormat.TRANSLUCENT);
+                window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED |
+                    WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
+                window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                presentationRoot = new FrameLayout(presentation.getContext());
+                ViewGroup parent = (ViewGroup) webView.getParent();
+                if (parent != null) parent.removeView(webView);
+                presentationRoot.addView(webView, new FrameLayout.LayoutParams(width, height));
+                presentation.setContentView(presentationRoot);
+                presentation.show();
+                window.setLayout(width, height);
+                surfaceWidth = width;
+                surfaceHeight = height;
+                Log.i(TAG, "Hardware browser window ready id=" + id + " " + width + "x" + height);
+                frameGate.changed();
+            } catch (RuntimeException failure) {
+                releasePresentation();
+                warnCapture("No se pudo preparar la captura GPU: " + failure.getClass().getSimpleName());
+            }
+        }
+
+        void warnCapture(String message) {
+            long now = SystemClock.uptimeMillis();
+            if (now - lastCaptureWarningMs >= 5000) {
+                lastCaptureWarningMs = now;
+                Log.w(TAG, "Browser id=" + id + ": " + message);
+            }
+        }
+
+        void layoutOffscreen() {
+            if (webView == null || interacting) return;
+            ViewGroup.LayoutParams lp = webView.getLayoutParams();
+            if (lp == null || lp.width != width || lp.height != height) {
+                webView.setLayoutParams(new FrameLayout.LayoutParams(width, height));
+            }
+            int wSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY);
+            int hSpec = View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY);
+            webView.measure(wSpec, hSpec);
+            webView.layout(0, 0, width, height);
+        }
+
+        void injectCustomCss() {
+            if (webView == null || destroyed) return;
+            String css = customCss != null ? customCss : "";
+            String b64 = Base64.encodeToString(css.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+            String js = "(function(){"
+                + "var id='obs-android-custom-css';"
+                + "var el=document.getElementById(id);"
+                + "if(!el){el=document.createElement('style');el.id=id;(document.head||document.documentElement).appendChild(el);}"
+                + "try{el.textContent=decodeURIComponent(escape(atob('" + b64 + "')));}catch(e){el.textContent=atob('" + b64 + "');}"
+                + "})();";
+            webView.evaluateJavascript(js, null);
+        }
+
+        void captureFrame() {
+            if (destroyed || webView == null || capturePending || !captureActive() || !frameGate.hasFreshFrame()) return;
+            try {
+                QtObsActivity activity = QtObsActivity.getActiveInstance();
+                if (activity == null || activity.isFinishing()) return;
+                if (!interacting) ensurePresentation(activity);
+                Window target = interacting && interactDialog != null ? interactDialog.getWindow()
+                    : presentation != null ? presentation.getWindow() : null;
+                if (target == null || !webView.isAttachedToWindow() ||
+                        webView.getWidth() <= 0 || webView.getHeight() <= 0) return;
+                ensureBuffers(width, height);
+                final Bitmap frameBitmap = bitmap;
+                final ByteBuffer frameBuffer = rgbaBuffer;
+                int[] location = new int[2];
+                webView.getLocationInWindow(location);
+                Rect rect = new Rect(location[0], location[1], location[0] + webView.getWidth(),
+                    location[1] + webView.getHeight());
+                final long copiedRevision = frameGate.revision();
+                nextCaptureAtMs = SystemClock.uptimeMillis() + ThermalBudget.captureIntervalMs(fps, sThermalFpsCap);
+                capturePending = true;
+                // Copy the window surface, before the virtual display compositor flattens
+                // alpha against black. This preserves transparent HTML and captures video/WebGL.
+                PixelCopy.request(target, rect, frameBitmap, result -> {
+                    try {
+                        if (!destroyed && captureActive() && result == PixelCopy.SUCCESS) {
+                            frameBuffer.clear();
+                            frameBitmap.copyPixelsToBuffer(frameBuffer);
+                            NativeBridge.pushBrowserFrame(id, frameBuffer, frameBitmap.getWidth(),
+                                frameBitmap.getHeight(), System.nanoTime());
+                            frameGate.delivered(copiedRevision);
+                            ++capturedFrames;
+                            long now = SystemClock.uptimeMillis();
+                            if (capturedFrames == 1 || now - lastCaptureReportMs >= 10000) {
+                                lastCaptureReportMs = now;
+                                Log.i(TAG, "GPU browser frames id=" + id + " frames=" + capturedFrames
+                                    + " revision=" + copiedRevision + " cap=" + Math.min(fps, sThermalFpsCap));
+                            }
+                        } else if (!destroyed && result != PixelCopy.SUCCESS) {
+                            nextCaptureAtMs = SystemClock.uptimeMillis() + 250;
+                            warnCapture("PixelCopy=" + result);
+                        }
+                    } catch (RuntimeException failure) {
+                        if (!destroyed) warnCapture("Error al entregar el fotograma GPU");
+                    } finally {
+                        if (destroyed) releaseBuffers();
+                        capturePending = false;
+                        scheduleTick();
+                    }
+                }, sCapture);
+            } catch (Throwable t) {
+                capturePending = false;
+                nextCaptureAtMs = SystemClock.uptimeMillis() + 250;
+                warnCapture("Error de captura: " + t.getClass().getSimpleName());
+                scheduleTick();
+            }
+        }
+
+        void scheduleTick() {
+            if (!destroyed && captureActive() && !capturePending && frameGate.hasFreshFrame()
+                    && tickQueued.compareAndSet(false, true)) {
+                sMain.post(tickRunnable);
+            }
+        }
+    }
+
+    @SuppressLint({"SetJavaScriptEnabled", "deprecation"})
+    private static WebView createConfiguredWebView(Activity activity, BrowserInstance inst) {
+        WebView wv = new WebView(activity);
+        WebSettings settings = wv.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
+        settings.setAllowFileAccessFromFileURLs(true);
+        settings.setAllowUniversalAccessFromFileURLs(true);
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        settings.setUseWideViewPort(true);
+        settings.setLoadWithOverviewMode(false);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        String ua = settings.getUserAgentString();
+        if (ua != null) {
+            ua = ua.replace("Mobile ", "").replace("; wv", "") + " OBS/31.0";
+            settings.setUserAgentString(ua);
+        }
+        wv.setVerticalScrollBarEnabled(false);
+        wv.setHorizontalScrollBarEnabled(false);
+        wv.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        wv.setBackgroundColor(inst.transparent ? Color.TRANSPARENT : Color.WHITE);
+        wv.getViewTreeObserver().addOnDrawListener(() -> {
+            // The private display supplies frame notifications normally. During
+            // interaction WebView belongs to the main dialog's window instead.
+            if (inst.interacting) inst.markFrameChanged();
+        });
+        wv.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return false;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                inst.injectCustomCss();
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request.isForMainFrame()) Log.w(TAG, "Browser page error id=" + inst.id + " code=" + error.getErrorCode());
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                if (request.isForMainFrame()) Log.w(TAG, "Browser HTTP error id=" + inst.id + " status=" + response.getStatusCode());
+            }
+        });
+        wv.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
+                if (consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                    // URLs can contain room passwords or access tokens; never log the page text.
+                    Log.w(TAG, "Browser JavaScript error id=" + inst.id + " line=" + consoleMessage.lineNumber());
+                }
+                return true;
+            }
+        });
+        return wv;
+    }
+
+    public static void createOrUpdate(long id, String url, int width, int height, int fps,
+                                      boolean transparent, String customCss, boolean visible, boolean pausePageWhenHidden) {
+        sMain.post(() -> {
+            QtObsActivity activity = QtObsActivity.getActiveInstance();
+            if (activity == null || activity.isFinishing()) return;
+            BrowserInstance inst = sInstances.get(id);
+            boolean isNew = (inst == null);
+            if (isNew) {
+                inst = new BrowserInstance(id);
+                sInstances.put(id, inst);
+            }
+            inst.width = Math.max(64, Math.min(3840, width));
+            inst.height = Math.max(64, Math.min(2160, height));
+            inst.fps = Math.max(1, Math.min(60, fps));
+            inst.transparent = transparent;
+            inst.visible = visible;
+            inst.pausePageWhenHidden = pausePageWhenHidden;
+            boolean cssChanged = (customCss != null && !customCss.equals(inst.customCss));
+            inst.customCss = customCss != null ? customCss : "";
+            String targetUrl = (url != null && !url.isEmpty()) ? url : "about:blank";
+            boolean urlChanged = isNew || !targetUrl.equals(inst.url);
+            inst.url = targetUrl;
+
+            if (inst.webView == null) {
+                inst.webView = createConfiguredWebView(activity, inst);
+            } else {
+                inst.webView.setBackgroundColor(inst.transparent ? Color.TRANSPARENT : Color.WHITE);
+            }
+
+            inst.ensurePresentation(activity);
+            inst.layoutOffscreen();
+
+            if (urlChanged) {
+                Log.i(TAG, "Loading browser source id=" + id + " (" + inst.width + "x" + inst.height + " @" + inst.fps + "fps) host=" + Uri.parse(targetUrl).getHost());
+                inst.webView.loadUrl(targetUrl);
+            } else if (cssChanged) {
+                inst.injectCustomCss();
+            }
+
+            inst.updateVisibility();
+        });
+    }
+
+    public static void setVisible(long id, boolean visible) {
+        sMain.post(() -> {
+            BrowserInstance inst = sInstances.get(id);
+            if (inst == null || inst.destroyed) return;
+            inst.visible = visible;
+            inst.updateVisibility();
+        });
+    }
+
+    static void setThermalFpsCap(int cap) {
+        sThermalFpsCap = Math.max(1, Math.min(60, cap));
+        sMain.post(() -> {
+            for (BrowserInstance inst : sInstances.values()) inst.scheduleTick();
+        });
+    }
+
+    public static void reload(long id, boolean noCache) {
+        sMain.post(() -> {
+            BrowserInstance inst = sInstances.get(id);
+            if (inst == null || inst.destroyed || inst.webView == null) return;
+            if (noCache) {
+                inst.webView.clearCache(false);
+            }
+            if (inst.url != null && !inst.url.isEmpty()) {
+                inst.webView.loadUrl(inst.url);
+            } else {
+                inst.webView.reload();
+            }
+        });
+    }
+
+    public static void interact(long id) {
+        sMain.post(() -> {
+            QtObsActivity activity = QtObsActivity.getActiveInstance();
+            BrowserInstance inst = sInstances.get(id);
+            if (activity == null || activity.isFinishing() || inst == null || inst.destroyed || inst.webView == null) {
+                return;
+            }
+            if (inst.interactDialog != null && inst.interactDialog.isShowing()) {
+                return;
+            }
+
+            float density = activity.getResources().getDisplayMetrics().density;
+            int pad = Math.round(8 * density);
+
+            LinearLayout root = new LinearLayout(activity);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setBackgroundColor(Color.parseColor("#1D1F27"));
+
+            LinearLayout topBar = new LinearLayout(activity);
+            topBar.setOrientation(LinearLayout.HORIZONTAL);
+            topBar.setGravity(Gravity.CENTER_VERTICAL);
+            topBar.setPadding(pad, Math.round(4 * density), pad, Math.round(4 * density));
+            topBar.setBackgroundColor(Color.parseColor("#2A2E39"));
+
+            TextView title = new TextView(activity);
+            title.setText("Interactuar: " + (inst.url != null ? inst.url : "Navegador"));
+            title.setTextColor(Color.WHITE);
+            title.setSingleLine(true);
+            title.setTextSize(14f);
+            LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            topBar.addView(title, titleLp);
+
+            Button reloadBtn = new Button(activity);
+            reloadBtn.setText("Recargar");
+            reloadBtn.setOnClickListener(v -> {
+                if (inst.webView != null) inst.webView.reload();
+            });
+            topBar.addView(reloadBtn);
+
+            Button closeBtn = new Button(activity);
+            closeBtn.setText("Cerrar");
+            topBar.addView(closeBtn);
+
+            root.addView(topBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            FrameLayout webSlot = new FrameLayout(activity);
+            webSlot.setBackgroundColor(Color.parseColor("#12141A"));
+            root.addView(webSlot, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+            ViewGroup parent = (ViewGroup) inst.webView.getParent();
+            if (parent != null) parent.removeView(inst.webView);
+            inst.interacting = true;
+            if (inst.presentation != null) inst.presentation.hide();
+            inst.webView.setFocusable(true);
+            inst.webView.setFocusableInTouchMode(true);
+            webSlot.addView(inst.webView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            Dialog dialog = new Dialog(activity, android.R.style.Theme_DeviceDefault_NoActionBar);
+            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            dialog.setContentView(root);
+            dialog.setCancelable(true);
+            closeBtn.setOnClickListener(v -> dialog.dismiss());
+
+            dialog.setOnDismissListener(d -> {
+                inst.interactDialog = null;
+                inst.interacting = false;
+                if (!inst.destroyed && inst.webView != null) {
+                    ViewGroup curParent = (ViewGroup) inst.webView.getParent();
+                    if (curParent != null) curParent.removeView(inst.webView);
+                    inst.webView.setFocusable(false);
+                    inst.webView.setFocusableInTouchMode(false);
+                    inst.releasePresentation();
+                    inst.ensurePresentation(activity);
+                    inst.layoutOffscreen();
+                    inst.updateVisibility();
+                }
+                activity.reapplyImmersiveMode();
+            });
+
+            Window w = dialog.getWindow();
+            if (w != null) {
+                DisplayMetrics dm = activity.getResources().getDisplayMetrics();
+                w.setLayout(Math.round(dm.widthPixels * 0.92f), Math.round(dm.heightPixels * 0.90f));
+                w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+            }
+            inst.interactDialog = dialog;
+            dialog.show();
+            inst.updateVisibility();
+        });
+    }
+
+    public static void destroy(long id) {
+        sMain.post(() -> {
+            BrowserInstance inst = sInstances.remove(id);
+            if (inst == null) return;
+            inst.destroyed = true;
+            inst.cancelTick();
+            if (inst.interactDialog != null && inst.interactDialog.isShowing()) {
+                inst.interactDialog.dismiss();
+                inst.interactDialog = null;
+            }
+            inst.releasePresentation();
+            if (inst.webView != null) {
+                ViewGroup parent = (ViewGroup) inst.webView.getParent();
+                if (parent != null) parent.removeView(inst.webView);
+                inst.webView.stopLoading();
+                inst.webView.loadUrl("about:blank");
+                inst.webView.destroy();
+                inst.webView = null;
+            }
+            if (!inst.capturePending) inst.releaseBuffers();
+        });
+    }
+
+    public static void destroyAll() {
+        sMain.post(() -> {
+            for (Long id : new HashMap<>(sInstances).keySet()) {
+                destroy(id);
+            }
+        });
+    }
+
+    private BrowserSourceManager() {}
+}

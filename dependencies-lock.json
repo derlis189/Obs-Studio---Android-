@@ -1,0 +1,28 @@
+{
+  "abi": "arm64-v8a",
+  "androidApi": 29,
+  "ndk": "29.0.14206865",
+  "qtVersion": "6.9.3",
+  "libvlc": {
+    "runtimeUrl": "https://repo.maven.apache.org/maven2/org/videolan/android/libvlc-all/3.7.8/libvlc-all-3.7.8.aar",
+    "runtimeSha256": "ee3392ee90b8dc36bee683191aed1c77a250e8329b8688630d05f8f9486ed726",
+    "headersUrl": "https://download.videolan.org/pub/videolan/vlc/3.0.23/vlc-3.0.23.tar.xz",
+    "headersSha256": "e891cae6aa3ccda69bf94173d5105cbc55c7a7d9b1d21b9b21666e69eff3e7e0",
+    "headersDirectory": "vlc-3.0.23/include/vlc"
+  },
+  "omt": {
+    "omtplugin": "b6356ee5adeb1be7ab2c6257ae588447cc99fbf8",
+    "libomtnet": "7d29031ff3f355ffa1f0cd08ee24d02e258445dd",
+    "libvmx": "31724bb96530325a989bc157c8e07538d6f1c4db"
+  },
+  "sources": [
+    { "name": "srt", "url": "https://github.com/Haivision/srt.git", "tag": "v1.5.4", "commit": "a8c6b65520f814c5bd8f801be48c33ceece7c4a6" },
+    { "name": "ffmpeg", "url": "https://github.com/FFmpeg/FFmpeg.git", "tag": "n8.0.1", "commit": "894da5ca7d742e4429ffb2af534fcda0103ef593" },
+    { "name": "jansson", "url": "https://github.com/akheron/jansson.git", "tag": "v2.14", "commit": "684e18c927e89615c2d501737e90018f4930d6c5" },
+    { "name": "simde", "url": "https://github.com/simd-everywhere/simde.git", "tag": "v0.8.2", "commit": "71fd833d9666141edcd1d3c109a80e228303d8d7" },
+    { "name": "uthash", "url": "https://github.com/troydhanson/uthash.git", "tag": "v2.3.0", "commit": "e493aa90a2833b4655927598f169c31cfcdf7861" },
+    { "name": "mbedtls", "url": "https://github.com/Mbed-TLS/mbedtls.git", "tag": "mbedtls-3.6.8", "commit": "82e69999f91126589a28b70dd75b69fbcabe2711", "submodules": [{ "path": "framework", "commit": "ced31491c5ec907a6be533512f19dc1779230ac1" }] },
+    { "name": "curl", "url": "https://github.com/curl/curl.git", "tag": "curl-8_11_1", "commit": "75a2079d5c28debb2eaa848ca9430f1fe0d7844c" },
+    { "name": "nlohmann_json", "url": "https://github.com/nlohmann/json.git", "tag": "v3.11.3", "commit": "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/obsproject/obs-studio.git",
+  "commit": "0c790bd0151fb9f574867e025ecf57e6eedc58e2",
+  "observedBranch": "master",
+  "observedDate": "2026-11-23",
+  "directory": "upstream/obs-studio",
+  "submodules": [
+    { "path": "deps/libdshowcapture/src", "commit": "8878638324393815512f802640b0d5ce940161f1" },
+    { "path": "deps/libdshowcapture/src/external/capture-device-support", "commit": "fe9630974d47f51bf54826e72fb8b654e620aa93" },
+    { "path": "plugins/obs-browser", "commit": "08a0ada1d77b7003735823ff07cf1be1fb427ac1" },
+    { "path": "plugins/obs-websocket", "commit": "e28f84975984340e84fc4879cfc05741cc0afde1" }
+  ]
+}

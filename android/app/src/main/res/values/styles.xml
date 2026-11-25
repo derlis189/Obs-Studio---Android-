@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="obs_icon_bg">#000000</color>
+    <color name="obs_bg">#0B0E14</color>
+    <style name="Theme.ObsStudio" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/obs_splash</item>
+        <item name="android:colorBackground">@color/obs_bg</item>
+    </style>
+</resources>

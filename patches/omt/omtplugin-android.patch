@@ -1,0 +1,55 @@
+diff --git a/omtplugin.csproj b/omtplugin.csproj
+--- a/omtplugin.csproj
++++ b/omtplugin.csproj
+@@ -23,4 +23,13 @@
+     </Reference>
+   </ItemGroup>
+ 
++  <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'linux-bionic-arm64'">
++    <NativeLib>Shared</NativeLib>
++    <InvariantGlobalization>true</InvariantGlobalization>
++    <DefineConstants>$(DefineConstants);OMT_ANDROID</DefineConstants>
++  </PropertyGroup>
++  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-bionic-arm64'">
++    <LinkerArg Include="-Wl,--undefined-version" />
++    <LinkerArg Include="-Wl,-z,max-page-size=16384" />
++  </ItemGroup>
+ </Project>
+diff --git a/src/UnmanagedExports.cs b/src/UnmanagedExports.cs
+--- a/src/UnmanagedExports.cs
++++ b/src/UnmanagedExports.cs
+@@ -62,6 +62,9 @@
+         [UnmanagedCallersOnly(EntryPoint = "obs_module_load")]
+         public static bool ObsModuleLoad()
+         {
++#if OMT_ANDROID
++            Environment.SetEnvironmentVariable("OMT_ANDROID", "1");
++#endif
+             LoadLibraries();
+             receive = new OBSReceive();
+             receive.Register();
+diff --git a/src/OBSReceiveInstance.cs b/src/OBSReceiveInstance.cs
+--- a/src/OBSReceiveInstance.cs
++++ b/src/OBSReceiveInstance.cs
+@@ -225,6 +225,9 @@
+                             }
+                         }
+                     }
++#if OMT_ANDROID
++                    OBS.obs_properties_add_text(properties, "directAddress", "Dirección OMT (omt://IP:puerto)", 0);
++#endif
+                     IntPtr qualityProperty = OBS.obs_properties_add_list(properties, "qualityProperty", "Suggested Quality", OBS.obs_combo_type.OBS_COMBO_TYPE_LIST, OBS.obs_combo_format.OBS_COMBO_FORMAT_INT);
+                     if (qualityProperty != IntPtr.Zero)
+                     {
+@@ -274,6 +277,11 @@
+                     {
+                         this.address = null;
+                     }
++#if OMT_ANDROID
++                    string? direct = Marshal.PtrToStringUTF8(OBS.obs_data_get_string(settings, "directAddress"))?.Trim();
++                    if (!String.IsNullOrEmpty(direct))
++                        this.address = direct.StartsWith("omt://", StringComparison.OrdinalIgnoreCase) ? direct : "omt://" + direct;
++#endif
+                     Int64 q = OBS.obs_data_get_int(settings, "qualityProperty");
+                     this.suggestedQuality = (OMTQuality)q;
+                     this.displayColorSpace = (OBS.DisplayColorSpace)OBS.obs_data_get_int(settings, "csProperty");

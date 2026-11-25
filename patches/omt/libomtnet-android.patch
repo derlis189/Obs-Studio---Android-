@@ -1,0 +1,16 @@
+diff --git a/src/OMTDiscovery.cs b/src/OMTDiscovery.cs
+--- a/src/OMTDiscovery.cs
++++ b/src/OMTDiscovery.cs
+@@ -91,7 +91,11 @@
+                             instance = new mac.OMTDiscoveryMac();
+                             break;
+                         case OMTPlatformType.Linux:
+-                            instance = new linux.OMTDiscoveryAvahi();
++                            // Android does not ship an Avahi daemon. Direct OMT URLs and a
++                            // configured OMT discovery server are available through the base implementation.
++                            instance = Environment.GetEnvironmentVariable("OMT_ANDROID") == "1"
++                                ? new OMTDiscovery()
++                                : new linux.OMTDiscoveryAvahi();
+                             break;
+                         default:
+                             instance = new OMTDiscovery();

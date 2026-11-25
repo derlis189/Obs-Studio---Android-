@@ -1,0 +1,408 @@
+{
+    "files": [
+        {
+            "path": "CMakeLists.txt",
+            "sha256Lf": "1d62f44f6eff94597ef90765c8f26446192d36f5c1cbe3a0a84e93b922bd23fc"
+        },
+        {
+            "path": "cmake/android/compilerconfig.cmake",
+            "sha256Lf": "ae9316df8d25fc1fda44743097bf39e96d2fd3b8145691d83cc1e7859ffb125c"
+        },
+        {
+            "path": "cmake/android/defaults.cmake",
+            "sha256Lf": "a0a150fcff72cd2fd569a4e98ab13c68b869170a38b03cd6c3f843274bf569fd"
+        },
+        {
+            "path": "cmake/android/helpers.cmake",
+            "sha256Lf": "4909d2ba98fb573d9f68d2952f91bf1e497e962ffdf1639832f586c88ee15746"
+        },
+        {
+            "path": "cmake/common/osconfig.cmake",
+            "sha256Lf": "e7bebb1e78fd7c3a31e1494f36cd85fa931d1c051855a2bf2baba61a27bf6b56"
+        },
+        {
+            "path": "cmake/finders/FindFFmpeg.cmake",
+            "sha256Lf": "633bea9c07d456ac74b9f35fe1ddadb1d61a84d3eda633d5447999ee4963e8be"
+        },
+        {
+            "path": "deps/glad/CMakeLists.txt",
+            "sha256Lf": "feced6ff793aa6d8fa2b2a8eab71577d44a1b4a0693d13ca1f090bb97b6924b5"
+        },
+        {
+            "path": "frontend/CMakeLists.txt",
+            "sha256Lf": "6e73f3085def55962a9de5c40284ff18aa1506f2a1086dd34d85b9248ff9b6d3"
+        },
+        {
+            "path": "frontend/OBSApp.cpp",
+            "sha256Lf": "0938c013b525f43045238688dbae495620b335d25ab375583ae63f6a9d6fa5e7"
+        },
+        {
+            "path": "frontend/cmake/feature-plugin-manager.cmake",
+            "sha256Lf": "ede23a8d3e2fcfdac0b596d5fb06901030eacff539ea2a73a9d25a3a2ee94474"
+        },
+        {
+            "path": "frontend/cmake/os-android.cmake",
+            "sha256Lf": "8b32ffad88ca38c45f19c43261f3ad0d243d97bd5317d911fef81fad4f4565e2"
+        },
+        {
+            "path": "frontend/components/VolumeMeter.cpp",
+            "sha256Lf": "591685104cfca5079d9281c1095d43e7a8bf7a6ae93993f79dc985f9799df2b8"
+        },
+        {
+            "path": "frontend/dialogs/OBSBasicProperties.cpp",
+            "sha256Lf": "3f3068144e7bf635f7b4e29b967a777ea74c4d7a7f14c1571d1a8eb6051320f3"
+        },
+        {
+            "path": "frontend/dialogs/OBSBasicProperties.hpp",
+            "sha256Lf": "06532fab9870144cb9ddf26b4b82d6e96ed076457a603c7b038a21daa8863f5d"
+        },
+        {
+            "path": "frontend/importers/studio.cpp",
+            "sha256Lf": "d39f0387916f9a759fb8748e84d40dfd879cbae9746d86c9b60b6be759539419"
+        },
+        {
+            "path": "frontend/obs-main.cpp",
+            "sha256Lf": "6f6bb9a904be91934f09c3f6e4c167385532630c4e4583f2a2ba56dab8063f01"
+        },
+        {
+            "path": "frontend/plugin-manager/InstalledPluginRow.cpp",
+            "sha256Lf": "1e7d3b9d0ba584a13c218cd477dea5060b8689a9e759e8983f329cb239415471"
+        },
+        {
+            "path": "frontend/plugin-manager/PluginManagerWindow.cpp",
+            "sha256Lf": "2c8b55dcc7c03ccff5c86cb53dece9637a3533c819ed4a5eb1a0c682646500fb"
+        },
+        {
+            "path": "frontend/plugin-manager/PluginModuleLoader_Android.cpp",
+            "sha256Lf": "d5e07f7537ca8187dabbe1d3767fc4aa525d0e08703a0ef4fea1597b60600e72"
+        },
+        {
+            "path": "frontend/settings/OBSBasicSettings.cpp",
+            "sha256Lf": "a22a0e30117533c407be72b144a9e5b075e2d80a49e983aeec9ee760c6066353"
+        },
+        {
+            "path": "frontend/settings/OBSBasicSettings_Stream.cpp",
+            "sha256Lf": "da3d71f0a988e2e46a74bd4960a41c75936e11a8235827286b273ea535822e37"
+        },
+        {
+            "path": "frontend/utility/AdvancedOutput.cpp",
+            "sha256Lf": "1e6fb9bfa1bc4ce3fd1a62e3aae13594878badfdee76c96e1941a0eac0474c8d"
+        },
+        {
+            "path": "frontend/utility/FFmpegCodec.hpp",
+            "sha256Lf": "292dce3122a7bb20ceeda36e36a7aa87f793c80328007d165c04f1dcc0106ca8"
+        },
+        {
+            "path": "frontend/utility/FFmpegFormat.hpp",
+            "sha256Lf": "d94ab2ab64d2feccd804f07c66130f7866ed565242d072f0191ee41ebaedabd6"
+        },
+        {
+            "path": "frontend/utility/MissingFilesPathItemDelegate.cpp",
+            "sha256Lf": "bb06bdac7056b96c4f26d0e04a582de51d89837df5ea282058e2f6190feaf683"
+        },
+        {
+            "path": "frontend/utility/SimpleOutput.cpp",
+            "sha256Lf": "5ef0f470f886a6349973455c93bac086e7c1e0641f581f3c48b45cd18bbfaa53"
+        },
+        {
+            "path": "frontend/utility/android-hardware-info.hpp",
+            "sha256Lf": "eab31dcc42bc0a04a20c1ca1f60ee856214706bda421060f8f2666baceddb8eb"
+        },
+        {
+            "path": "frontend/utility/android-tools.cpp",
+            "sha256Lf": "82b0e681ea0d480f68f77c4f68751892d4a185b00c3c9d29ff5977baeb41e440"
+        },
+        {
+            "path": "frontend/utility/audio-encoders.cpp",
+            "sha256Lf": "42e7fab613f84dfb36a501787648a3f2f3f8bd59931a7c1fe3f54f59e64a3372"
+        },
+        {
+            "path": "frontend/utility/display-helpers.hpp",
+            "sha256Lf": "3d58bff308b70147d332b8d8931a8010d0a8b39bcbfad79fa95598f6fa985af6"
+        },
+        {
+            "path": "frontend/utility/platform-android.cpp",
+            "sha256Lf": "f1992737978f585b2a1bb6f67536603bfe1345c176b014d8bbed9699303d39d2"
+        },
+        {
+            "path": "frontend/utility/system-info-android.cpp",
+            "sha256Lf": "9feceaa0abdb4efeda1970839444e7febe7f5fd331a2977eb422ebf5fc5649d3"
+        },
+        {
+            "path": "frontend/widgets/AudioMixer.cpp",
+            "sha256Lf": "1ded4faed51c5c78d2a09d7835c223fa34a2cea4eaaa8bd2b4fd747c623ac29f"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic.cpp",
+            "sha256Lf": "1cf0765dbfe141ddd6bf6340ef71edd4518eebca759fcc38b84e03202ccfdd2e"
+        },
+        {
+            "path": "frontend/widgets/OBSBasicPreview.cpp",
+            "sha256Lf": "30ba2f507363a95f14288dff1ac2de9dee8d4145f7997df94880e19011455751"
+        },
+        {
+            "path": "frontend/widgets/OBSBasicPreview.hpp",
+            "sha256Lf": "ff4fe4317e532d56591f72d14d17fd86e591296d4367f73e2dafb2405128a1e6"
+        },
+        {
+            "path": "frontend/widgets/OBSBasicStatusBar.cpp",
+            "sha256Lf": "099a3d96cc1c00f9264392caf537101c312cd21c498e8218d6aacdaa375fdef0"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic_Docks.cpp",
+            "sha256Lf": "10ff9fa8547a922ff854c65b787f3d71bfcb6423688ee5f41c3e26c96dbd74b7"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic_Preview.cpp",
+            "sha256Lf": "41fac2a3a19c2e294479b677107a09ead47b872440425d2afdde63c21d532e67"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic_Profiles.cpp",
+            "sha256Lf": "cc3f7553b3b3225d128f839c99cc7b9ef8ac211da8c8ec830f9490703aef0483"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic_Recording.cpp",
+            "sha256Lf": "f407757a5215b31ebc327e34f09db67999e9506960353294324e6e8054e22239"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic_Service.cpp",
+            "sha256Lf": "de12d17a89379498e249c76e0dc4cf4d9a5cd3c8429e2e7f8f2a480a68f1a908"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic_StudioMode.cpp",
+            "sha256Lf": "a0a3e2801b749f25c9f9e3fbfaecba175387dbd6215cb2b0405792488de0a35c"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic_Transitions.cpp",
+            "sha256Lf": "5dd99c36c5911b504a8da7c81d7ef3bbd1d0bcb812726ed48d4eec0ed939ae9b"
+        },
+        {
+            "path": "frontend/widgets/OBSQTDisplay.cpp",
+            "sha256Lf": "71eb531d984990df5b9e7af07b03e19d8fc72a4baa39a3e1af8b0ac93ef50b42"
+        },
+        {
+            "path": "frontend/widgets/OBSQTDisplay.hpp",
+            "sha256Lf": "5f69d9eea0a30067baa0bb0955bd285b42b7ff3bc0bd509d5b8cf197686334b4"
+        },
+        {
+            "path": "frontend/wizards/AutoConfig.cpp",
+            "sha256Lf": "59058fd9a7a17fdc3092dfcf2ac074a83e51bbe814eaddc909e443deabc82d00"
+        },
+        {
+            "path": "frontend/wizards/AutoConfig.hpp",
+            "sha256Lf": "4ea41acc7504af86da2709a4a618f6e94047f3b56be42a8afb1d1ec9e58d7330"
+        },
+        {
+            "path": "frontend/wizards/AutoConfigStartPage.cpp",
+            "sha256Lf": "bc64b4023bc9c2c4b043f1e2daef297eb9a7b9998a0a4f1f4592de6cda6cbe0d"
+        },
+        {
+            "path": "frontend/wizards/AutoConfigStartPage.hpp",
+            "sha256Lf": "a025ed3b1d20464749096c95f116bda6bfde8390204de958517af0fe4e3f1cf1"
+        },
+        {
+            "path": "frontend/wizards/AutoConfigStreamPage.cpp",
+            "sha256Lf": "e52c5ba6726c0befadcde1bfc6b923b4e48aa3b265fd92379181ea771a4a93fd"
+        },
+        {
+            "path": "frontend/wizards/AutoConfigTestPage.cpp",
+            "sha256Lf": "80b825bc8ff030717c6dc556c726f4488f68af49591d22b0ed303584e238a076"
+        },
+        {
+            "path": "frontend/wizards/AutoConfigTestPage.hpp",
+            "sha256Lf": "85b4301c47125a33f9227ae3c73829574a8a6fce90b6d6ed9e03a7f9fd16c4af"
+        },
+        {
+            "path": "frontend/wizards/AutoConfigVideoPage.cpp",
+            "sha256Lf": "81c35dc6a9dc57c912636ae4f136244b23c52f45f4f2f0d8e9c5bced2377804d"
+        },
+        {
+            "path": "frontend/wizards/AutoConfigVideoPage.hpp",
+            "sha256Lf": "05577d94ab9966ad88bc154733a4daa1c49f2392259cbf815ee250c061c6c6ef"
+        },
+        {
+            "path": "libobs-opengl/CMakeLists.txt",
+            "sha256Lf": "1ea89d4338611e9e1c4fb52e564797581e812fc59fb967d42a3440c983005f74"
+        },
+        {
+            "path": "libobs-opengl/gl-android-egl.c",
+            "sha256Lf": "ee1cf7461c8510e79cd51ec3f3c51fbf5be01dbabe0f332a794223efa009455b"
+        },
+        {
+            "path": "libobs-opengl/gl-android-loader.c",
+            "sha256Lf": "1789319afe3f4b88e12dbbbaca9da04c69b05a62519183148496bf606ce83322"
+        },
+        {
+            "path": "libobs-opengl/gl-helpers.c",
+            "sha256Lf": "42d82d88b7dddd7b9e7bd3fd87c98ad7edfdd146ae73811eb251a911bd2363f7"
+        },
+        {
+            "path": "libobs-opengl/gl-shader.c",
+            "sha256Lf": "1900c8c311ce1789e09f5a7d53540613768282e42621dd05d2dc57ca24e55b0f"
+        },
+        {
+            "path": "libobs-opengl/gl-shaderparser.c",
+            "sha256Lf": "60347cf37aac826d8d086bf9630b249624eb35da9ec774afd7b0cc39147c01be"
+        },
+        {
+            "path": "libobs-opengl/gl-stagesurf.c",
+            "sha256Lf": "3ff63e364a75c1b45ccd01c398dfb4f6d695ee1125b8bad2da813f41ee0d84d5"
+        },
+        {
+            "path": "libobs-opengl/gl-subsystem.c",
+            "sha256Lf": "2bdbac7b666e19cefc1be560fe0a905dedf5c1d89a65bfdabb875f65fc57738a"
+        },
+        {
+            "path": "libobs-opengl/gl-subsystem.h",
+            "sha256Lf": "e289ca7c7d2141285b2b032560dec834de00d9a7a592f2ee7cc27035f835e9b4"
+        },
+        {
+            "path": "libobs-opengl/gl-texture2d.c",
+            "sha256Lf": "326fc2b5ff404802892a51f58bba98e44d0d638621746c509b1a39e7cd51d13e"
+        },
+        {
+            "path": "libobs/CMakeLists.txt",
+            "sha256Lf": "fc101256e29d111b01214930b463ba4b99c9b710f78009abd165a7984cb23657"
+        },
+        {
+            "path": "libobs/cmake/os-android.cmake",
+            "sha256Lf": "c6df6af3c48161763cc47d952a2689960ab38e166338bee9208d1397b5de547f"
+        },
+        {
+            "path": "libobs/data/format_conversion.effect",
+            "sha256Lf": "7f493e8c2e19dd59ad019c0179b79cb2906da3ffd1b4aa5c7e93335a46e6e66e"
+        },
+        {
+            "path": "libobs/graphics/device-exports.h",
+            "sha256Lf": "d9a3dd705d580f23761c244061b7027de381116c5bcc5d88094b51473f086a68"
+        },
+        {
+            "path": "libobs/graphics/graphics-imports.c",
+            "sha256Lf": "b8911a9c009f66dc0a25008fc7c391cc517a9b1ec67660dc0ddc459b81818b3b"
+        },
+        {
+            "path": "libobs/graphics/graphics-internal.h",
+            "sha256Lf": "284eb567f920f2fec7d635efd3724d16bda99dafce91770f97578776970c122b"
+        },
+        {
+            "path": "libobs/graphics/graphics.c",
+            "sha256Lf": "71f4350238974d4466e2a8c34b369a71bd662158512c1dce825f57fb9ad6df31"
+        },
+        {
+            "path": "libobs/graphics/graphics.h",
+            "sha256Lf": "2067c237514083ecb2cfc1104781b375816e35f7d18497fc35b01045980cc485"
+        },
+        {
+            "path": "libobs/graphics/image-file.c",
+            "sha256Lf": "b92f898228df6da114fe80cd40c1250c98629c4da12874fa7d32d360f94b7d32"
+        },
+        {
+            "path": "libobs/obs-android.c",
+            "sha256Lf": "e5eed7e02c0ef3595c887b751bc58321d83c5387d9071ecb7af5d7125677ab92"
+        },
+        {
+            "path": "libobs/obs-core-modules-loader-android.c",
+            "sha256Lf": "f299a663342c20d8a1dc4c577687828b3112d70498d3e57a1100fc76a78ab40d"
+        },
+        {
+            "path": "libobs/obs-display.c",
+            "sha256Lf": "be7d6a8e073f9e471ec5e197bca7c2715206d69c269173d0a52166ebc9a36ac4"
+        },
+        {
+            "path": "libobs/obs-internal.h",
+            "sha256Lf": "b282223a7374127349d9417901b37aab983c95135b2fcd06004cee8bd09b669c"
+        },
+        {
+            "path": "libobs/obs-module.c",
+            "sha256Lf": "84b7c2ad2599d2be306c5f72426165c7f9b1d998cc48dffdd6ecebc6c608300f"
+        },
+        {
+            "path": "libobs/obs-scene.c",
+            "sha256Lf": "405efd86bb915acf620bec412c2a9bb94631e80cfba6f0e67948d73169b82dc9"
+        },
+        {
+            "path": "libobs/obs-video.c",
+            "sha256Lf": "380cb0e7bf82a174e02e7bc10b663b64fa660dc8335f3f032758edaac0640f41"
+        },
+        {
+            "path": "libobs/obs.c",
+            "sha256Lf": "08fb03b943a40f8666dc30d5818dc9a2b4809c0f480712bd60d1b2f0a7e09d59"
+        },
+        {
+            "path": "libobs/obs.h",
+            "sha256Lf": "ffadd85c9a9a5f0d72d5681e2580d79d9da8081bae0f147253838eeac2a9ab8e"
+        },
+        {
+            "path": "libobs/util/android-preview-pacing.h",
+            "sha256Lf": "90caddd73fdf5b0ed458e110e914bb1cac0b0f8d809eeb5ddc04d135d33eda20"
+        },
+        {
+            "path": "libobs/util/platform-android.c",
+            "sha256Lf": "011caaae6661f6ee0052b6a599c30e8be750e5820ed710ea35da95d50c09b956"
+        },
+        {
+            "path": "libobs/util/platform-android.h",
+            "sha256Lf": "60968b1f80c67c67689e88fe8934e46a85efd9795153d14e0ed821fc889bf2aa"
+        },
+        {
+            "path": "libobs/util/platform-nix.c",
+            "sha256Lf": "62c147966b6c2ba766f0babec80f0fe5e1f0378f7b9389f1ac8a44dda38e1a70"
+        },
+        {
+            "path": "plugins/obs-ffmpeg/CMakeLists.txt",
+            "sha256Lf": "9c4eb857df42f5edf2826035a008d005cda55f82e97ea564cb05777fb8247056"
+        },
+        {
+            "path": "plugins/obs-ffmpeg/cmake/android.cmake",
+            "sha256Lf": "948a31c44df3f2ad48356aad440a876912dd2c633d674404bf60d7b33a046979"
+        },
+        {
+            "path": "plugins/obs-ffmpeg/obs-ffmpeg-android.c",
+            "sha256Lf": "6a62fcbbcdd75c908b711eb51a12aa577bcfd967673cb544f85b61e8a82a2f31"
+        },
+        {
+            "path": "plugins/obs-outputs/CMakeLists.txt",
+            "sha256Lf": "e35787ee6a7d975ba85030a94453677d26c56e1151b4c91ee87d237d4b4aa2f5"
+        },
+        {
+            "path": "plugins/obs-outputs/librtmp/rtmp.c",
+            "sha256Lf": "5b1693b09ee65f2264a7fcda2c60a5543ff413a3dfffeb9d11d502dab61f2f96"
+        },
+        {
+            "path": "plugins/obs-outputs/obs-outputs.c",
+            "sha256Lf": "3f5adaba5947e15c2ad462644d82a7419bf88093654844d1d1b560714b3b6011"
+        },
+        {
+            "path": "plugins/obs-transitions/data/locale/en-US.ini",
+            "sha256Lf": "b148c0a68b69052b2a777e38755fcf966b85386c078bfc526fc8781d8628d408"
+        },
+        {
+            "path": "plugins/obs-transitions/data/locale/es-ES.ini",
+            "sha256Lf": "f4b869e96fdabfee9aa6efa4282b9a56c8d50b4d60b82e971e837f7bc8a91758"
+        },
+        {
+            "path": "plugins/obs-transitions/transition-stinger.c",
+            "sha256Lf": "c01fe21e814b0d1b53c5b27e5fdf2a266a2337afeac7348acaa54a9e537884bc"
+        },
+        {
+            "path": "plugins/vlc-video/vlc-video-plugin.c",
+            "sha256Lf": "7215ec585e22c34f093742e5d6d1b663b94209771dcc007b040fc8a236913569"
+        },
+        {
+            "path": "plugins/vlc-video/vlc-video-source.c",
+            "sha256Lf": "5e073d165bc17aa1203aea91ff8a9c13bb5ff4541aae2f0ea3622a5e11863d2d"
+        },
+        {
+            "path": "shared/media-playback/CMakeLists.txt",
+            "sha256Lf": "1d41a26038871d4b6fb8aa49c8693d89239db780e6d73e9c01c3c4325c98b326"
+        },
+        {
+            "path": "shared/media-playback/media-playback/media.c",
+            "sha256Lf": "17b8de1e1b551b2d64d945d46258059115496d1752ee5bfdb7a3ce5c78836aeb"
+        },
+        {
+            "path": "shared/qt/wrappers/qt-wrappers.cpp",
+            "sha256Lf": "7117c399433d9a2a4077e51c9a2327896ee0d7995249140f9c40dea8dd2bd626"
+        }
+    ]
+}

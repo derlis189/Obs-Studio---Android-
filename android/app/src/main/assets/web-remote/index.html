@@ -1,0 +1,193 @@
+<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'>
+<title>OBS Studio - Control Remoto Web</title><link rel='icon' type='image/png' href='/logo.png'><style>
+:root{--bg:#0f172a;--card:#1e293b;--accent:#2563eb;--red:#dc2626;--green:#16a34a;--text:#f8fafc;--muted:#94a3b8;--line:#334155}
+*{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+body{margin:0;background:var(--bg);color:var(--text);padding:12px;max-width:980px;margin:auto}
+header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;background:var(--card);padding:12px 14px;border-radius:12px;margin-bottom:12px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px}
+.brand img{width:28px;height:28px;border-radius:50%}
+.pill{font-size:12px;padding:4px 10px;border-radius:999px;background:#334155;color:var(--muted);font-weight:600}
+.pill.live{background:var(--red);color:#fff}.pill.rec{background:#d97706;color:#fff}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(135px,1fr));gap:8px}
+.card{background:var(--card);border-radius:12px;padding:12px;margin-bottom:12px}
+h2{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)}
+button{border:none;border-radius:8px;padding:10px 12px;font-size:13px;font-weight:600;color:#fff;background:#334155;cursor:pointer;touch-action:manipulation}
+button:active{transform:scale(.97)}button.active{background:var(--red)}button.preview{background:var(--green);color:#fff}
+button.primary{background:var(--accent)}button.danger{background:var(--red)}
+.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}.row:last-child{border:none}
+.row .name{flex:1;min-width:110px;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+input[type=range]{flex:1.4;accent-color:var(--accent);height:26px}
+input[type=text],input[type=number],select{background:#0f172a;color:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px}
+.monitor{width:100%;max-height:320px;object-fit:contain;background:#020617;border-radius:10px;border:1px solid var(--line);display:block}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}.tab-pane{display:none}.tab-pane.show{display:block}
+.score-box{display:flex;align-items:center;justify-content:center;gap:14px;font-size:20px;font-weight:700;padding:8px;background:#0f172a;border-radius:8px;margin-bottom:8px}
+.res-item{display:block;width:100%;text-align:left;margin-top:6px;background:#0f172a;border:1px solid var(--line);font-weight:400}
+</style></head><body>
+<header><div class='brand'><img src='/logo.png' alt='OBS'/>OBS Studio Android - Control Remoto</div>
+<div style='display:flex;gap:6px;flex-wrap:wrap'><span id='stLive' class='pill'>OFFLINE</span>
+<span id='stRec' class='pill'>NO GRAB</span><span id='stFps' class='pill'>-- FPS</span></div></header>
+<div class='card'><div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>
+<h2 style='margin:0'>Monitor de Programa en Vivo</h2>
+<button id='btnMon' onclick='toggleMonitor()'>Pausar vista</button></div>
+<img id='progImg' class='monitor' alt='Programa en vivo'/></div>
+<div class='card'><h2>Controles principales</h2><div class='controls'>
+<button id='btnStream' onclick="act({action:'toggle_stream'})">Iniciar Transmision</button>
+<button id='btnRec' onclick="act({action:'toggle_record'})">Iniciar Grabacion</button>
+<button id='btnStudio' onclick="act({action:'toggle_studio'})">Modo Estudio</button>
+<button id='btnTrans' class='primary' onclick="act({action:'transition'})">Transicion</button>
+</div></div>
+<div class='card'><h2>Escenas Principales</h2><div id='scenes' class='grid'></div></div>
+<div class='card' id='vertCard' style='display:none'><h2>Escenas Verticales (9:16)</h2><div id='vscenes' class='grid'></div></div>
+<div class='card'><h2>Graficos en Vivo (Marcador / Lower Third / Cronometro / Biblia)</h2>
+<div class='tabs'>
+<button id='tSb' class='primary' onclick="showTab('sb')">Marcador</button>
+<button id='tLt' onclick="showTab('lt')">Lower Third</button>
+<button id='tTm' onclick="showTab('tm')">Cronometro</button>
+<button id='tBb' onclick="showTab('bb')">Biblia</button>
+</div>
+<div id='pane_sb' class='tab-pane show'>
+<div id='sbDisplay' class='score-box'>LOCAL 0 - 0 VISITA</div>
+<div class='controls'>
+<button class='primary' onclick="gact({action:'sb_score',side:'home',delta:1})">Local +1</button>
+<button onclick="gact({action:'sb_score',side:'home',delta:-1})">Local -1</button>
+<button class='primary' onclick="gact({action:'sb_score',side:'away',delta:1})">Visita +1</button>
+<button onclick="gact({action:'sb_score',side:'away',delta:-1})">Visita -1</button>
+<button id='sbClkBtn' onclick="gact({action:'sb_clock',op:'toggle'})">Iniciar Reloj</button>
+<button onclick="gact({action:'sb_clock',op:'reset'})">Reiniciar Reloj</button>
+<button id='sbVisBtn' onclick="gact({action:'sb_update',visible:!gfx.scoreboard.visible})">Ocultar</button>
+<button class='danger' onclick="gact({action:'sb_reset'})">Reset 0-0</button>
+</div>
+<div class='row' style='margin-top:8px'>
+<input id='sbHome' type='text' placeholder='Local' style='flex:1'/>
+<input id='sbAway' type='text' placeholder='Visita' style='flex:1'/>
+<input id='sbPer' type='text' placeholder='Periodo' style='width:85px'/>
+<select id='sbStyle' onchange="gact({action:'sb_update',style:parseInt(this.value)})">
+<option value='0'>Barra Clasica</option><option value='1'>Esquina TV</option><option value='2'>Tarjeta Torneo</option><option value='3'>Esports Neon</option><option value='4'>Minimalista Claro</option></select>
+<button class='primary' onclick='saveSb()'>Aplicar</button></div></div>
+<div id='pane_lt' class='tab-pane'>
+<div class='row'><input id='ltBadge' type='text' placeholder='Etiqueta (EN VIVO)' style='flex:1'/>
+<input id='ltTitle' type='text' placeholder='Titulo principal' style='flex:2'/>
+<input id='ltSub' type='text' placeholder='Subtitulo' style='flex:2'/>
+<select id='ltStyle' onchange="gact({action:'lt_update',style:parseInt(this.value)})">
+<option value='0'>Barra Moderna</option><option value='1'>Tarjeta Elegante</option><option value='2'>Minimalista</option><option value='3'>Noticiero Breaking</option><option value='4'>Centrado</option><option value='5'>Noticiero CNN / Ultimo Momento</option><option value='6'>Noticiero 24h (Reloj)</option><option value='7'>Noticiero Editorial</option><option value='8'>Noticiero Alerta Roja</option></select></div>
+<div class='controls' style='margin-top:6px'>
+<button class='primary' onclick='saveLt()'>Aplicar texto</button>
+<button id='ltVisBtn' onclick="gact({action:'lt_toggle'})">Mostrar / Ocultar</button>
+<button onclick='saveLtPreset()'>Guardar preset</button></div>
+<div id='ltPresets' style='margin-top:8px'></div></div>
+<div id='pane_tm' class='tab-pane'>
+<div id='tmDisplay' class='score-box'>05:00</div>
+<div class='controls'>
+<button id='tmRunBtn' class='primary' onclick="gact({action:'tm_control',op:'toggle'})">Iniciar</button>
+<button onclick="gact({action:'tm_control',op:'reset'})">Reiniciar</button>
+<button onclick="gact({action:'tm_control',op:'add_sec',seconds:60})">+1 min</button>
+<button onclick="gact({action:'tm_control',op:'add_sec',seconds:-60})">-1 min</button>
+<button id='tmVisBtn' onclick="gact({action:'tm_update',visible:!gfx.timer.visible})">Ocultar</button>
+</div>
+<div class='row' style='margin-top:8px'>
+<select id='tmMode'><option value='countdown'>Cuenta regresiva</option><option value='stopwatch'>Cronometro</option></select>
+<select id='tmStyle' onchange="gact({action:'tm_update',style:parseInt(this.value)})">
+<option value='0'>Tarjeta Oscura</option><option value='1'>Pildora</option><option value='2'>Anillo Circular</option><option value='3'>Digital LED</option><option value='4'>Minimalista</option></select>
+<input id='tmLabel' type='text' placeholder='Etiqueta' style='flex:1'/>
+<input id='tmMin' type='number' min='1' max='600' value='5' style='width:80px'/>
+<button class='primary' onclick='saveTm()'>Aplicar</button></div></div>
+<div id='pane_bb' class='tab-pane'>
+<div id='bbDisplay' style='background:#0f172a;padding:10px;border-radius:8px;margin-bottom:8px;font-size:14px;line-height:1.4'></div>
+<div class='controls'>
+<button onclick="gact({action:'bb_step',delta:-1})">Versiculo Anterior</button>
+<button class='primary' onclick="gact({action:'bb_step',delta:1})">Siguiente Versiculo</button>
+<button id='bbVisBtn' onclick="gact({action:'bb_toggle'})">Ocultar</button></div>
+<div class='row' style='margin-top:8px'>
+<select id='bbBook' style='flex:2'></select>
+<input id='bbCh' type='number' min='1' value='3' style='width:72px'/>
+<input id='bbV1' type='number' min='1' value='16' style='width:72px'/>
+<input id='bbV2' type='number' min='1' value='16' style='width:72px'/>
+<select id='bbStyle' onchange="gact({action:'bb_style',style:parseInt(this.value)})">
+<option value='0'>Zocalo Elegante</option><option value='1'>Tarjeta Centrada</option><option value='2'>Clasico Iglesia</option><option value='3'>Minimalista</option><option value='4'>Predica Grande</option></select>
+<button class='primary' onclick='applyBible()'>Mostrar</button></div>
+<div class='row'><input id='bbSearch' type='text' placeholder='Buscar versiculo o palabra...' style='flex:1'/>
+<button onclick='searchBible()'>Buscar</button></div>
+<div id='bbResults'></div></div></div>
+<div class='card'><h2>Fuentes de la escena actual</h2><div id='sources'></div></div>
+<div class='card'><h2>Mezclador de audio</h2><div id='audio'></div></div>
+<script>
+const tok=new URLSearchParams(location.hash.slice(1)).get('token')||'';
+const hdrs={'Content-Type':'application/json','X-OBS-Token':tok};
+let dragging=false,monOn=true,gfx={scoreboard:{},lowerthird:{},timer:{},bible:{}},inputsInit=false;
+function toggleMonitor(){monOn=!monOn;document.getElementById('btnMon').textContent=monOn?'Pausar vista':'Reanudar vista';}
+function showTab(k){['sb','lt','tm','bb'].forEach(x=>{document.getElementById('pane_'+x).className='tab-pane'+(x===k?' show':'');
+document.getElementById('t'+x[0].toUpperCase()+x[1]).className=(x===k?'primary':'');});}
+async function act(p){await fetch('/api/action',{method:'POST',headers:hdrs,body:JSON.stringify(p)});poll();}
+async function gact(p){const r=await fetch('/api/graphics',{method:'POST',headers:hdrs,body:JSON.stringify(p)});
+if(r.ok){const d=await r.json();if(d.graphics){gfx=d.graphics;renderGfx(false);}}}
+function saveSb(){gact({action:'sb_update',homeName:document.getElementById('sbHome').value,awayName:document.getElementById('sbAway').value,period:document.getElementById('sbPer').value});}
+function saveLt(){gact({action:'lt_update',badge:document.getElementById('ltBadge').value,title:document.getElementById('ltTitle').value,subtitle:document.getElementById('ltSub').value});}
+async function saveLtPreset(){await saveLt();await gact({action:'lt_save_preset'});}
+function saveTm(){gact({action:'tm_update',mode:document.getElementById('tmMode').value,label:document.getElementById('tmLabel').value,durationSec:Math.max(5,parseInt(document.getElementById('tmMin').value||'5')*60)});}
+function applyBible(){gact({action:'bb_set',book:parseInt(document.getElementById('bbBook').value||'42'),chapter:parseInt(document.getElementById('bbCh').value||'1'),verse:parseInt(document.getElementById('bbV1').value||'1'),verseEnd:parseInt(document.getElementById('bbV2').value||'1'),visible:true});}
+async function searchBible(){const q=document.getElementById('bbSearch').value.trim();if(!q)return;
+const r=await fetch('/api/bible/search?q='+encodeURIComponent(q),{headers:{'X-OBS-Token':tok}});
+if(!r.ok)return;const arr=await r.json();const box=document.getElementById('bbResults');box.innerHTML='';
+arr.forEach(it=>{const b=document.createElement('button');b.className='res-item';b.textContent=it.ref+' - '+it.text;
+b.onclick=()=>gact({action:'bb_set',book:it.book,chapter:it.chapter,verse:it.verse,verseEnd:it.verse,visible:true});box.appendChild(b);});}
+function renderGfx(syncInputs){const sb=gfx.scoreboard||{},lt=gfx.lowerthird||{},tm=gfx.timer||{},bb=gfx.bible||{};
+document.getElementById('sbDisplay').textContent=(sb.homeName||'LOCAL')+' '+(sb.homeScore||0)+' - '+(sb.awayScore||0)+' '+(sb.awayName||'VISITA')+'  ['+(sb.period||'1T')+' | '+(sb.clockText||'00:00')+']';
+document.getElementById('sbClkBtn').textContent=sb.clockRunning?'Pausar Reloj':'Iniciar Reloj';
+document.getElementById('sbVisBtn').textContent=sb.visible?'Ocultar':'Mostrar';
+document.getElementById('ltVisBtn').textContent=lt.visible?'Ocultar en pantalla':'Mostrar en pantalla';
+document.getElementById('tmDisplay').textContent=(tm.currentText||'00:00')+'  ('+(tm.mode==='stopwatch'?'Cronometro':'Cuenta regresiva')+')';
+document.getElementById('tmRunBtn').textContent=tm.running?'Pausar':'Iniciar';
+document.getElementById('tmVisBtn').textContent=tm.visible?'Ocultar':'Mostrar';
+document.getElementById('bbDisplay').textContent=(bb.ref||'')+' - '+(bb.text||'');
+document.getElementById('bbVisBtn').textContent=bb.visible?'Ocultar en pantalla':'Mostrar en pantalla';
+const pr=document.getElementById('ltPresets');pr.innerHTML='';(lt.presets||[]).forEach((p,i)=>{
+const d=document.createElement('div');d.className='row';
+const b=document.createElement('button');b.style.flex='1';b.textContent=(p.title||'Preset')+' - '+(p.subtitle||'');
+b.onclick=()=>gact({action:'lt_apply_preset',index:i});d.appendChild(b);
+const x=document.createElement('button');x.className='danger';x.textContent='Borrar';x.onclick=()=>gact({action:'lt_delete_preset',index:i});d.appendChild(x);pr.appendChild(d);});
+if(syncInputs){document.getElementById('sbHome').value=sb.homeName||'';document.getElementById('sbAway').value=sb.awayName||'';document.getElementById('sbPer').value=sb.period||'1T';
+document.getElementById('ltBadge').value=lt.badge||'';document.getElementById('ltTitle').value=lt.title||'';document.getElementById('ltSub').value=lt.subtitle||'';
+document.getElementById('tmMode').value=tm.mode||'countdown';document.getElementById('tmLabel').value=tm.label||'';document.getElementById('tmMin').value=Math.max(1,Math.round((tm.durationSec||300)/60));
+document.getElementById('bbBook').value=String(bb.book||42);document.getElementById('bbCh').value=bb.chapter||3;document.getElementById('bbV1').value=bb.verse||16;document.getElementById('bbV2').value=bb.verseEnd||16;}}
+async function initBooks(){try{const r=await fetch('/api/bible/books',{headers:{'X-OBS-Token':tok}});
+if(!r.ok)return;const books=await r.json();const sel=document.getElementById('bbBook');sel.innerHTML='';
+books.forEach((n,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=n;sel.appendChild(o);});}catch(e){}}
+async function poll(){if(dragging)return;try{const [rs,rg]=await Promise.all([
+fetch('/api/state',{headers:{'X-OBS-Token':tok}}),
+fetch('/api/graphics',{headers:{'X-OBS-Token':tok}})]);
+if(rg.ok){gfx=await rg.json();renderGfx(!inputsInit);inputsInit=true;}
+if(!rs.ok)return;const s=await rs.json();
+const live=document.getElementById('stLive');live.textContent=s.streaming?'EN VIVO':'OFFLINE';live.className='pill'+(s.streaming?' live':'');
+const rec=document.getElementById('stRec');rec.textContent=s.recording?'GRABANDO':'DETENIDO';rec.className='pill'+(s.recording?' rec':'');
+document.getElementById('stFps').textContent=(s.fps?s.fps.toFixed(1):'0')+' FPS | CPU '+(s.cpu?s.cpu.toFixed(0):'0')+'%';
+const bs=document.getElementById('btnStream');bs.textContent=s.streaming?'Detener Transmision':'Iniciar Transmision';bs.className=s.streaming?'danger':'primary';
+const br=document.getElementById('btnRec');br.textContent=s.recording?'Detener Grabacion':'Iniciar Grabacion';br.className=s.recording?'danger':'';
+const bm=document.getElementById('btnStudio');bm.className=s.studioMode?'primary':'';
+document.getElementById('btnTrans').style.display=s.studioMode?'block':'none';
+const sc=document.getElementById('scenes');sc.innerHTML='';(s.scenes||[]).forEach(n=>{const b=document.createElement('button');b.textContent=n;
+if(n===s.programScene)b.className='active';else if(s.studioMode&&n===s.previewScene)b.className='preview';
+b.onclick=()=>act({action:'switch_scene',scene:n});sc.appendChild(b);});
+const vc=document.getElementById('vertCard'),vs=document.getElementById('vscenes');vs.innerHTML='';
+if(s.verticalScenes&&s.verticalScenes.length){vc.style.display='block';s.verticalScenes.forEach(n=>{const b=document.createElement('button');b.textContent=n;
+if(n===s.verticalActiveScene)b.className='active';b.onclick=()=>act({action:'switch_vertical_scene',scene:n});vs.appendChild(b);});}else{vc.style.display='none';}
+const src=document.getElementById('sources');src.innerHTML='';(s.sources||[]).forEach(it=>{const d=document.createElement('div');d.className='row';
+const sp=document.createElement('span');sp.className='name';sp.textContent=it.name;d.appendChild(sp);
+const b=document.createElement('button');b.textContent=it.visible?'Visible':'Oculto';b.className=it.visible?'primary':'';
+b.onclick=()=>act({action:'set_source_visible',id:it.id,visible:!it.visible});d.appendChild(b);src.appendChild(d);});
+const au=document.getElementById('audio');au.innerHTML='';(s.audio||[]).forEach(a=>{const d=document.createElement('div');d.className='row';
+const nm=document.createElement('span');nm.className='name';nm.textContent=a.name;d.appendChild(nm);
+const sl=document.createElement('input');sl.type='range';sl.min=0;sl.max=100;sl.value=Math.round((a.volume||0)*100);
+sl.onpointerdown=()=>dragging=true;sl.onpointerup=()=>{dragging=false;act({action:'set_volume',source:a.name,volume:sl.value/100});};
+sl.onchange=()=>{dragging=false;act({action:'set_volume',source:a.name,volume:sl.value/100});};d.appendChild(sl);
+const mb=document.createElement('button');mb.textContent=a.muted?'Silenciado':'Activo';mb.className=a.muted?'danger':'';
+mb.onclick=()=>act({action:'set_mute',source:a.name,muted:!a.muted});d.appendChild(mb);au.appendChild(d);});
+}catch(e){}}
+let imgBusy=false;async function pollProg(){if(!monOn||imgBusy)return;imgBusy=true;
+try{const r=await fetch('/api/program.jpg',{headers:{'X-OBS-Token':tok}});
+if(!r.ok||!monOn)return;const b=await r.blob();if(!b.size||!monOn)return;
+const img=document.getElementById('progImg');const previous=img.src;
+img.src=URL.createObjectURL(b);if(previous.startsWith('blob:'))URL.revokeObjectURL(previous);
+}catch(e){}finally{imgBusy=false;}}
+initBooks().then(poll);setInterval(poll,1000);setInterval(pollProg,330);pollProg();</script></body></html>

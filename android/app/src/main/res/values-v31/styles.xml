@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ObsStudio" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/obs_splash</item>
+        <item name="android:colorBackground">@color/obs_bg</item>
+        <item name="android:windowSplashScreenBackground">@color/obs_icon_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+    </style>
+</resources>
