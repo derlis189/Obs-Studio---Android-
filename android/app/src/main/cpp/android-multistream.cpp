@@ -301,7 +301,9 @@ bool write_backtrack_snapshot_to_mp4(const char *path,
 std::mutex g_ms_mutex;
 std::map<std::string, MultiTarget> g_targets;
 VerticalEngine g_vert;
-using VideoPoolKey = std::tuple<video_t *, int, uint32_t, uint32_t, uint32_t, uint32_t, int, int, int>;
+// One video encoder per OBS canvas. The first started target chooses its
+// bitrate; every later target on that canvas receives the same encoder.
+using VideoPoolKey = video_t *;
 std::map<VideoPoolKey, obs_weak_encoder_t *> g_video_pool;
 obs_weak_encoder_t *g_audio_pool{};
 void clear_encoder_pool() {
@@ -328,7 +330,7 @@ obs_encoder_t *create_video_encoder(const char *name, video_t *video, int bitrat
     const int bitrate = bitrate_kbps > 300 ? bitrate_kbps : 3500;
     const video_output_info *vi = video_output_get_info(video);
     if (!vi) return nullptr;
-    const VideoPoolKey key{video, bitrate, vi->width, vi->height, vi->fps_num, vi->fps_den, int(vi->format), int(vi->colorspace), int(vi->range)};
+    const VideoPoolKey key = video;
     for (auto it = g_video_pool.begin(); it != g_video_pool.end();) {
         obs_encoder_t *enc = obs_weak_encoder_get_encoder(it->second);
         if (!enc) {

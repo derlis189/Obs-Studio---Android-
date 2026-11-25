@@ -84,13 +84,13 @@ public final class WebRemoteServer {
             prefs.edit().putString(KEY_TOKEN, sToken).apply();
         }
         try {
-            ServerSocket listener = new ServerSocket(sPort, 16,
+            ServerSocket listener = new ServerSocket(sPort, 32,
                 lan ? null : InetAddress.getByName("127.0.0.1"));
             sSocket = listener;
             sRunning = true;
             ExecutorService workers = new java.util.concurrent.ThreadPoolExecutor(
-                0, 8, 30, java.util.concurrent.TimeUnit.SECONDS,
-                new java.util.concurrent.SynchronousQueue<>());
+                2, 16, 15, java.util.concurrent.TimeUnit.SECONDS,
+                new java.util.concurrent.ArrayBlockingQueue<>(64));
             sWorkers = workers;
             sAcceptThread = new Thread(() -> {
                 while (!listener.isClosed()) {
@@ -289,7 +289,7 @@ public final class WebRemoteServer {
 
     private static void handleClient(Socket sock) {
         try (Socket s = sock) {
-            s.setSoTimeout(15000);
+            s.setSoTimeout(3000);
             InputStream in = new BufferedInputStream(s.getInputStream());
             OutputStream out = s.getOutputStream();
 

@@ -550,7 +550,9 @@ struct Encoder {
         pkt->data = packet.data();
         pkt->size = packet.size();
         pkt->type = audio ? OBS_ENCODER_AUDIO : OBS_ENCODER_VIDEO;
-        pkt->pts = std::llround(double(qp.pts_us - (surface_mode ? 1000000LL : 0LL)) * (audio ? rate : fps_num) / 1000000.0);
+        pkt->pts = audio
+            ? std::llround(double(qp.pts_us) * rate / 1000000.0)
+            : std::llround(double(qp.pts_us - (surface_mode ? 1000000LL : 0LL)) * double(fps_num) / (1000000.0 * std::max<uint32_t>(1, fps_den)));
         pkt->dts = pkt->pts;
         pkt->keyframe = qp.keyframe || (!audio && (hevc ? obs_hevc_keyframe(packet.data(), packet.size())
                                                         : obs_avc_keyframe(packet.data(), packet.size())));
@@ -724,7 +726,7 @@ bool encode_texture2(void *data, struct encoder_texture *texture, int64_t pts, u
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    const int64_t pts_us = 1000000LL + pts * 1000000LL / std::max<uint32_t>(1, encoder.fps_num);
+    const int64_t pts_us = 1000000LL + pts * 1000000LL * int64_t(std::max<uint32_t>(1, encoder.fps_den)) / std::max<int64_t>(1, encoder.fps_num);
     if (encoder.set_pts_fn) {
         encoder.set_pts_fn(encoder.egl_display, encoder.egl_surface, EGLnsecsANDROID(pts_us * 1000LL));
     }
@@ -800,7 +802,9 @@ bool encode(void *data, encoder_frame *frame, encoder_packet *packet, bool *rece
             }
         }
     }
-    int64_t pts_us = encoder.audio ? frame->pts * 1000000 / encoder.rate : frame->pts * 1000000 / encoder.fps_num;
+    int64_t pts_us = encoder.audio
+        ? frame->pts * 1000000 / encoder.rate
+        : frame->pts * 1000000 * int64_t(std::max<uint32_t>(1, encoder.fps_den)) / std::max<int64_t>(1, encoder.fps_num);
     if (AMediaCodec_queueInputBuffer(encoder.codec, input, 0, bytes, pts_us, 0) != AMEDIA_OK) return encoder.fail("MediaCodec queueInputBuffer failed");
     if (!encoder.audio) ++cpu_frames;
 

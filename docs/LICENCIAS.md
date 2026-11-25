@@ -25,6 +25,8 @@ El APK final deberá ir acompañado de su código fuente correspondiente, parche
 | omtplugin, libomtnet y libvmx, cuando se incluye OMT | MIT. Revisiones fijadas en `dependencies-lock.json`, avisos en `assets/licenses/omt/` |
 | nlohmann/json 3.11.3 | MIT |
 | Three.js, PixiJS y bibliotecas VTuber | Avisos de las versiones y archivos incluidos en los assets |
+| MediaPipe Tasks Vision 0.10.35 | Apache-2.0; aviso incluido en `android/app/src/main/assets/licenses/mediapipe/` |
+| MediaPipe Selfie Segmenter Landscape | Modelo Apache-2.0, SHA-256 y procedencia registrados en `android/app/src/main/assets/licenses/mediapipe/NOTICE.txt` |
 | Biblia RV1909 | Texto Reina-Valera 1909. Verificar la procedencia de la transcripción y sus avisos antes de publicar |
 
 El empaquetado excluye el runtime NDI y Live2D Cubism Core. Los respectivos selectores permiten importarlos en el dispositivo. Antes de distribuir, revisa los avisos efectivos de la compilación, los requisitos de Qt y de las dependencias Apache-2.0, y la versión GPL aplicable a la obra combinada. La exclusión de los runtimes no sustituye esa revisión.

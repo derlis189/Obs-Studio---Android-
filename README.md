@@ -68,6 +68,7 @@ El resultado completo queda en `out/phase1/report.json`, con comandos y errores 
 
 ## Documentación
 
+- [Prueba de viabilidad iOS (requiere macOS/Xcode)](ios/README.md).
 - [Arquitectura y bloqueos verificados](docs/ARQUITECTURA.md).
 - [Dependencias, herramientas y comandos](docs/DEPENDENCIAS.md).
 - [Plan de adaptación y criterios por fase](docs/PLAN-ANDROID.md).

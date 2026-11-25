@@ -61,5 +61,6 @@ dependencies {
         "../../tools/qt6/6.9.3/android_arm64_v8a/jar/Qt6Android.jar",
         "../../tools/qt6/6.9.3/android_arm64_v8a/jar/Qt6AndroidNetwork.jar"
     ))
-    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+    // Apache-2.0 MediaPipe Tasks runtime. The TFLite model is bundled in assets.
+    implementation("com.google.mediapipe:tasks-vision:0.10.35")
 }

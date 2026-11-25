@@ -5,10 +5,9 @@ param([string]$SdkRoot, [string]$GradlePath, [switch]$WithOmt, [switch]$WithScen
 $SdkRoot = Resolve-AndroidSdk $SdkRoot
 $env:JAVA_HOME = Resolve-JavaHome
 if (-not $GradlePath) {
-    $candidate = @(Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE '.gradle/wrapper/dists/gradle-8.13-bin') -Filter gradle.bat -Recurse)
-    if ($candidate.Count -ne 1) { throw 'Install Gradle 8.13 or pass -GradlePath with its gradle.bat' }
-    $GradlePath = $candidate[0].FullName
+    $GradlePath = Join-Path $ProjectRoot 'android/gradlew.bat'
 }
+if (-not (Test-Path -LiteralPath $GradlePath)) { throw "Gradle launcher not found: $GradlePath" }
 $cmakeDir = (Join-Path $ProjectRoot 'tools/cmake-3.30.8-windows-x86_64').Replace('\', '/')
 $sdk = $SdkRoot.Replace('\', '/')
 New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot 'out/android/jniLibs/arm64-v8a') | Out-Null

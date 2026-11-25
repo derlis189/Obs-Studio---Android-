@@ -72,6 +72,10 @@ public final class QtObsActivity extends QtActivity {
         return sInstance;
     }
 
+    static Context getAppContext() {
+        return sAppCtx;
+    }
+
     void reapplyImmersiveMode() {
         applyImmersiveMode();
     }
@@ -567,15 +571,16 @@ public final class QtObsActivity extends QtActivity {
         return false;
     }
 
-    private File getSafStagingDir() {
-        File[] mediaDirs = getExternalMediaDirs();
-        File base = (mediaDirs != null && mediaDirs.length > 0 && mediaDirs[0] != null)
-            ? mediaDirs[0]
-            : getExternalFilesDir(Environment.DIRECTORY_MOVIES);
-        if (base == null) base = getFilesDir();
-        File staging = new File(base, "Recordings/SAF-Export");
+    private static File getSafStagingDir(Context ctx) {
+        if (ctx == null) return null;
+        File baseExt = ctx.getExternalFilesDir(Environment.DIRECTORY_MOVIES);
+        File staging = new File(baseExt != null ? baseExt : ctx.getFilesDir(), "saf-staging");
         if (!staging.isDirectory()) staging.mkdirs();
         return staging;
+    }
+
+    private File getSafStagingDir() {
+        return getSafStagingDir(this);
     }
 
     public static void onRecordingFinished(String filePath) {

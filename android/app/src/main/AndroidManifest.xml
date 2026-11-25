@@ -48,6 +48,5 @@
             <meta-data android:name="android.app.arguments" android:value="" />
             <meta-data android:name="android.app.background_running" android:value="true" />
         </activity>
-        <activity android:name=".StudioActivity" android:exported="false" android:configChanges="orientation|screenSize|keyboardHidden" />
     </application>
 </manifest>

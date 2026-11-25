@@ -1,0 +1,106 @@
+diff --git a/frontend/utility/android-tools.cpp b/frontend/utility/android-tools.cpp
+index 0451ac473..9fdcb0d77 100644
+--- a/frontend/utility/android-tools.cpp
++++ b/frontend/utility/android-tools.cpp
+@@ -2695,11 +2695,9 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+ 	};
+ 
+ 	auto *multiBtns = new QHBoxLayout();
+-	auto *btnToggleOne = new QPushButton(QStringLiteral("Iniciar / Detener seleccionado"), multiTab);
+-	auto *btnStartAll = new QPushButton(QStringLiteral("Iniciar todos"), multiTab);
++	auto *btnStartAll = new QPushButton(QStringLiteral("Iniciar transmisión…"), multiTab);
+ 	auto *btnStopAll = new QPushButton(QStringLiteral("Detener todos"), multiTab);
+ 	auto *btnRemove = new QPushButton(QStringLiteral("Eliminar"), multiTab);
+-	multiBtns->addWidget(btnToggleOne);
+ 	multiBtns->addWidget(btnStartAll);
+ 	multiBtns->addWidget(btnStopAll);
+ 	multiBtns->addWidget(btnRemove);
+@@ -2728,6 +2726,12 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+ 	addForm->addRow(QStringLiteral("Formato:"), cbFeed);
+ 	addForm->addRow(QStringLiteral("Bitrate (kbps):"), spBitrate);
+ 	multiLayout->addLayout(addForm);
++	auto *bitrateHint = new QLabel(
++		QStringLiteral("Los destinos del mismo formato comparten un encoder; el primer destino activo fija el bitrate."),
++		multiTab);
++	bitrateHint->setWordWrap(true);
++	bitrateHint->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 11px;"));
++	multiLayout->addWidget(bitrateHint);
+ 	multiLayout->addWidget(btnAdd);
+ 
+ 	auto startTarget = [=](const nlohmann::json &t) -> bool {
+@@ -2768,29 +2772,55 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+ 		refreshList();
+ 	});
+ 
+-	QObject::connect(btnToggleOne, &QPushButton::clicked, dlg, [=]() {
+-		int row = listWidget->currentRow();
+-		if (row < 0 || row >= int((*cfg)["targets"].size()))
+-			return;
+-		const auto &t = (*cfg)["targets"][row];
+-		std::string id = t.value("id", "");
+-		if (fnIsMulti && fnIsMulti(id.c_str())) {
+-			if (fnStopMulti)
+-				fnStopMulti(id.c_str());
+-		} else if (!startTarget(t)) {
+-			OBSMessageBox::warning(dlg, QStringLiteral("Multistreaming"),
+-					       QStringLiteral("No se pudo iniciar la transmisión al destino seleccionado."));
+-		}
+-		refreshList();
+-	});
+-
+ 	QObject::connect(btnStartAll, &QPushButton::clicked, dlg, [=]() {
+-		for (const auto &t : (*cfg)["targets"]) {
+-			std::string id = t.value("id", "");
+-			if (fnIsMulti && fnIsMulti(id.c_str()))
++		QDialog picker(dlg);
++		picker.setWindowTitle(QStringLiteral("Elegir destinos de transmisión"));
++		auto *layout = new QVBoxLayout(&picker);
++		layout->addWidget(new QLabel(QStringLiteral("Selecciona uno o varios destinos guardados:"), &picker));
++		auto *choices = new QListWidget(&picker);
++		std::vector<std::string> ids;
++		for (const auto &target : (*cfg)["targets"]) {
++			const std::string id = target.value("id", "");
++			const bool active = fnIsMulti && fnIsMulti(id.c_str());
++			QString label = QString::fromStdString(target.value("name", "Destino"));
++			label += target.value("vertical", false) ? QStringLiteral(" · Vertical 9:16")
++									 : QStringLiteral(" · Horizontal 16:9");
++				if (active)
++					label += QStringLiteral(" · EN VIVO");
++			auto *item = new QListWidgetItem(label, choices);
++			item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
++			item->setCheckState(active ? Qt::Checked : Qt::Unchecked);
++			if (active)
++				item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
++			ids.push_back(id);
++		}
++		layout->addWidget(choices, 1);
++		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &picker);
++		buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Iniciar seleccionados"));
++		QObject::connect(buttons, &QDialogButtonBox::accepted, &picker, &QDialog::accept);
++		QObject::connect(buttons, &QDialogButtonBox::rejected, &picker, &QDialog::reject);
++		layout->addWidget(buttons);
++		if (picker.exec() != QDialog::Accepted)
++			return;
++		bool anySelected = false;
++		QStringList failed;
++		for (int i = 0; i < choices->count() && i < int((*cfg)["targets"].size()); ++i) {
++			if (choices->item(i)->checkState() != Qt::Checked)
+ 				continue;
+-			startTarget(t);
++			anySelected = true;
++			const auto &target = (*cfg)["targets"][i];
++			const std::string id = ids[size_t(i)];
++			if ((!fnIsMulti || !fnIsMulti(id.c_str())) && !startTarget(target))
++				failed << QString::fromStdString(target.value("name", "Destino"));
++		}
++		if (!anySelected) {
++			OBSMessageBox::information(dlg, QStringLiteral("Multistreaming"),
++					   QStringLiteral("Selecciona al menos un destino."));
++			return;
+ 		}
++		if (!failed.isEmpty())
++			OBSMessageBox::warning(dlg, QStringLiteral("Multistreaming"),
++					       QStringLiteral("No se pudieron iniciar: %1").arg(failed.join(QStringLiteral(", "))));
+ 		refreshList();
+ 	});
+ 

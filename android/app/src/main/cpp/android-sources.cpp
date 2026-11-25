@@ -3,6 +3,7 @@
 #include "android-sources.h"
 #include "android-uvc.h"
 #include "android-vtuber.h"
+#include "mobile-media-contract.h"
 #include <jni.h>
 #include <android/log.h>
 #include <android/hardware_buffer.h>
@@ -135,6 +136,7 @@ struct GpuCaptureState {
     AHardwareBuffer *pending_ahb{};
     int pending_w{0}, pending_h{0};
     std::vector<uint8_t> pending_rgba;
+    std::vector<uint8_t> recycled_rgba;
     int cpu_w{0}, cpu_h{0};
     bool has_cpu_pending{false};
     std::atomic<uint32_t> reported_w{0};
@@ -172,6 +174,7 @@ struct GpuCaptureState {
             pending_ahb = nullptr;
             pending_w = pending_h = 0;
             pending_rgba.clear();
+            recycled_rgba.clear();
             cpu_w = cpu_h = 0;
             has_cpu_pending = false;
         }
@@ -190,6 +193,34 @@ struct GpuCaptureState {
         logged_active = false;
     }
 };
+
+std::vector<uint8_t> acquire_cpu_rgba(GpuCaptureState &gpu, size_t bytes)
+{
+    std::vector<uint8_t> rgba;
+    {
+        std::lock_guard<std::mutex> lock(gpu.mutex);
+        rgba.swap(gpu.recycled_rgba);
+    }
+    rgba.resize(bytes);
+    return rgba;
+}
+
+void queue_cpu_rgba(GpuCaptureState &gpu, std::vector<uint8_t> &rgba, int width, int height)
+{
+    std::lock_guard<std::mutex> lock(gpu.mutex);
+    gpu.pending_rgba.swap(rgba);
+    gpu.cpu_w = width;
+    gpu.cpu_h = height;
+    gpu.has_cpu_pending = true;
+    if (gpu.recycled_rgba.empty()) gpu.recycled_rgba.swap(rgba);
+}
+
+void recycle_cpu_rgba(GpuCaptureState &gpu, std::vector<uint8_t> &rgba)
+{
+    if (rgba.empty()) return;
+    std::lock_guard<std::mutex> lock(gpu.mutex);
+    if (gpu.recycled_rgba.empty()) gpu.recycled_rgba.swap(rgba);
+}
 
 std::mutex source_mutex;
 JavaVM *g_jvm = nullptr;
@@ -861,6 +892,7 @@ void gpu_source_video_render(void *data, gs_effect_t *effect)
         if (gpu.obs_tex) {
             gs_texture_set_image(gpu.obs_tex, cpu_rgba.data(), uint32_t(cpu_w) * 4, false);
         }
+        recycle_cpu_rgba(gpu, cpu_rgba);
     }
 
     if (!gpu.obs_tex || gpu.tex_w == 0 || gpu.tex_h == 0) return;
@@ -881,8 +913,13 @@ void gpu_source_video_render(void *data, gs_effect_t *effect)
 
 void fit(Capture &capture, int kind, int width, int height, int rotation, bool mirror);
 
-void push_ahb_capture_frame(int kind, AHardwareBuffer *ahb, int width, int height, uint64_t timestamp, int rotation, bool mirror)
+void push_ahb_capture_frame(int kind, AHardwareBuffer *ahb, const obs_mobile::VideoFrameMetadata &frame)
 {
+	const int width = int(frame.width);
+	const int height = int(frame.height);
+	const int rotation = int(frame.rotation_degrees);
+	const bool mirror = frame.mirrored;
+	const uint64_t timestamp = frame.presentation_time_ns;
     if (!ahb || width <= 0 || height <= 0 || width > 4096 || height > 4096 || (kind != 0 && kind != 2)) return;
     std::vector<std::pair<obs_source_t *, int>> to_autofit;
     bool has_consumers = false;
@@ -1242,7 +1279,11 @@ float android_sources_get_mic_level()
 extern "C" __attribute__((visibility("default"))) void
 obs_android_test_push_ahb(int kind, AHardwareBuffer *ahb, int width, int height)
 {
-    push_ahb_capture_frame(kind, ahb, width, height, 0, 0, false);
+	obs_mobile::VideoFrameMetadata frame{};
+	frame.width = uint32_t(std::max(width, 0));
+	frame.height = uint32_t(std::max(height, 0));
+	frame.pixel_format = obs_mobile::VideoPixelFormat::OpaqueNative;
+	push_ahb_capture_frame(kind, ahb, frame);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -1254,7 +1295,14 @@ Java_org_obsandroid_port_NativeBridge_cameraHardwareBuffer(JNIEnv *env, jclass, 
     if (!buffer) return;
     AHardwareBuffer *ahb = AHardwareBuffer_fromHardwareBuffer(env, buffer);
     if (!ahb) return;
-    push_ahb_capture_frame(0, ahb, width, height, uint64_t(timestamp), rotation, mirror);
+	obs_mobile::VideoFrameMetadata frame{};
+	frame.width = uint32_t(std::max(jint(0), width));
+	frame.height = uint32_t(std::max(jint(0), height));
+	frame.presentation_time_ns = uint64_t(timestamp);
+	frame.pixel_format = obs_mobile::VideoPixelFormat::OpaqueNative;
+	frame.rotation_degrees = uint16_t(((rotation % 360) + 360) % 360);
+	frame.mirrored = mirror == JNI_TRUE;
+	push_ahb_capture_frame(0, ahb, frame);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -1266,7 +1314,12 @@ Java_org_obsandroid_port_NativeBridge_screenHardwareBuffer(JNIEnv *env, jclass, 
     if (!buffer) return;
     AHardwareBuffer *ahb = AHardwareBuffer_fromHardwareBuffer(env, buffer);
     if (!ahb) return;
-    push_ahb_capture_frame(2, ahb, width, height, uint64_t(timestamp), 0, false);
+	obs_mobile::VideoFrameMetadata frame{};
+	frame.width = uint32_t(std::max(jint(0), width));
+	frame.height = uint32_t(std::max(jint(0), height));
+	frame.presentation_time_ns = uint64_t(timestamp);
+	frame.pixel_format = obs_mobile::VideoPixelFormat::OpaqueNative;
+	push_ahb_capture_frame(2, ahb, frame);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -1276,6 +1329,15 @@ Java_org_obsandroid_port_NativeBridge_cameraFrame(JNIEnv *env, jclass, jobject y
 {
     AndroidCallbackScope callback;
     if (!callback) return ;
+	obs_mobile::VideoFrameMetadata frame{};
+	frame.width = uint32_t(std::max(jint(0), width));
+	frame.height = uint32_t(std::max(jint(0), height));
+	frame.presentation_time_ns = uint64_t(timestamp);
+	frame.pixel_format = obs_mobile::VideoPixelFormat::YUV420P;
+	frame.range = full_range == JNI_TRUE ? obs_mobile::ColorRange::Full : obs_mobile::ColorRange::Limited;
+	frame.matrix = rec709 == JNI_TRUE ? obs_mobile::ColorMatrix::BT709 : obs_mobile::ColorMatrix::BT601;
+	frame.rotation_degrees = uint16_t(((rotation % 360) + 360) % 360);
+	frame.mirrored = mirror == JNI_TRUE;
     if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || width % 2 || height % 2) return;
     uint8_t *planes[] = {static_cast<uint8_t *>(env->GetDirectBufferAddress(y)), static_cast<uint8_t *>(env->GetDirectBufferAddress(u)), static_cast<uint8_t *>(env->GetDirectBufferAddress(v))};
     jlong capacities[] = {env->GetDirectBufferCapacity(y), env->GetDirectBufferCapacity(u), env->GetDirectBufferCapacity(v)};
@@ -1290,7 +1352,7 @@ Java_org_obsandroid_port_NativeBridge_cameraFrame(JNIEnv *env, jclass, jobject y
         auto &capture = captures[0];
         if (capture.active_sources.empty() && !capture.source) return;
         has_consumers = true;
-        fit(capture, 0, width, height, rotation, mirror);
+        fit(capture, 0, width, height, frame.rotation_degrees, frame.mirrored);
         for (SourceInstance *inst : capture.active_instances) {
             if (inst && inst->auto_fit && inst->source &&
                 (inst->last_fit_w != width || inst->last_fit_h != height || inst->last_fit_rot != rotation)) {
@@ -1301,14 +1363,14 @@ Java_org_obsandroid_port_NativeBridge_cameraFrame(JNIEnv *env, jclass, jobject y
                 if (ref) to_autofit.emplace_back(ref, inst->fit_mode);
             }
         }
-        capture.frames++; capture.timestamp = uint64_t(timestamp);
+        capture.frames++; capture.timestamp = frame.presentation_time_ns;
     }
 
     if (has_consumers &&
         int64_t(height - 1) * strides[0] + width <= capacities[0] &&
         int64_t(height / 2 - 1) * strides[1] + int64_t(width / 2 - 1) * pixel_strides[1] < capacities[1] &&
         int64_t(height / 2 - 1) * strides[2] + int64_t(width / 2 - 1) * pixel_strides[2] < capacities[2]) {
-        std::vector<uint8_t> rgba(size_t(width) * size_t(height) * 4);
+        auto rgba = acquire_cpu_rgba(captures[0].gpu, size_t(width) * size_t(height) * 4);
         const float kr = rec709 ? 1.5748f : 1.402f;
         const float kgu = rec709 ? 0.187324f : 0.344136f;
         const float kgv = rec709 ? 0.468124f : 0.714136f;
@@ -1332,18 +1394,12 @@ Java_org_obsandroid_port_NativeBridge_cameraFrame(JNIEnv *env, jclass, jobject y
             }
         }
         auto &gpu = captures[0].gpu;
-        {
-            std::lock_guard<std::mutex> lock(gpu.mutex);
-            gpu.pending_rgba.swap(rgba);
-            gpu.cpu_w = width;
-            gpu.cpu_h = height;
-            gpu.has_cpu_pending = true;
-        }
+        queue_cpu_rgba(gpu, rgba, width, height);
         gpu.reported_w.store(uint32_t(width), std::memory_order_relaxed);
         gpu.reported_h.store(uint32_t(height), std::memory_order_relaxed);
     }
     for (auto &item : to_autofit) {
-        apply_auto_fit_to_source(item.first, rotation, item.second);
+        apply_auto_fit_to_source(item.first, frame.rotation_degrees, item.second);
         obs_source_release(item.first);
     }
 }
@@ -1352,6 +1408,11 @@ Java_org_obsandroid_port_NativeBridge_screenFrame(JNIEnv *env, jclass, jobject r
 {
     AndroidCallbackScope callback;
     if (!callback) return ;
+	obs_mobile::VideoFrameMetadata frame{};
+	frame.width = uint32_t(std::max(jint(0), width));
+	frame.height = uint32_t(std::max(jint(0), height));
+	frame.presentation_time_ns = uint64_t(timestamp);
+	frame.pixel_format = obs_mobile::VideoPixelFormat::RGBA8888;
     if (width <= 0 || height <= 0 || stride < width * 4) return;
     auto *pixels = static_cast<uint8_t *>(env->GetDirectBufferAddress(rgba));
     if (!pixels || int64_t(height - 1) * stride + int64_t(width) * 4 > env->GetDirectBufferCapacity(rgba)) return;
@@ -1373,21 +1434,15 @@ Java_org_obsandroid_port_NativeBridge_screenFrame(JNIEnv *env, jclass, jobject r
                 if (ref) to_autofit.emplace_back(ref, inst->fit_mode);
             }
         }
-        capture.frames++; capture.timestamp = uint64_t(timestamp);
+        capture.frames++; capture.timestamp = frame.presentation_time_ns;
     }
     if (has_consumers) {
-        std::vector<uint8_t> packed(size_t(width) * size_t(height) * 4);
+        auto packed = acquire_cpu_rgba(captures[2].gpu, size_t(width) * size_t(height) * 4);
         for (int row = 0; row < height; ++row) {
             std::memcpy(packed.data() + size_t(row) * width * 4, pixels + size_t(row) * stride, size_t(width) * 4);
         }
         auto &gpu = captures[2].gpu;
-        {
-            std::lock_guard<std::mutex> lock(gpu.mutex);
-            gpu.pending_rgba.swap(packed);
-            gpu.cpu_w = width;
-            gpu.cpu_h = height;
-            gpu.has_cpu_pending = true;
-        }
+        queue_cpu_rgba(gpu, packed, width, height);
         gpu.reported_w.store(uint32_t(width), std::memory_order_relaxed);
         gpu.reported_h.store(uint32_t(height), std::memory_order_relaxed);
     }
@@ -1403,13 +1458,19 @@ Java_org_obsandroid_port_NativeBridge_audioFrame(JNIEnv *env, jclass, jint kind,
     if (!callback) return ;
     if (kind != 1 && kind != 3) return;
     if (bytes <= 0 || channels < 1 || channels > 2 || bytes % (2 * channels)) return;
+	obs_mobile::AudioFrameMetadata frame{};
+	frame.sample_rate = sample_rate > 0 ? uint32_t(sample_rate) : 48000;
+	frame.channels = uint32_t(channels);
+	frame.frames_per_channel = uint32_t(bytes / (2 * channels));
+	frame.presentation_time_ns = uint64_t(timestamp);
+	frame.sample_format = obs_mobile::AudioSampleFormat::Signed16;
     const auto *samples = static_cast<const int16_t *>(env->GetDirectBufferAddress(pcm));
     if (!samples || bytes > env->GetDirectBufferCapacity(pcm)) return;
     obs_source_audio audio{};
     audio.data[0] = reinterpret_cast<const uint8_t *>(samples);
-    audio.frames = bytes / (2 * channels); audio.samples_per_sec = sample_rate > 0 ? uint32_t(sample_rate) : 48000;
+    audio.frames = frame.frames_per_channel; audio.samples_per_sec = frame.sample_rate;
     audio.format = AUDIO_FORMAT_16BIT; audio.speakers = channels == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO;
-    audio.timestamp = uint64_t(timestamp);
+    audio.timestamp = frame.presentation_time_ns;
 
     const int total_samples = bytes / 2;
     int max_abs = 0;
@@ -1480,6 +1541,12 @@ Java_org_obsandroid_port_NativeBridge_audioFrameForDevice(
     AndroidCallbackScope callback;
     if (!callback) return ;
     if (bytes <= 0 || channels < 1 || channels > 2 || bytes % (2 * channels)) return;
+	obs_mobile::AudioFrameMetadata frame{};
+	frame.sample_rate = sample_rate > 0 ? uint32_t(sample_rate) : 48000;
+	frame.channels = uint32_t(channels);
+	frame.frames_per_channel = uint32_t(bytes / (2 * channels));
+	frame.presentation_time_ns = uint64_t(timestamp);
+	frame.sample_format = obs_mobile::AudioSampleFormat::Signed16;
     const auto *samples = static_cast<const int16_t *>(env->GetDirectBufferAddress(pcm));
     if (!samples || bytes > env->GetDirectBufferCapacity(pcm)) return;
 
@@ -1494,11 +1561,11 @@ Java_org_obsandroid_port_NativeBridge_audioFrameForDevice(
 
     obs_source_audio audio{};
     audio.data[0] = reinterpret_cast<const uint8_t *>(samples);
-    audio.frames = bytes / (2 * channels);
-    audio.samples_per_sec = sample_rate > 0 ? uint32_t(sample_rate) : 48000;
+    audio.frames = frame.frames_per_channel;
+    audio.samples_per_sec = frame.sample_rate;
     audio.format = AUDIO_FORMAT_16BIT;
     audio.speakers = channels == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO;
-    audio.timestamp = uint64_t(timestamp);
+    audio.timestamp = frame.presentation_time_ns;
 
     const int total_samples = bytes / 2;
     int max_abs = 0;

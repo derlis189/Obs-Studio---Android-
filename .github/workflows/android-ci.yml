@@ -1,0 +1,33 @@
+name: Android patch and Gradle checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch-manifest:
+    name: Apply OBS patches and verify manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Verify pinned source patch series
+        run: python scripts/verify-patch-manifest.py
+
+  gradle-configuration:
+    name: Verify Gradle wrapper and Android project configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check Gradle wrapper and project configuration
+        run: ./android/gradlew --no-daemon -p android help

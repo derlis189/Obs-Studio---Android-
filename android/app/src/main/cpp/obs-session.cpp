@@ -761,6 +761,10 @@ void obs_module_unload(void)
 {
     android_bg_removal_filter_shutdown();
     android_multistream_shutdown();
+    android_srt_shutdown();
+    android_ndi_shutdown();
+    android_vtuber_shutdown();
+    android_browser_shutdown();
     android_captures_shutdown();
     android_hw_video_shutdown();
 }

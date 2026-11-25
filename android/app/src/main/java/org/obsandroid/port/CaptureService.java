@@ -498,9 +498,25 @@ public final class CaptureService extends Service {
         }
     }
     @Override public void onTimeout(int startId, int fgsType) {
-        Log.w("ObsCaptureService", "Foreground service type timeout (fgsType=" + fgsType + "), preserving process");
-        sessionBgActive = false;
-        if (!cameraActive && !microphoneActive && !screenActive && !uvcActive && !streamRequested && !qtBroadcastActive) {
+        Log.w("ObsCaptureService", "Foreground service type timeout (fgsType=" + fgsType + ", startId=" + startId + ")");
+        if ((fgsType & ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA) != 0 && cameraActive) {
+            cameraActive = false;
+            CameraController oldCam = camera; camera = null;
+            stopCameraAsync(oldCam);
+        }
+        if ((fgsType & ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE) != 0 && microphoneActive) {
+            microphoneActive = false;
+            stopAllMicsLocked();
+        }
+        if ((fgsType & ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) != 0 && screenActive) {
+            screenActive = false;
+            ScreenController oldSc = screen; screen = null;
+            stopScreenAsync(oldSc);
+        }
+        if ((fgsType & ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) != 0) {
+            sessionBgActive = false;
+        }
+        if (!cameraActive && !microphoneActive && !screenActive && !uvcActive && !streamRequested && !qtBroadcastActive && !sessionBgActive) {
             stopSelf(startId);
         } else {
             foreground();
