@@ -44,6 +44,12 @@ La pantalla **Transmitir desde libobs** permite elegir AAC LC estéreo a 48 kHz 
 
 Esta mejora cubre la salida RTMP principal de esa pantalla. No cambia las salidas SRT, multistream ni verticales, que conservan sus propios encoders y valores. La interfaz compila, pero no se probó una emisión física con tasas superiores a 128 kbps en el Samsung; el soporte real depende del codificador y del servicio receptor.
 
+### Captura de cámara según visibilidad
+
+Las fuentes Camera2 y UVC ahora solicitan abrir el dispositivo al mostrarse en Programa/Vista Previa y solicitan detenerlo cuando dejan de estar visibles. Si otra escena activa sigue mostrando una de esas fuentes, la cámara se conserva. Los micrófonos y el audio de pantalla mantienen captura independiente.
+
+El APK ARM64 compiló con este cambio. Falta comprobar en el dispositivo los cambios de escena, fuentes compartidas entre Programa/Vista Previa, permisos de cámara y reapertura después de ocultarla; hasta esa prueba, el ahorro de batería/temperatura es una expectativa basada en apagar el productor, no una medición.
+
 ### Salida NDI desde Herramientas
 
 - **Herramientas → Salida NDI en red…** transmite el Programa mediante una salida nativa de OBS, con video RGBA y audio estéreo flotante planar. El diálogo permite definir el nombre anunciado y detener la salida.

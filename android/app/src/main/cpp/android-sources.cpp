@@ -218,6 +218,7 @@ struct SourceInstance {
     obs_source_t *source{};
     int kind{};
     bool enabled{true};
+    bool visible{false};
     bool capture_audio{true};
     bool auto_fit{true};
     int fit_mode{0}; // 0=inner (no crop), 1=outer (fill)
@@ -506,6 +507,56 @@ std::string collect_active_mic_specs_locked()
     return joined;
 }
 
+bool collect_visible_video_capture_locked(int kind, std::string &device_id, float &zoom, int &exposure)
+{
+    if (kind != 0 && kind != 4) return false;
+    for (SourceInstance *inst : captures[kind].active_instances) {
+        if (!inst || !inst->visible || !inst->enabled) continue;
+        device_id = inst->device_id.empty() ? "default" : inst->device_id;
+        zoom = inst->zoom;
+        exposure = inst->exposure;
+        return true;
+    }
+    return false;
+}
+
+void refresh_visible_video_capture(int kind)
+{
+    std::string device_id = "default";
+    float zoom = 1.0f;
+    int exposure = 0;
+    bool enabled = false;
+    {
+        std::lock_guard<std::mutex> guard(source_mutex);
+        enabled = collect_visible_video_capture_locked(kind, device_id, zoom, exposure);
+    }
+    notify_java_capture(kind, enabled, device_id, zoom, exposure);
+}
+
+void source_show(void *data)
+{
+    auto *inst = static_cast<SourceInstance *>(data);
+    if (!inst || (inst->kind != 0 && inst->kind != 4)) return;
+    {
+        std::lock_guard<std::mutex> guard(source_mutex);
+        if (inst->visible) return;
+        inst->visible = true;
+    }
+    refresh_visible_video_capture(inst->kind);
+}
+
+void source_hide(void *data)
+{
+    auto *inst = static_cast<SourceInstance *>(data);
+    if (!inst || (inst->kind != 0 && inst->kind != 4)) return;
+    {
+        std::lock_guard<std::mutex> guard(source_mutex);
+        if (!inst->visible) return;
+        inst->visible = false;
+    }
+    refresh_visible_video_capture(inst->kind);
+}
+
 void source_update(void *data, obs_data_t *settings)
 {
     auto *inst = static_cast<SourceInstance *>(data);
@@ -544,6 +595,8 @@ void source_update(void *data, obs_data_t *settings)
         if (kind == 1) {
             device_id = collect_active_mic_specs_locked();
             enabled = !device_id.empty();
+        } else if (kind == 0 || kind == 4) {
+            enabled = collect_visible_video_capture_locked(kind, device_id, zoom, exposure);
         } else {
             enabled = inst->enabled;
             device_id = inst->device_id;
@@ -587,6 +640,7 @@ void *source_create(obs_data_t *settings, obs_source_t *source)
     if (kind == 4) obs_source_set_async_unbuffered(source, true);
     std::string notify_dev = inst->device_id;
     bool notify_en = inst->enabled;
+    bool notify_on_create = kind != 0 && kind != 4;
     {
         std::lock_guard<std::mutex> guard(source_mutex);
         captures[kind].active_sources.push_back(source);
@@ -596,7 +650,7 @@ void *source_create(obs_data_t *settings, obs_source_t *source)
             notify_en = !notify_dev.empty();
         }
     }
-    if (notify_en) {
+    if (notify_on_create && notify_en) {
         notify_java_capture(kind, notify_en, notify_dev, inst->zoom, inst->exposure);
     }
     return inst;
@@ -622,6 +676,16 @@ void source_destroy(void *data)
     }
     if (kind == 1) {
         notify_java_capture(1, !remaining_mic_specs.empty(), remaining_mic_specs, 1.0f, 0);
+    } else if (kind == 0 || kind == 4) {
+        refresh_visible_video_capture(kind);
+        if (!any_left && kind == 0) {
+            captures[kind].gpu.clear_pending();
+            if (obs_initialized()) {
+                obs_enter_graphics();
+                captures[kind].gpu.destroy_gl_resources();
+                obs_leave_graphics();
+            }
+        }
     } else if (!any_left) {
         notify_java_capture(kind, false, "default", 1.0f, 0);
         if (kind == 0 || kind == 2) {
@@ -929,6 +993,8 @@ void android_captures_register()
         info.create = source_create;
         info.destroy = source_destroy;
         info.update = source_update;
+        info.show = source_show;
+        info.hide = source_hide;
         info.get_defaults2 = source_defaults;
         info.get_properties2 = source_properties2;
         info.type_data = reinterpret_cast<void *>(uintptr_t(i));
