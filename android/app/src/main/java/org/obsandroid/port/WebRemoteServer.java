@@ -324,6 +324,7 @@ public final class WebRemoteServer {
 
             int contentLength = 0;
             String authToken = null;
+            String hostHeader = null;
             for (int i = 1; i < lines.length; ++i) {
                 String l = lines[i];
                 int colon = l.indexOf(':');
@@ -334,7 +335,14 @@ public final class WebRemoteServer {
                     try { contentLength = Integer.parseInt(v); } catch (NumberFormatException ignored) {}
                 } else if ("x-obs-token".equals(k) && (authToken == null || authToken.isEmpty())) {
                     authToken = v;
+                } else if ("host".equals(k)) {
+                    hostHeader = v.toLowerCase(Locale.US);
                 }
+            }
+
+            if (hostHeader != null && !isAllowedHostHeader(hostHeader)) {
+                sendResponse(out, 403, "text/plain", "Forbidden Host".getBytes(StandardCharsets.UTF_8));
+                return;
             }
 
             boolean isLoopback = s.getInetAddress() != null && s.getInetAddress().isLoopbackAddress();
@@ -549,11 +557,27 @@ public final class WebRemoteServer {
         return file.getPath().startsWith(root.getPath() + File.separator) ? file : null;
     }
 
+    private static boolean isAllowedHostHeader(String hostHeader) {
+        String h = hostHeader;
+        if (h.startsWith("[")) {
+            int end = h.indexOf(']');
+            if (end > 1) h = h.substring(1, end);
+        } else {
+            int colon = h.lastIndexOf(':');
+            if (colon > 0) h = h.substring(0, colon);
+        }
+        if ("127.0.0.1".equals(h) || "localhost".equals(h) || "::1".equals(h)) return true;
+        // Allow direct IPv4 literals (LAN IPs) and block external DNS rebinding hostnames
+        return h.matches("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$");
+    }
+
     private static void sendFileResponse(OutputStream out, File f) throws IOException {
         String mime = guessMime(f.getName());
         String hdr = "HTTP/1.1 200 OK\r\n"
             + "Content-Type: " + mime + "\r\n"
             + "Content-Length: " + f.length() + "\r\n"
+            + "X-Content-Type-Options: nosniff\r\n"
+            + "X-Frame-Options: SAMEORIGIN\r\n"
             + "Cache-Control: no-cache\r\n"
             + "Connection: close\r\n\r\n";
         out.write(hdr.getBytes(StandardCharsets.US_ASCII));
@@ -594,6 +618,8 @@ public final class WebRemoteServer {
         String hdr = "HTTP/1.1 " + code + " " + status + "\r\n"
             + "Content-Type: " + contentType + "\r\n"
             + "Content-Length: " + body.length + "\r\n"
+            + "X-Content-Type-Options: nosniff\r\n"
+            + "X-Frame-Options: SAMEORIGIN\r\n"
             + "Cache-Control: no-store\r\n"
             + "Connection: close\r\n\r\n";
         out.write(hdr.getBytes(StandardCharsets.US_ASCII));

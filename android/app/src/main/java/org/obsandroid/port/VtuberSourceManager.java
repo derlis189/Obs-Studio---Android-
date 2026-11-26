@@ -350,20 +350,33 @@ public final class VtuberSourceManager {
             String model3 = findModel3Json(outDir);
             if (model3 == null) {
                 if (!outDir.isDirectory()) outDir.mkdirs();
-                String canon = outDir.getCanonicalPath();
+                String canonPrefix = outDir.getCanonicalPath() + File.separator;
+                final int MAX_ENTRIES = 2000;
+                final long MAX_TOTAL_BYTES = 256L * 1024L * 1024L;
+                int entries = 0;
+                long totalBytes = 0;
                 try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(src)))) {
                     ZipEntry e;
                     byte[] buf = new byte[65536];
                     while ((e = zis.getNextEntry()) != null) {
+                        if (++entries > MAX_ENTRIES) {
+                            throw new SecurityException("Live2D zip exceeds entry limit");
+                        }
                         String n = e.getName().replace('\\', '/');
                         if (e.isDirectory() || n.contains("..")) continue;
                         File dst = new File(outDir, n);
-                        if (!dst.getCanonicalPath().startsWith(canon)) continue;
+                        if (!dst.getCanonicalPath().startsWith(canonPrefix)) continue;
                         File p = dst.getParentFile();
                         if (p != null && !p.isDirectory()) p.mkdirs();
                         try (FileOutputStream fos = new FileOutputStream(dst)) {
                             int r;
-                            while ((r = zis.read(buf)) != -1) fos.write(buf, 0, r);
+                            while ((r = zis.read(buf)) != -1) {
+                                totalBytes += r;
+                                if (totalBytes > MAX_TOTAL_BYTES) {
+                                    throw new SecurityException("Live2D zip exceeds max size");
+                                }
+                                fos.write(buf, 0, r);
+                            }
                         }
                     }
                 }
@@ -524,7 +537,15 @@ public final class VtuberSourceManager {
         File f = new File(path);
         if (!f.isFile()) return null;
         try {
-            return BitmapFactory.decodeFile(f.getAbsolutePath());
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(f.getAbsolutePath(), opts);
+            int maxDim = Math.max(opts.outWidth, opts.outHeight);
+            int sample = 1;
+            while (maxDim / sample > 2048) sample *= 2;
+            BitmapFactory.Options dec = new BitmapFactory.Options();
+            dec.inSampleSize = sample;
+            return BitmapFactory.decodeFile(f.getAbsolutePath(), dec);
         } catch (Throwable t) {
             return null;
         }

@@ -84,6 +84,7 @@ public final class BrowserSourceManager {
 
     private static final class BrowserInstance {
         final long id;
+        final Object frameLock = new Object();
         WebView webView;
         Bitmap bitmap;
         Presentation presentation;
@@ -170,21 +171,26 @@ public final class BrowserSourceManager {
         void ensureBuffers(int w, int h) {
             int cw = Math.max(64, Math.min(3840, w));
             int ch = Math.max(64, Math.min(2160, h));
-            if (bitmap != null && bitmap.getWidth() == cw && bitmap.getHeight() == ch) {
-                return;
+            synchronized (frameLock) {
+                if (capturePending) return;
+                if (bitmap != null && !bitmap.isRecycled() && bitmap.getWidth() == cw && bitmap.getHeight() == ch) {
+                    return;
+                }
+                if (bitmap != null) {
+                    bitmap.recycle();
+                    bitmap = null;
+                }
+                bitmap = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888);
+                width = cw;
+                height = ch;
             }
-            if (bitmap != null) {
-                bitmap.recycle();
-                bitmap = null;
-            }
-            bitmap = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888);
-            width = cw;
-            height = ch;
         }
 
         void releaseBuffers() {
-            if (bitmap != null) bitmap.recycle();
-            bitmap = null;
+            synchronized (frameLock) {
+                if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+                bitmap = null;
+            }
         }
 
         void releasePresentation() {
@@ -294,9 +300,21 @@ public final class BrowserSourceManager {
                 Window target = interacting && interactDialog != null ? interactDialog.getWindow()
                     : presentation != null ? presentation.getWindow() : null;
                 if (target == null || !webView.isAttachedToWindow() ||
-                        webView.getWidth() <= 0 || webView.getHeight() <= 0) return;
-                ensureBuffers(width, height);
-                final Bitmap frameBitmap = bitmap;
+                        webView.getWidth() <= 0 || webView.getHeight() <= 0) {
+                    // Retry shortly if layout hasn't completed yet so static pages don't stall
+                    if (!destroyed && captureActive() && tickQueued.compareAndSet(false, true)) {
+                        sMain.postDelayed(tickRunnable, 60);
+                    }
+                    return;
+                }
+                final Bitmap frameBitmap;
+                synchronized (frameLock) {
+                    if (destroyed || capturePending) return;
+                    ensureBuffers(width, height);
+                    frameBitmap = bitmap;
+                    if (frameBitmap == null || frameBitmap.isRecycled()) return;
+                    capturePending = true;
+                }
                 int[] location = new int[2];
                 webView.getLocationInWindow(location);
                 Rect rect = new Rect(location[0], location[1], location[0] + webView.getWidth(),
@@ -309,37 +327,44 @@ public final class BrowserSourceManager {
                 // Stagger multi-guest captures slightly so multiple PixelCopy calls don't collide on the same vsync
                 long stagger = activeCount > 1 ? ((Math.abs(id) % activeCount) * Math.max(4L, baseInterval / (activeCount * 2L))) : 0L;
                 nextCaptureAtMs = SystemClock.uptimeMillis() + baseInterval + (capturedFrames == 0 ? stagger : 0L);
-                capturePending = true;
                 // Copy the window surface, before the virtual display compositor flattens
                 // alpha against black. This preserves transparent HTML and captures video/WebGL.
                 PixelCopy.request(target, rect, frameBitmap, result -> {
                     try {
-                        if (!destroyed && captureActive() && result == PixelCopy.SUCCESS) {
-                            boolean accepted = id < 0 ? NativeBridge.pushVtuberBitmap(-id, frameBitmap)
-                                : NativeBridge.pushBrowserBitmap(id, frameBitmap);
-                            if (!accepted) return;
-                            frameGate.delivered(copiedRevision);
-                            ++capturedFrames;
-                            long now = SystemClock.uptimeMillis();
-                            if (capturedFrames == 1 || now - lastCaptureReportMs >= 10000) {
-                                lastCaptureReportMs = now;
-                                Log.i(TAG, "GPU browser frames id=" + id + " frames=" + capturedFrames
-                                    + " revision=" + copiedRevision + " cap=" + Math.min(fps, sThermalFpsCap));
+                        synchronized (frameLock) {
+                            if (!destroyed && captureActive() && result == PixelCopy.SUCCESS && !frameBitmap.isRecycled()) {
+                                boolean accepted = id < 0 ? NativeBridge.pushVtuberBitmap(-id, frameBitmap)
+                                    : NativeBridge.pushBrowserBitmap(id, frameBitmap);
+                                if (accepted) {
+                                    frameGate.delivered(copiedRevision);
+                                    ++capturedFrames;
+                                    long now = SystemClock.uptimeMillis();
+                                    if (capturedFrames == 1 || now - lastCaptureReportMs >= 10000) {
+                                        lastCaptureReportMs = now;
+                                        Log.i(TAG, "GPU browser frames id=" + id + " frames=" + capturedFrames
+                                            + " revision=" + copiedRevision + " cap=" + Math.min(fps, sThermalFpsCap));
+                                    }
+                                }
+                            } else if (!destroyed && result != PixelCopy.SUCCESS) {
+                                nextCaptureAtMs = SystemClock.uptimeMillis() + 250;
+                                warnCapture("PixelCopy=" + result);
                             }
-                        } else if (!destroyed && result != PixelCopy.SUCCESS) {
-                            nextCaptureAtMs = SystemClock.uptimeMillis() + 250;
-                            warnCapture("PixelCopy=" + result);
                         }
                     } catch (RuntimeException failure) {
                         if (!destroyed) warnCapture("Error al entregar el fotograma GPU");
                     } finally {
-                        if (destroyed) releaseBuffers();
-                        capturePending = false;
+                        synchronized (frameLock) {
+                            capturePending = false;
+                            if (destroyed) releaseBuffers();
+                        }
                         scheduleTick();
                     }
                 }, captureHandlerFor(id));
             } catch (Throwable t) {
-                capturePending = false;
+                synchronized (frameLock) {
+                    capturePending = false;
+                    if (destroyed) releaseBuffers();
+                }
                 nextCaptureAtMs = SystemClock.uptimeMillis() + 250;
                 warnCapture("Error de captura: " + t.getClass().getSimpleName());
                 scheduleTick();
@@ -433,10 +458,31 @@ public final class BrowserSourceManager {
             @Override
             public void onPermissionRequest(android.webkit.PermissionRequest request) {
                 if (request == null) return;
-                String origin = request.getOrigin() != null ? request.getOrigin().toString() : "";
-                // Auto-grant camera/microphone/WebRTC permissions for HTTPS or local loopback guest pages
-                if (origin.startsWith("https://") || origin.startsWith("http://127.0.0.1") || origin.startsWith("http://localhost")) {
-                    request.grant(request.getResources());
+                Uri originUri = request.getOrigin();
+                String scheme = originUri != null && originUri.getScheme() != null ? originUri.getScheme().toLowerCase(java.util.Locale.US) : "";
+                String host = originUri != null && originUri.getHost() != null ? originUri.getHost().toLowerCase(java.util.Locale.US) : "";
+                boolean isLoopback = "http".equals(scheme) && ("127.0.0.1".equals(host) || "localhost".equals(host));
+                boolean isTrustedWebRtc = "https".equals(scheme) && (
+                    "vdo.ninja".equals(host) || host.endsWith(".vdo.ninja")
+                    || "obs.ninja".equals(host) || host.endsWith(".obs.ninja")
+                    || "meet.jit.si".equals(host) || host.endsWith(".jitsi.net")
+                    || "127.0.0.1".equals(host) || "localhost".equals(host));
+                if (!isLoopback && !isTrustedWebRtc) {
+                    request.deny();
+                    return;
+                }
+                java.util.List<String> allowed = new java.util.ArrayList<>();
+                String[] reqRes = request.getResources();
+                if (reqRes != null) {
+                    for (String r : reqRes) {
+                        if (android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)
+                                || android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
+                            allowed.add(r);
+                        }
+                    }
+                }
+                if (!allowed.isEmpty()) {
+                    request.grant(allowed.toArray(new String[0]));
                 } else {
                     request.deny();
                 }
@@ -650,7 +696,9 @@ public final class BrowserSourceManager {
         sMain.post(() -> {
             BrowserInstance inst = sInstances.remove(id);
             if (inst == null) return;
-            inst.destroyed = true;
+            synchronized (inst.frameLock) {
+                inst.destroyed = true;
+            }
             inst.cancelTick();
             if (inst.interactDialog != null && inst.interactDialog.isShowing()) {
                 inst.interactDialog.dismiss();
@@ -665,7 +713,9 @@ public final class BrowserSourceManager {
                 inst.webView.destroy();
                 inst.webView = null;
             }
-            if (!inst.capturePending) inst.releaseBuffers();
+            synchronized (inst.frameLock) {
+                if (!inst.capturePending) inst.releaseBuffers();
+            }
         });
     }
 

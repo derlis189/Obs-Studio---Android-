@@ -15,13 +15,16 @@
 #include <util/bmem.h>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <tuple>
 #include <nlohmann/json.hpp>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern "C" void obs_android_on_recording_finished(const char *file_path);
+extern "C" int obs_android_get_thermal_tier();
 
 namespace {
 constexpr const char *kTag = "ObsMultiVertical";
@@ -65,7 +68,7 @@ struct VerticalEngine {
 };
 
 struct BacktrackPacket {
-    std::vector<uint8_t> data;
+    std::shared_ptr<const std::vector<uint8_t>> data;
     int64_t pts_us{};
     bool keyframe{};
     bool is_audio{};
@@ -83,7 +86,13 @@ struct BacktrackState {
     std::deque<BacktrackPacket> packets;
 };
 
-BacktrackState *g_active_bt = nullptr;
+struct BacktrackHolder {
+    std::shared_ptr<BacktrackState> state;
+};
+
+std::mutex g_ms_mutex;
+std::mutex g_active_bt_mutex;
+std::shared_ptr<BacktrackState> g_active_bt;
 
 // Split concatenated Annex-B SPS+PPS (if present) so AMediaMuxer gets clean csd-0 / csd-1
 void split_annexb_csd(const std::vector<uint8_t> &csd, std::vector<uint8_t> &sps, std::vector<uint8_t> &pps)
@@ -150,8 +159,9 @@ void backtrack_prune_locked(BacktrackState &st)
 
 void backtrack_encoded_packet(void *data, struct encoder_packet *pkt)
 {
-    auto *st = static_cast<BacktrackState *>(data);
-    if (!st || !pkt || !pkt->data || !pkt->size) return;
+    auto *holder = static_cast<BacktrackHolder *>(data);
+    if (!holder || !holder->state || !pkt || !pkt->data || !pkt->size) return;
+    BacktrackState *st = holder->state.get();
 
     const bool is_audio = (pkt->type == OBS_ENCODER_AUDIO);
     int64_t pts_us = 0;
@@ -160,6 +170,8 @@ void backtrack_encoded_packet(void *data, struct encoder_packet *pkt)
     } else {
         pts_us = pkt->dts_usec;
     }
+
+    auto payload = std::make_shared<std::vector<uint8_t>>(pkt->data, pkt->data + pkt->size);
 
     std::lock_guard<std::mutex> lock(st->mutex);
     if (!is_audio && st->video_csd.empty()) {
@@ -184,7 +196,7 @@ void backtrack_encoded_packet(void *data, struct encoder_packet *pkt)
     }
 
     BacktrackPacket bp;
-    bp.data.assign(pkt->data, pkt->data + pkt->size);
+    bp.data = std::move(payload);
     bp.pts_us = pts_us;
     bp.keyframe = !is_audio && pkt->keyframe;
     bp.is_audio = is_audio;
@@ -210,13 +222,6 @@ bool write_backtrack_snapshot_to_mp4(const char *path,
     if (first_kf >= pkts.size()) return false;
 
     const int64_t base_v_pts_us = pkts[first_kf].pts_us;
-    int64_t base_a_pts_us = -1;
-    for (size_t i = first_kf; i < pkts.size(); ++i) {
-        if (pkts[i].is_audio) {
-            base_a_pts_us = pkts[i].pts_us;
-            break;
-        }
-    }
     int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
     if (fd < 0) {
         blog(LOG_ERROR, "[android-vertical] Backtrack open('%s') failed", path);
@@ -264,9 +269,10 @@ bool write_backtrack_snapshot_to_mp4(const char *path,
     size_t written_a = 0;
     for (size_t i = first_kf; i < pkts.size(); ++i) {
         const auto &p = pkts[i];
+        if (!p.data || p.data->empty()) continue;
         AMediaCodecBufferInfo bi{};
         bi.offset = 0;
-        bi.size = int32_t(p.data.size());
+        bi.size = int32_t(p.data->size());
         if (!p.is_audio) {
             int64_t rel_us = p.pts_us - base_v_pts_us;
             if (rel_us < 0) continue;
@@ -274,16 +280,17 @@ bool write_backtrack_snapshot_to_mp4(const char *path,
             last_v_pts = rel_us;
             bi.presentationTimeUs = rel_us;
             bi.flags = p.keyframe ? AMEDIACODEC_BUFFER_FLAG_KEY_FRAME : 0;
-            if (AMediaMuxer_writeSampleData(muxer, size_t(vtrack), p.data.data(), &bi) == AMEDIA_OK)
+            if (AMediaMuxer_writeSampleData(muxer, size_t(vtrack), p.data->data(), &bi) == AMEDIA_OK)
                 ++written_v;
-        } else if (atrack >= 0 && base_a_pts_us >= 0) {
-            int64_t rel_us = p.pts_us - base_a_pts_us;
+        } else if (atrack >= 0) {
+            // Rebase audio onto the shared video keyframe timeline for exact A/V sync
+            int64_t rel_us = p.pts_us - base_v_pts_us;
             if (rel_us < 0) continue;
             if (rel_us <= last_a_pts) rel_us = last_a_pts + 1000;
             last_a_pts = rel_us;
             bi.presentationTimeUs = rel_us;
             bi.flags = 0;
-            if (AMediaMuxer_writeSampleData(muxer, size_t(atrack), p.data.data(), &bi) == AMEDIA_OK)
+            if (AMediaMuxer_writeSampleData(muxer, size_t(atrack), p.data->data(), &bi) == AMEDIA_OK)
                 ++written_a;
         }
     }
@@ -298,7 +305,6 @@ bool write_backtrack_snapshot_to_mp4(const char *path,
     return ok;
 }
 
-std::mutex g_ms_mutex;
 std::map<std::string, MultiTarget> g_targets;
 VerticalEngine g_vert;
 // One video encoder per OBS canvas. The first started target chooses its
@@ -313,10 +319,36 @@ void clear_encoder_pool() {
     g_audio_pool = nullptr;
 }
 
+void erase_video_pool_key(video_t *video) {
+    if (!video) return;
+    auto it = g_video_pool.find(video);
+    if (it != g_video_pool.end()) {
+        obs_weak_encoder_release(it->second);
+        g_video_pool.erase(it);
+    }
+}
+
+void stop_and_wait_output(obs_output_t *out, int max_wait_ms = 1200) {
+    if (!out) return;
+    if (obs_output_reconnecting(out)) {
+        obs_output_force_stop(out);
+    } else if (obs_output_active(out)) {
+        obs_output_stop(out);
+    }
+    const int steps = std::max(1, max_wait_ms / 20);
+    for (int i = 0; i < steps && (obs_output_active(out) || obs_output_reconnecting(out)); ++i) {
+        os_sleep_ms(20);
+    }
+    if (obs_output_active(out) || obs_output_reconnecting(out)) {
+        obs_output_force_stop(out);
+        for (int i = 0; i < 15 && obs_output_active(out); ++i) os_sleep_ms(10);
+    }
+}
+
 void release_multi_target(MultiTarget &t)
 {
     if (t.output) {
-        if (obs_output_active(t.output) || obs_output_reconnecting(t.output)) obs_output_force_stop(t.output);
+        stop_and_wait_output(t.output, 600);
         obs_output_release(t.output);
         t.output = nullptr;
     }
@@ -593,17 +625,20 @@ void draw_blurred(ProgramCanvas &canvas, gs_texture_t *program, int blur_amount)
     const vec2 dir_h2{step2 / float(low_w), 0.0f};
     const vec2 dir_v2{0.0f, step2 / float(low_h)};
 
+    const bool thermal_light = obs_android_get_thermal_tier() >= 2;
     if (!run_blur_pass(canvas.blur, canvas.blur_a, program, low_w, low_h, cover, dir_h1, 1.0f))
         return;
     auto *tex_a = gs_texrender_get_texture(canvas.blur_a);
-    if (!run_blur_pass(canvas.blur, canvas.blur_b, tex_a, low_w, low_h, unit, dir_v1, 1.0f))
+    if (!run_blur_pass(canvas.blur, canvas.blur_b, tex_a, low_w, low_h, unit, dir_v1, thermal_light ? 0.82f : 1.0f))
         return;
-    auto *tex_b = gs_texrender_get_texture(canvas.blur_b);
-    if (!run_blur_pass(canvas.blur, canvas.blur_a, tex_b, low_w, low_h, unit, dir_h2, 1.0f))
-        return;
-    tex_a = gs_texrender_get_texture(canvas.blur_a);
-    if (!run_blur_pass(canvas.blur, canvas.blur_b, tex_a, low_w, low_h, unit, dir_v2, 0.82f))
-        return;
+    if (!thermal_light) {
+        auto *tex_b = gs_texrender_get_texture(canvas.blur_b);
+        if (!run_blur_pass(canvas.blur, canvas.blur_a, tex_b, low_w, low_h, unit, dir_h2, 1.0f))
+            return;
+        tex_a = gs_texrender_get_texture(canvas.blur_a);
+        if (!run_blur_pass(canvas.blur, canvas.blur_b, tex_a, low_w, low_h, unit, dir_v2, 0.82f))
+            return;
+    }
 
     auto *texture = gs_texrender_get_texture(canvas.blur_b);
     auto *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
@@ -774,6 +809,7 @@ bool ensure_vertical_canvas_locked(int width, int height, const char *scene_name
     // Tear down any previous view
     if (g_vert.wrapped_item) { obs_sceneitem_release(g_vert.wrapped_item); g_vert.wrapped_item = nullptr; }
     if (g_vert.view) {
+        erase_video_pool_key(g_vert.video);
         obs_view_set_source(g_vert.view, 0, nullptr);
         obs_view_remove(g_vert.view);
         obs_view_destroy(g_vert.view);
@@ -823,6 +859,7 @@ void maybe_teardown_vertical_canvas_locked()
     if (streaming || recording || backtrack || multi_vert) return;
     if (g_vert.wrapped_item) { obs_sceneitem_release(g_vert.wrapped_item); g_vert.wrapped_item = nullptr; }
     if (g_vert.view) {
+        erase_video_pool_key(g_vert.video);
         obs_view_set_source(g_vert.view, 0, nullptr);
         obs_view_remove(g_vert.view);
         obs_view_destroy(g_vert.view);
@@ -872,26 +909,37 @@ void android_vertical_register()
     bt.encoded_audio_codecs = "aac";
     bt.get_name = [](void *) { return "Vertical Backtrack Ring Buffer"; };
     bt.create = [](obs_data_t *settings, obs_output_t *output) -> void * {
-        auto *st = new BacktrackState();
+        auto st = std::make_shared<BacktrackState>();
         st->output = output;
         st->max_seconds = std::clamp(int(obs_data_get_int(settings, "seconds")), 10, 120);
-        g_active_bt = st;
-        return st;
+        {
+            std::lock_guard<std::mutex> lock(g_active_bt_mutex);
+            g_active_bt = st;
+        }
+        return new BacktrackHolder{std::move(st)};
     };
     bt.destroy = [](void *data) {
-        auto *st = static_cast<BacktrackState *>(data);
-        if (g_active_bt == st) g_active_bt = nullptr;
-        delete st;
+        auto *holder = static_cast<BacktrackHolder *>(data);
+        if (!holder) return;
+        std::shared_ptr<BacktrackState> keep = holder->state;
+        delete holder;
+        if (keep) {
+            std::lock_guard<std::mutex> lock(g_active_bt_mutex);
+            if (g_active_bt == keep) g_active_bt.reset();
+        }
     };
     bt.start = [](void *data) -> bool {
-        auto *st = static_cast<BacktrackState *>(data);
+        auto *holder = static_cast<BacktrackHolder *>(data);
+        if (!holder || !holder->state) return false;
+        auto *st = holder->state.get();
         if (!obs_output_can_begin_data_capture(st->output, 0)) return false;
         if (!obs_output_initialize_encoders(st->output, 0)) return false;
         return obs_output_begin_data_capture(st->output, 0);
     };
     bt.stop = [](void *data, uint64_t) {
-        auto *st = static_cast<BacktrackState *>(data);
-        obs_output_end_data_capture(st->output);
+        auto *holder = static_cast<BacktrackHolder *>(data);
+        if (!holder || !holder->state) return;
+        obs_output_end_data_capture(holder->state->output);
     };
     bt.encoded_packet = backtrack_encoded_packet;
     obs_register_output(&bt);
@@ -987,7 +1035,10 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_multistream_s
 
     video_t *video_feed = obs_get_video();
     if (use_vertical) {
-        if (!ensure_vertical_canvas_locked(vert_w, vert_h, vert_scene, fit_mode)) return false;
+        if (!ensure_vertical_canvas_locked(vert_w, vert_h, vert_scene, fit_mode)) {
+            g_targets.erase(id);
+            return false;
+        }
         video_feed = g_vert.video;
     }
 
@@ -997,7 +1048,11 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_multistream_s
     std::string svc_name = std::string("multi_svc_") + id;
     t.service = obs_service_create("rtmp_custom", svc_name.c_str(), ss, nullptr);
     obs_data_release(ss);
-    if (!t.service) return false;
+    if (!t.service) {
+        g_targets.erase(id);
+        maybe_teardown_vertical_canvas_locked();
+        return false;
+    }
 
     std::string vname = std::string("multi_venc_") + id;
     std::string aname = std::string("multi_aenc_") + id;
@@ -1007,6 +1062,7 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_multistream_s
     t.output = obs_output_create("rtmp_output", oname.c_str(), nullptr, nullptr);
     if (!t.v_enc || !t.a_enc || !t.output) {
         release_multi_target(t);
+        g_targets.erase(id);
         maybe_teardown_vertical_canvas_locked();
         return false;
     }
@@ -1020,6 +1076,7 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_multistream_s
     blog(LOG_INFO, "[android-multistream] Target '%s' (%s, vertical=%d) start=%d", id, server, use_vertical, ok);
     if (!ok) {
         release_multi_target(t);
+        g_targets.erase(id);
         maybe_teardown_vertical_canvas_locked();
     }
     return ok;
@@ -1115,7 +1172,7 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_vertical_stop
 {
     std::lock_guard<std::mutex> lock(g_ms_mutex);
     if (g_vert.stream_out) {
-        if (obs_output_active(g_vert.stream_out)) obs_output_stop(g_vert.stream_out);
+        stop_and_wait_output(g_vert.stream_out, 800);
         obs_output_release(g_vert.stream_out);
         g_vert.stream_out = nullptr;
     }
@@ -1193,7 +1250,7 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_vertical_stop
     {
         std::lock_guard<std::mutex> lock(g_ms_mutex);
         if (g_vert.rec_out) {
-            if (obs_output_active(g_vert.rec_out)) obs_output_stop(g_vert.rec_out);
+            stop_and_wait_output(g_vert.rec_out, 1500);
             obs_output_release(g_vert.rec_out);
             g_vert.rec_out = nullptr;
             finished_path = g_vert.rec_path;
@@ -1261,7 +1318,7 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_vertical_stop
 {
     std::lock_guard<std::mutex> lock(g_ms_mutex);
     if (g_vert.bt_out) {
-        if (obs_output_active(g_vert.bt_out)) obs_output_stop(g_vert.bt_out);
+        stop_and_wait_output(g_vert.bt_out, 600);
         obs_output_release(g_vert.bt_out);
         g_vert.bt_out = nullptr;
     }
@@ -1283,19 +1340,25 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_vertical_save
     int width = 720, height = 1280, sample_rate = 48000;
     std::vector<uint8_t> video_csd, audio_csd;
     std::vector<BacktrackPacket> snapshot;
+    std::shared_ptr<BacktrackState> bt;
     {
         std::lock_guard<std::mutex> lock(g_ms_mutex);
-        if (!g_vert.bt_out || !obs_output_active(g_vert.bt_out) || !g_active_bt)
+        if (!g_vert.bt_out || !obs_output_active(g_vert.bt_out))
             return false;
-        std::lock_guard<std::mutex> bt_lock(g_active_bt->mutex);
-        if (g_active_bt->video_csd.empty() || g_active_bt->packets.empty())
+        std::lock_guard<std::mutex> btl(g_active_bt_mutex);
+        bt = g_active_bt;
+    }
+    if (!bt) return false;
+    {
+        std::lock_guard<std::mutex> bt_lock(bt->mutex);
+        if (bt->video_csd.empty() || bt->packets.empty())
             return false;
-        width = g_active_bt->width;
-        height = g_active_bt->height;
-        sample_rate = g_active_bt->sample_rate;
-        video_csd = g_active_bt->video_csd;
-        audio_csd = g_active_bt->audio_csd;
-        snapshot.assign(g_active_bt->packets.begin(), g_active_bt->packets.end());
+        width = bt->width;
+        height = bt->height;
+        sample_rate = bt->sample_rate;
+        video_csd = bt->video_csd;
+        audio_csd = bt->audio_csd;
+        snapshot.assign(bt->packets.begin(), bt->packets.end());
     }
     const bool ok = write_backtrack_snapshot_to_mp4(
         output_file_path, width, height, sample_rate, video_csd, audio_csd, snapshot);
@@ -1308,23 +1371,39 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_vertical_save
 extern "C" __attribute__((visibility("default"))) bool obs_android_vertical_get_stats(char *out_buf, size_t out_cap)
 {
     if (!out_buf || out_cap == 0) return false;
-    std::lock_guard<std::mutex> lock(g_ms_mutex);
-    const bool st_rec = g_vert.stream_out && obs_output_reconnecting(g_vert.stream_out);
-    const bool st_act = g_vert.stream_out && (obs_output_active(g_vert.stream_out) || st_rec);
-    const int st_frames = st_act ? obs_output_get_total_frames(g_vert.stream_out) : 0;
-    const int st_dropped = st_act ? obs_output_get_frames_dropped(g_vert.stream_out) : 0;
-    const uint64_t st_bytes = st_act ? obs_output_get_total_bytes(g_vert.stream_out) : 0;
+    bool st_rec = false, st_act = false, rc_act = false, bt_act = false;
+    int st_frames = 0, st_dropped = 0, rc_frames = 0, bt_secs = 30, multi_active = 0;
+    uint64_t st_bytes = 0, rc_bytes = 0;
+    std::shared_ptr<BacktrackState> bt;
+    {
+        std::lock_guard<std::mutex> lock(g_ms_mutex);
+        st_rec = g_vert.stream_out && obs_output_reconnecting(g_vert.stream_out);
+        st_act = g_vert.stream_out && (obs_output_active(g_vert.stream_out) || st_rec);
+        st_frames = st_act ? obs_output_get_total_frames(g_vert.stream_out) : 0;
+        st_dropped = st_act ? obs_output_get_frames_dropped(g_vert.stream_out) : 0;
+        st_bytes = st_act ? obs_output_get_total_bytes(g_vert.stream_out) : 0;
 
-    const bool rc_act = g_vert.rec_out && obs_output_active(g_vert.rec_out);
-    const int rc_frames = rc_act ? obs_output_get_total_frames(g_vert.rec_out) : 0;
-    const uint64_t rc_bytes = rc_act ? obs_output_get_total_bytes(g_vert.rec_out) : 0;
+        rc_act = g_vert.rec_out && obs_output_active(g_vert.rec_out);
+        rc_frames = rc_act ? obs_output_get_total_frames(g_vert.rec_out) : 0;
+        rc_bytes = rc_act ? obs_output_get_total_bytes(g_vert.rec_out) : 0;
 
-    const bool bt_act = g_vert.bt_out && obs_output_active(g_vert.bt_out);
+        bt_act = g_vert.bt_out && obs_output_active(g_vert.bt_out);
+        bt_secs = g_vert.bt_seconds;
+        if (bt_act) {
+            std::lock_guard<std::mutex> btl(g_active_bt_mutex);
+            bt = g_active_bt;
+        }
+
+        for (const auto &kv : g_targets) {
+            if (kv.second.output && (obs_output_active(kv.second.output) || obs_output_reconnecting(kv.second.output)))
+                ++multi_active;
+        }
+    }
     double bt_buffered = 0.0;
-    if (bt_act && g_active_bt) {
-        std::lock_guard<std::mutex> bt_lock(g_active_bt->mutex);
+    if (bt_act && bt) {
+        std::lock_guard<std::mutex> bt_lock(bt->mutex);
         int64_t first_v = -1, last_v = -1;
-        for (const auto &p : g_active_bt->packets) {
+        for (const auto &p : bt->packets) {
             if (!p.is_audio) {
                 if (first_v < 0) first_v = p.pts_us;
                 last_v = p.pts_us;
@@ -1335,11 +1414,6 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_vertical_get_
         }
     }
 
-    int multi_active = 0;
-    for (const auto &kv : g_targets) {
-        if (kv.second.output && obs_output_active(kv.second.output)) ++multi_active;
-    }
-
     std::snprintf(
         out_buf, out_cap,
         "{\"streaming\":%s,\"stream_reconnecting\":%s,\"stream_frames\":%d,\"stream_dropped\":%d,\"stream_bytes\":%llu,"
@@ -1348,7 +1422,7 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_vertical_get_
         "\"multi_active\":%d,\"any_active\":%s}",
         st_act ? "true" : "false", st_rec ? "true" : "false", st_frames, st_dropped, (unsigned long long)st_bytes,
         rc_act ? "true" : "false", rc_frames, (unsigned long long)rc_bytes,
-        bt_act ? "true" : "false", g_vert.bt_seconds, bt_buffered,
+        bt_act ? "true" : "false", bt_secs, bt_buffered,
         multi_active, (st_act || rc_act || bt_act || multi_active > 0) ? "true" : "false");
     return true;
 }
@@ -1368,15 +1442,15 @@ void android_multistream_shutdown()
     for (auto &kv : g_targets) release_multi_target(kv.second);
     g_targets.clear();
     if (g_vert.stream_out) {
-        if (obs_output_active(g_vert.stream_out)) obs_output_stop(g_vert.stream_out);
+        stop_and_wait_output(g_vert.stream_out, 500);
         obs_output_release(g_vert.stream_out); g_vert.stream_out = nullptr;
     }
     if (g_vert.rec_out) {
-        if (obs_output_active(g_vert.rec_out)) obs_output_stop(g_vert.rec_out);
+        stop_and_wait_output(g_vert.rec_out, 1000);
         obs_output_release(g_vert.rec_out); g_vert.rec_out = nullptr;
     }
     if (g_vert.bt_out) {
-        if (obs_output_active(g_vert.bt_out)) obs_output_stop(g_vert.bt_out);
+        stop_and_wait_output(g_vert.bt_out, 500);
         obs_output_release(g_vert.bt_out); g_vert.bt_out = nullptr;
     }
     if (g_vert.stream_venc) { obs_encoder_release(g_vert.stream_venc); g_vert.stream_venc = nullptr; }

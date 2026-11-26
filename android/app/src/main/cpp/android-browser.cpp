@@ -34,13 +34,13 @@ struct BrowserSourceInstance {
     std::string url;
     std::string local_file;
     std::string css;
-    int width{1280};
-    int height{720};
+    std::atomic<int> width{1280};
+    std::atomic<int> height{720};
     int fps{30};
     bool transparent{true};
-    bool capture_audio{false};
+    std::atomic<bool> capture_audio{false};
     bool shutdown_when_hidden{false};
-    bool showing{true};
+    std::atomic<bool> showing{true};
 };
 
 std::unordered_map<int64_t, std::shared_ptr<BrowserSourceInstance>> g_instances;
@@ -381,17 +381,21 @@ Java_org_obsandroid_port_NativeBridge_registerBrowserHost(JNIEnv *env, jclass, j
     env->GetJavaVM(&g_browser_jvm);
     g_browser_host_class = static_cast<jclass>(env->NewGlobalRef(hostClass));
     if (!g_browser_host_class) return;
-    g_mid_create_update = env->GetStaticMethodID(
-        g_browser_host_class, "createOrUpdate", "(JLjava/lang/String;IIIZLjava/lang/String;ZZZ)V");
-    g_mid_set_visible = env->GetStaticMethodID(g_browser_host_class, "setVisible", "(JZ)V");
-    g_mid_reload = env->GetStaticMethodID(g_browser_host_class, "reload", "(JZ)V");
-    g_mid_interact = env->GetStaticMethodID(g_browser_host_class, "interact", "(J)V");
-    g_mid_destroy = env->GetStaticMethodID(g_browser_host_class, "destroy", "(J)V");
-    g_mid_destroy_all = env->GetStaticMethodID(g_browser_host_class, "destroyAll", "()V");
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        __android_log_print(ANDROID_LOG_ERROR, "ObsBrowserSource", "Failed to resolve BrowserSourceManager JNI methods");
-    }
+    auto get_mid = [&](const char *name, const char *sig) -> jmethodID {
+        jmethodID m = env->GetStaticMethodID(g_browser_host_class, name, sig);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            __android_log_print(ANDROID_LOG_ERROR, "ObsBrowserSource", "Missing JNI method %s%s", name, sig);
+            return nullptr;
+        }
+        return m;
+    };
+    g_mid_create_update = get_mid("createOrUpdate", "(JLjava/lang/String;IIIZLjava/lang/String;ZZZ)V");
+    g_mid_set_visible = get_mid("setVisible", "(JZ)V");
+    g_mid_reload = get_mid("reload", "(JZ)V");
+    g_mid_interact = get_mid("interact", "(J)V");
+    g_mid_destroy = get_mid("destroy", "(J)V");
+    g_mid_destroy_all = get_mid("destroyAll", "()V");
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -162,7 +162,17 @@ NdiRuntime g_rt;
 void *g_finder = nullptr;
 bool g_registered = false;
 bool g_output_registered = false;
-struct NdiOutputInstance { void *sender{}; std::string name; int width{}, height{}, fps_n{30}, fps_d{1}, sample_rate{48000}; std::mutex audio_mutex; std::vector<float> planar_audio; };
+struct NdiOutputInstance {
+    std::mutex sender_mutex;
+    void *sender{};
+    void (*send_destroy)(void *){};
+    void (*send_video_v2)(void *, const NDIlib_send_video_v2_t *){};
+    void (*send_audio_v2)(void *, const NDIlib_send_audio_v2_t *){};
+    std::string name;
+    int width{}, height{}, fps_n{30}, fps_d{1}, sample_rate{48000};
+    std::mutex audio_mutex;
+    std::vector<float> planar_audio;
+};
 std::mutex g_ndi_output_mutex;
 obs_output_t *g_ndi_tool_output{};
 std::vector<struct NdiSourceInstance *> g_active_ndi_instances;
@@ -674,39 +684,53 @@ void ndi_output_destroy(void *data) { delete static_cast<NdiOutputInstance *>(da
 bool ndi_output_start(void *data)
 {
     auto *inst = static_cast<NdiOutputInstance *>(data);
-    std::lock_guard<std::mutex> lock(g_ndi_mutex);
-    if (!load_ndi_runtime_locked() || !g_rt.send_create || !g_rt.send_video_v2 || !g_rt.send_audio_v2 || !g_rt.send_destroy) {
-        blog(LOG_ERROR, "[android-ndi] Runtime NDI does not include sender functions");
-        return false;
+    void *(*create_fn)(const NDIlib_send_create_t *) = nullptr;
+    void (*destroy_fn)(void *) = nullptr;
+    void (*video_fn)(void *, const NDIlib_send_video_v2_t *) = nullptr;
+    void (*audio_fn)(void *, const NDIlib_send_audio_v2_t *) = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ndi_mutex);
+        if (!load_ndi_runtime_locked() || !g_rt.send_create || !g_rt.send_video_v2 || !g_rt.send_audio_v2 || !g_rt.send_destroy) {
+            blog(LOG_ERROR, "[android-ndi] Runtime NDI does not include sender functions");
+            return false;
+        }
+        create_fn = g_rt.send_create;
+        destroy_fn = g_rt.send_destroy;
+        video_fn = g_rt.send_video_v2;
+        audio_fn = g_rt.send_audio_v2;
     }
     obs_video_info vi{};
     if (!obs_get_video_info(&vi)) return false;
+    std::lock_guard<std::mutex> slock(inst->sender_mutex);
     inst->width = int(vi.output_width); inst->height = int(vi.output_height);
     inst->fps_n = int(vi.fps_num); inst->fps_d = int(vi.fps_den);
+    inst->send_destroy = destroy_fn;
+    inst->send_video_v2 = video_fn;
+    inst->send_audio_v2 = audio_fn;
     NDIlib_send_create_t cfg{inst->name.c_str(), nullptr, false, false};
-    inst->sender = g_rt.send_create(&cfg);
-    if (!inst->sender) return false;
-    return true;
+    inst->sender = create_fn(&cfg);
+    return inst->sender != nullptr;
 }
 void ndi_output_stop(void *data, uint64_t)
 {
     auto *inst = static_cast<NdiOutputInstance *>(data);
-    if (!inst || !inst->sender) return;
-    std::lock_guard<std::mutex> lock(g_ndi_mutex);
-    if (g_rt.send_destroy) g_rt.send_destroy(inst->sender);
+    if (!inst) return;
+    std::lock_guard<std::mutex> slock(inst->sender_mutex);
+    if (inst->sender && inst->send_destroy) inst->send_destroy(inst->sender);
     inst->sender = nullptr;
 }
 void ndi_output_video(void *data, video_data *frame)
 {
     auto *inst = static_cast<NdiOutputInstance *>(data);
     if (!inst || !frame || !frame->data[0]) return;
+    std::lock_guard<std::mutex> slock(inst->sender_mutex);
+    if (!inst->sender || !inst->send_video_v2) return;
     NDIlib_send_video_v2_t v{}; v.xres = inst->width; v.yres = inst->height;
     v.FourCC = MakeFourCC('R','G','B','A'); v.frame_rate_N = inst->fps_n; v.frame_rate_D = inst->fps_d;
     v.picture_aspect_ratio = float(inst->width) / float(inst->height); v.frame_format_type = 1;
     v.timecode = int64_t(frame->timestamp / 100); v.p_data = frame->data[0];
     v.line_stride_in_bytes = int32_t(inst->width * 4);
-    std::lock_guard<std::mutex> lock(g_ndi_mutex);
-    if (inst->sender && g_rt.send_video_v2) g_rt.send_video_v2(inst->sender, &v);
+    inst->send_video_v2(inst->sender, &v);
 }
 void ndi_output_audio(void *data, audio_data *frames)
 {
@@ -718,11 +742,12 @@ void ndi_output_audio(void *data, audio_data *frames)
     inst->planar_audio.resize(size_t(frames->frames) * 2);
     std::copy(left, left + frames->frames, inst->planar_audio.begin());
     std::copy(right, right + frames->frames, inst->planar_audio.begin() + frames->frames);
+    std::lock_guard<std::mutex> slock(inst->sender_mutex);
+    if (!inst->sender || !inst->send_audio_v2) return;
     NDIlib_send_audio_v2_t a{}; a.sample_rate = inst->sample_rate; a.no_channels = 2;
     a.no_samples = int32_t(frames->frames); a.timecode = int64_t(frames->timestamp / 100);
     a.p_data = inst->planar_audio.data(); a.channel_stride_in_bytes = int32_t(frames->frames * sizeof(float));
-    std::lock_guard<std::mutex> lock(g_ndi_mutex);
-    if (inst->sender && g_rt.send_audio_v2) g_rt.send_audio_v2(inst->sender, &a);
+    inst->send_audio_v2(inst->sender, &a);
 }
 void register_ndi_output()
 {

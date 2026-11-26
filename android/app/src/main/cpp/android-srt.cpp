@@ -890,6 +890,13 @@ void SrtOutputSenderLoop(SrtOutputInstance *o)
     UpdateOutStatus(o, "Detenido", "");
 }
 
+// Singleton active SRT Tools output managed from Herramientas -> Salida SRT
+std::mutex g_srt_tool_mutex;
+obs_output_t *g_srt_tool_out = nullptr;
+obs_encoder_t *g_srt_tool_venc = nullptr;
+obs_encoder_t *g_srt_tool_aenc = nullptr;
+SrtOutputInstance *g_srt_tool_inst = nullptr;
+
 const char *srt_out_get_name(void *) { return "Android SRT Output"; }
 
 void *srt_out_create(obs_data_t *s, obs_output_t *output)
@@ -929,6 +936,11 @@ void srt_out_destroy(void *data)
     auto *o = static_cast<SrtOutputInstance *>(data);
     if (!o) return;
     srt_out_stop_internal(o);
+    {
+        std::lock_guard<std::mutex> lock(g_srt_tool_mutex);
+        if (g_srt_tool_inst == o)
+            g_srt_tool_inst = nullptr;
+    }
     delete o;
 }
 
@@ -1012,13 +1024,6 @@ void srt_out_encoded_packet(void *data, struct encoder_packet *packet)
     o->q_cv.notify_one();
 }
 
-// Singleton active SRT Tools output managed from Herramientas -> Salida SRT
-std::mutex g_srt_tool_mutex;
-obs_output_t *g_srt_tool_out = nullptr;
-obs_encoder_t *g_srt_tool_venc = nullptr;
-obs_encoder_t *g_srt_tool_aenc = nullptr;
-SrtOutputInstance *g_srt_tool_inst = nullptr;
-
 std::string JsonEscape(const std::string &in)
 {
     std::string o;
@@ -1065,15 +1070,32 @@ void android_srt_register()
 
 void android_srt_shutdown()
 {
-    std::lock_guard<std::mutex> lock(g_srt_tool_mutex);
-    if (g_srt_tool_out) {
-        if (obs_output_active(g_srt_tool_out)) obs_output_stop(g_srt_tool_out);
-        obs_output_release(g_srt_tool_out);
+    obs_output_t *out = nullptr;
+    obs_encoder_t *venc = nullptr;
+    obs_encoder_t *aenc = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_srt_tool_mutex);
+        out = g_srt_tool_out;
+        venc = g_srt_tool_venc;
+        aenc = g_srt_tool_aenc;
         g_srt_tool_out = nullptr;
+        g_srt_tool_venc = nullptr;
+        g_srt_tool_aenc = nullptr;
+        g_srt_tool_inst = nullptr;
     }
-    if (g_srt_tool_venc) { obs_encoder_release(g_srt_tool_venc); g_srt_tool_venc = nullptr; }
-    if (g_srt_tool_aenc) { obs_encoder_release(g_srt_tool_aenc); g_srt_tool_aenc = nullptr; }
-    g_srt_tool_inst = nullptr;
+    if (out) {
+        if (obs_output_reconnecting(out))
+            obs_output_force_stop(out);
+        else if (obs_output_active(out))
+            obs_output_stop(out);
+        for (int i = 0; i < 40 && obs_output_active(out); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        if (obs_output_active(out))
+            obs_output_force_stop(out);
+        obs_output_release(out);
+    }
+    if (venc) obs_encoder_release(venc);
+    if (aenc) obs_encoder_release(aenc);
 }
 
 extern "C" __attribute__((visibility("default"))) bool obs_android_srt_output_start(

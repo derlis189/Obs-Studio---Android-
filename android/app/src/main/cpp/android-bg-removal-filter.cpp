@@ -16,6 +16,8 @@
 #include <unordered_map>
 #include <vector>
 
+extern "C" int obs_android_get_thermal_tier();
+
 namespace {
 
 constexpr int kInferW = 256;
@@ -186,7 +188,9 @@ struct BgRemovalFilter {
 
 	gs_texrender_t *src_tr{nullptr};
 	gs_texrender_t *small_tr{nullptr};
-	gs_stagesurf_t *stage_surf{nullptr};
+	gs_stagesurf_t *stage_surf[2]{nullptr, nullptr};
+	int stage_idx{0};
+	bool stage_primed{false};
 	gs_texrender_t *blur_h_tr{nullptr};
 	gs_texrender_t *blur_v_tr{nullptr};
 	gs_texrender_t *smooth_tr[2]{nullptr, nullptr};
@@ -209,6 +213,7 @@ struct BgRemovalFilter {
 	bool has_any_mask{false};
 
 	// Settings
+	std::mutex settings_mutex;
 	int bg_mode{0};          // 0=Transparent, 1=Bokeh, 2=SolidColor
 	float threshold{0.50f};
 	float feather{0.35f};
@@ -342,6 +347,7 @@ obs_properties_t *bg_get_properties(void *)
 void bg_update(void *data, obs_data_t *s)
 {
 	auto *f = static_cast<BgRemovalFilter *>(data);
+	std::lock_guard<std::mutex> lock(f->settings_mutex);
 	f->bg_mode = std::clamp(int(obs_data_get_int(s, "bg_mode")), 0, 2);
 	f->threshold = std::clamp(float(obs_data_get_int(s, "threshold")) / 100.0f, 0.05f, 0.95f);
 	f->feather = std::clamp(float(obs_data_get_int(s, "feather")) / 100.0f, 0.0f, 1.0f);
@@ -410,7 +416,8 @@ void bg_destroy(void *data)
 	obs_enter_graphics();
 	if (f->src_tr) gs_texrender_destroy(f->src_tr);
 	if (f->small_tr) gs_texrender_destroy(f->small_tr);
-	if (f->stage_surf) gs_stagesurface_destroy(f->stage_surf);
+	if (f->stage_surf[0]) gs_stagesurface_destroy(f->stage_surf[0]);
+	if (f->stage_surf[1]) gs_stagesurface_destroy(f->stage_surf[1]);
 	if (f->blur_h_tr) gs_texrender_destroy(f->blur_h_tr);
 	if (f->blur_v_tr) gs_texrender_destroy(f->blur_v_tr);
 	if (f->smooth_tr[0]) gs_texrender_destroy(f->smooth_tr[0]);
@@ -534,9 +541,27 @@ void bg_video_render(void *data, gs_effect_t *)
 	if (!src_tex)
 		return;
 
-	// Periodically downsample & submit 256x144 RGBA frame to ML Kit background worker
+	// Snapshot filter settings cleanly under lock
+	int bg_mode = 0, infer_fps = 24;
+	float threshold = 0.5f, feather = 0.35f, blur_strength = 0.7f, despill = 0.2f;
+	vec4 bg_color{};
+	{
+		std::lock_guard<std::mutex> lock(f->settings_mutex);
+		bg_mode = f->bg_mode;
+		infer_fps = f->infer_fps;
+		threshold = f->threshold;
+		feather = f->feather;
+		blur_strength = f->blur_strength;
+		despill = f->despill;
+		bg_color = f->bg_color;
+	}
+
+	// Periodically downsample & submit 256x144 RGBA frame via double-buffered async PBO readback
+	const int thermal_tier = obs_android_get_thermal_tier();
+	const int eff_fps = thermal_tier >= 2 ? std::min(infer_fps, 10)
+			  : (thermal_tier == 1 ? std::min(infer_fps, 15) : infer_fps);
 	int64_t now = now_ms_steady();
-	int64_t min_interval = std::max<int64_t>(28, 1000 / std::max(10, f->infer_fps));
+	int64_t min_interval = std::max<int64_t>(28, 1000 / std::max(8, eff_fps));
 	if (now - f->last_infer_ms >= min_interval) {
 		bool host_ready = false;
 		{
@@ -546,8 +571,27 @@ void bg_video_render(void *data, gs_effect_t *)
 		if (host_ready) {
 			f->last_infer_ms = now;
 			if (!f->small_tr) f->small_tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-			if (!f->stage_surf) f->stage_surf = gs_stagesurface_create(kInferW, kInferH, GS_RGBA);
+			if (!f->stage_surf[0]) f->stage_surf[0] = gs_stagesurface_create(kInferW, kInferH, GS_RGBA);
+			if (!f->stage_surf[1]) f->stage_surf[1] = gs_stagesurface_create(kInferW, kInferH, GS_RGBA);
 
+			// 1) Read back the PREVIOUS frame's already-completed PBO without stalling the GPU
+			const int write_idx = f->stage_idx;
+			const int read_idx = 1 - write_idx;
+			if (f->stage_primed && f->stage_surf[read_idx]) {
+				uint8_t *mapped = nullptr;
+				uint32_t linesize = 0;
+				if (gs_stagesurface_map(f->stage_surf[read_idx], &mapped, &linesize)) {
+					const uint32_t row_bytes = uint32_t(kInferW) * 4;
+					for (int y = 0; y < kInferH; ++y) {
+						std::memcpy(f->readback_rgba.data() + size_t(y) * row_bytes,
+							    mapped + size_t(y) * linesize, row_bytes);
+					}
+					gs_stagesurface_unmap(f->stage_surf[read_idx]);
+					dispatch_frame_to_java(f->id, f->readback_rgba.data(), kInferW, kInferH);
+				}
+			}
+
+			// 2) Downsample & queue async GPU copy into current write_idx PBO for next tick
 			gs_texrender_reset(f->small_tr);
 			if (gs_texrender_begin(f->small_tr, kInferW, kInferH)) {
 				gs_enable_framebuffer_srgb(false);
@@ -565,17 +609,10 @@ void bg_video_render(void *data, gs_effect_t *)
 				gs_texrender_end(f->small_tr);
 
 				if (gs_texture_t *small_tex = gs_texrender_get_texture(f->small_tr)) {
-					gs_stage_texture(f->stage_surf, small_tex);
-					uint8_t *mapped = nullptr;
-					uint32_t linesize = 0;
-					if (gs_stagesurface_map(f->stage_surf, &mapped, &linesize)) {
-						const uint32_t row_bytes = uint32_t(kInferW) * 4;
-						for (int y = 0; y < kInferH; ++y) {
-							std::memcpy(f->readback_rgba.data() + size_t(y) * row_bytes,
-								    mapped + size_t(y) * linesize, row_bytes);
-						}
-						gs_stagesurface_unmap(f->stage_surf);
-						dispatch_frame_to_java(f->id, f->readback_rgba.data(), kInferW, kInferH);
+					if (f->stage_surf[write_idx]) {
+						gs_stage_texture(f->stage_surf[write_idx], small_tex);
+						f->stage_primed = true;
+						f->stage_idx = read_idx;
 					}
 				}
 			}
@@ -606,12 +643,12 @@ void bg_video_render(void *data, gs_effect_t *)
 
 	// If Portrait Bokeh mode, compute 2-pass separable Gaussian blur at half-res (strictly non-sRGB to avoid gamma washout!)
 	gs_texture_t *blur_tex = src_tex;
-	if (f->bg_mode == 1) {
+	if (bg_mode == 1) {
 		if (!f->blur_h_tr) f->blur_h_tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 		if (!f->blur_v_tr) f->blur_v_tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 		uint32_t bw = std::max(16u, sw / 2);
 		uint32_t bh = std::max(16u, sh / 2);
-		float spread = 0.8f + f->blur_strength * 3.8f;
+		float spread = 0.8f + blur_strength * 3.8f;
 
 		gs_texrender_reset(f->blur_h_tr);
 		if (gs_texrender_begin(f->blur_h_tr, bw, bh)) {
@@ -658,11 +695,11 @@ void bg_video_render(void *data, gs_effect_t *)
 	gs_effect_set_texture(f->p_image, src_tex);
 	gs_effect_set_texture(f->p_mask_tex, mask_tex);
 	gs_effect_set_texture(f->p_blur_tex, blur_tex);
-	gs_effect_set_int(f->p_bg_mode, f->bg_mode);
-	gs_effect_set_float(f->p_threshold, f->threshold);
-	gs_effect_set_float(f->p_feather, f->feather);
-	gs_effect_set_float(f->p_despill, f->despill);
-	gs_effect_set_vec4(f->p_bg_color, &f->bg_color);
+	gs_effect_set_int(f->p_bg_mode, bg_mode);
+	gs_effect_set_float(f->p_threshold, threshold);
+	gs_effect_set_float(f->p_feather, feather);
+	gs_effect_set_float(f->p_despill, despill);
+	gs_effect_set_vec4(f->p_bg_color, &bg_color);
 
 	gs_blend_state_push();
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);

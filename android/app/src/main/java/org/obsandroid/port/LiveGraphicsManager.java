@@ -59,6 +59,36 @@ public final class LiveGraphicsManager {
     private static final Object sStateLock = new Object();
     private static volatile Context sAppCtx;
     private static volatile boolean sStateLoaded = false;
+    private static volatile int sThermalTier = 0;
+
+    static void setThermalTier(int tier) {
+        sThermalTier = Math.max(0, Math.min(3, tier));
+    }
+
+    private static String sanitizeLogoPath(String raw) {
+        if (raw == null) return "";
+        String p = raw.trim();
+        if (p.isEmpty()) return "";
+        try {
+            File f = new File(p).getCanonicalFile();
+            if (!f.isFile() || !f.canRead()) return "";
+            String lower = f.getName().toLowerCase(Locale.US);
+            if (!(lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")
+                    || lower.endsWith(".webp") || lower.endsWith(".gif") || lower.endsWith(".bmp"))) {
+                return "";
+            }
+            String canon = f.getPath();
+            if (canon.startsWith("/data/")) {
+                Context ctx = sAppCtx;
+                if (ctx == null) return "";
+                String ownFiles = ctx.getFilesDir().getCanonicalPath() + File.separator;
+                if (!canon.startsWith(ownFiles)) return "";
+            }
+            return canon;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
 
     // Shared persistent state across OBS sources, native panel, floating overlay, and Web Remote
     static final class State {
@@ -375,12 +405,22 @@ public final class LiveGraphicsManager {
     public static void saveState() {
         File f = stateFile();
         if (f == null) return;
+        File tmp = new File(f.getParentFile(), f.getName() + ".tmp");
         try {
             String json = buildStateJsonObject(sAppCtx).toString(2);
-            try (FileOutputStream fos = new FileOutputStream(f)) {
-                fos.write(json.getBytes(StandardCharsets.UTF_8));
+            byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+            try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                fos.write(bytes);
+                fos.getFD().sync();
+            }
+            if (!tmp.renameTo(f)) {
+                try (FileOutputStream fos = new FileOutputStream(f)) {
+                    fos.write(bytes);
+                }
+                tmp.delete();
             }
         } catch (Throwable t) {
+            tmp.delete();
             Log.w(TAG, "Failed to save graphics state", t);
         }
     }
@@ -564,10 +604,18 @@ public final class LiveGraphicsManager {
             int w = inst.width, h = inst.height;
             c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
 
-            boolean targetVis;
+            boolean targetVis = true;
             long clockDelay = 0;
+            boolean isAdvancedTitle = "advanced_title".equals(inst.kind);
+            boolean atWantOnAir = false;
+            boolean atLocalMode = false;
+            int atAutoHideSec = 0;
+            int atTpl = 0;
+            boolean atShimmer = false;
+            long atNowMs = System.currentTimeMillis();
+
             synchronized (sStateLock) {
-                long now = System.currentTimeMillis();
+                long now = atNowMs;
                 switch (inst.kind) {
                     case "scoreboard":
                         targetVis = sState.sbVisible;
@@ -610,69 +658,70 @@ public final class LiveGraphicsManager {
                         break;
                     }
                     case "advanced_title": {
-                        // Dedicated high-framerate animation timeline for Advanced Titles
-                        boolean localMode = (inst.localAtConfig != null);
-                        boolean wantOnAir = localMode || sState.atOnAir;
-                        int inMs = Math.max(150, localMode ? inst.localAtConfig.optInt("inMs", 650) : sState.atInMs);
-                        int outMs = Math.max(150, localMode ? inst.localAtConfig.optInt("outMs", 450) : sState.atOutMs);
-                        int autoHideSec = Math.max(0, localMode ? inst.localAtConfig.optInt("autoHideSec", 0) : sState.atAutoHideSec);
-                        int tpl = localMode ? inst.localAtConfig.optInt("template", 0) : sState.atTemplate;
-                        boolean shimmer = localMode ? inst.localAtConfig.optBoolean("shimmer", true) : sState.atShimmer;
-                        long trigSeq = localMode ? 0L : sState.atTriggerSeq;
+                        // Snapshot state under lock, then draw + push JNI OUTSIDE sStateLock!
+                        atLocalMode = (inst.localAtConfig != null);
+                        atWantOnAir = atLocalMode || sState.atOnAir;
+                        int inMs = Math.max(150, atLocalMode ? inst.localAtConfig.optInt("inMs", 650) : sState.atInMs);
+                        int outMs = Math.max(150, atLocalMode ? inst.localAtConfig.optInt("outMs", 450) : sState.atOutMs);
+                        atAutoHideSec = Math.max(0, atLocalMode ? inst.localAtConfig.optInt("autoHideSec", 0) : sState.atAutoHideSec);
+                        atTpl = atLocalMode ? inst.localAtConfig.optInt("template", 0) : sState.atTemplate;
+                        atShimmer = (atLocalMode ? inst.localAtConfig.optBoolean("shimmer", true) : sState.atShimmer) && sThermalTier < 2;
+                        long trigSeq = atLocalMode ? 0L : sState.atTriggerSeq;
 
-                        if (!localMode && trigSeq != inst.atLastTriggerSeq) {
+                        if (!atLocalMode && trigSeq != inst.atLastTriggerSeq) {
                             inst.atLastTriggerSeq = trigSeq;
-                            if (wantOnAir) {
+                            if (atWantOnAir) {
                                 inst.atProgress = 0f;
                                 inst.atOnAirSinceMs = now;
                                 inst.atLastTickMs = now;
                             }
                         }
-                        if (wantOnAir && !inst.atWasOnAir) {
+                        if (atWantOnAir && !inst.atWasOnAir) {
                             inst.atOnAirSinceMs = now;
                             inst.atLastTickMs = now;
                         }
-                        inst.atWasOnAir = wantOnAir;
-
-                        if (!localMode && wantOnAir && autoHideSec > 0 && inst.atOnAirSinceMs > 0 &&
-                            (now - inst.atOnAirSinceMs) >= autoHideSec * 1000L) {
-                            sState.atOnAir = false;
-                            wantOnAir = false;
+                        if (atWantOnAir && atAutoHideSec > 0 && inst.atOnAirSinceMs > 0 &&
+                            (now - inst.atOnAirSinceMs) >= atAutoHideSec * 1000L) {
+                            if (!atLocalMode) sState.atOnAir = false;
+                            atWantOnAir = false;
                         }
+                        inst.atWasOnAir = atWantOnAir;
 
                         long dtMs = inst.atLastTickMs > 0 ? Math.min(100L, Math.max(16L, now - inst.atLastTickMs)) : 33L;
                         inst.atLastTickMs = now;
-                        if (wantOnAir) {
+                        if (atWantOnAir) {
                             inst.atProgress = Math.min(1f, inst.atProgress + dtMs / (float) inMs);
                         } else {
                             inst.atProgress = Math.max(0f, inst.atProgress - dtMs / (float) outMs);
                         }
-
-                        if (tpl == 4 && inst.atProgress > 0.01f) {
+                        if (atTpl == 4 && inst.atProgress > 0.01f) {
                             inst.atTickerX += dtMs * 0.14f;
                         }
-
-                        if (inst.atProgress > 0.005f) {
-                            drawAdvancedTitle(c, w, h, inst.atProgress, !wantOnAir,
-                                Math.max(0L, now - inst.atOnAirSinceMs), inst.atTickerX, inst.localAtConfig);
-                        }
-
-                        inst.rgba.clear();
-                        inst.bitmap.copyPixelsToBuffer(inst.rgba);
-                        NativeBridge.pushGraphicsFrame(inst.id, inst.rgba, w, h, System.nanoTime());
-
-                        boolean animating = (wantOnAir && inst.atProgress < 0.999f) || (!wantOnAir && inst.atProgress > 0.001f);
-                        if (animating) return 33L;
-                        if (wantOnAir && (tpl == 4 || shimmer)) return 33L;
-                        if (wantOnAir && !localMode && autoHideSec > 0) {
-                            long rem = autoHideSec * 1000L - (now - inst.atOnAirSinceMs);
-                            return Math.max(50L, Math.min(500L, rem));
-                        }
-                        return 0L;
+                        break;
                     }
                     default:
                         targetVis = true;
                 }
+            }
+
+            if (isAdvancedTitle) {
+                if (inst.atProgress > 0.005f) {
+                    drawAdvancedTitle(c, w, h, inst.atProgress, !atWantOnAir,
+                        Math.max(0L, atNowMs - inst.atOnAirSinceMs), inst.atTickerX, inst.localAtConfig);
+                }
+                inst.rgba.clear();
+                inst.bitmap.copyPixelsToBuffer(inst.rgba);
+                NativeBridge.pushGraphicsFrame(inst.id, inst.rgba, w, h, System.nanoTime());
+
+                boolean animating = (atWantOnAir && inst.atProgress < 0.999f) || (!atWantOnAir && inst.atProgress > 0.001f);
+                long frameMs = sThermalTier >= 2 ? 50L : 33L;
+                if (animating) return frameMs;
+                if (atWantOnAir && (atTpl == 4 || atShimmer)) return frameMs;
+                if (atWantOnAir && atAutoHideSec > 0) {
+                    long rem = atAutoHideSec * 1000L - (atNowMs - inst.atOnAirSinceMs);
+                    return Math.max(50L, Math.min(500L, rem));
+                }
+                return 0L;
             }
             float targetAlpha = targetVis ? 1f : 0f;
             float change = Math.max(-0.22f, Math.min(0.22f, targetAlpha - inst.animAlpha));
@@ -1549,8 +1598,8 @@ public final class LiveGraphicsManager {
                         if (req.has("period")) sState.sbPeriod = req.optString("period", sState.sbPeriod);
                         if (req.has("homeColor")) sState.sbHomeColor = req.optString("homeColor", sState.sbHomeColor);
                         if (req.has("awayColor")) sState.sbAwayColor = req.optString("awayColor", sState.sbAwayColor);
-                        if (req.has("homeLogo")) sState.sbHomeLogo = req.optString("homeLogo", "");
-                        if (req.has("awayLogo")) sState.sbAwayLogo = req.optString("awayLogo", "");
+                        if (req.has("homeLogo")) sState.sbHomeLogo = sanitizeLogoPath(req.optString("homeLogo", ""));
+                        if (req.has("awayLogo")) sState.sbAwayLogo = sanitizeLogoPath(req.optString("awayLogo", ""));
                         if (req.has("style")) sState.sbStyle = req.optInt("style", sState.sbStyle);
                         if (req.has("visible")) sState.sbVisible = req.optBoolean("visible", sState.sbVisible);
                         break;
@@ -1675,7 +1724,7 @@ public final class LiveGraphicsManager {
                         if (req.has("textColor")) sState.atText = req.optString("textColor", sState.atText);
                         if (req.has("align")) sState.atAlign = req.optInt("align", sState.atAlign);
                         if (req.has("scalePct")) sState.atScale = Math.max(60, Math.min(140, req.optInt("scalePct", sState.atScale)));
-                        if (req.has("logoPath")) sState.atLogo = req.optString("logoPath", sState.atLogo);
+                        if (req.has("logoPath")) sState.atLogo = sanitizeLogoPath(req.optString("logoPath", sState.atLogo));
                         if (req.has("onAir")) {
                             boolean nextAir = req.optBoolean("onAir", sState.atOnAir);
                             if (nextAir) sState.atTriggerSeq++;
@@ -2062,6 +2111,7 @@ public final class LiveGraphicsManager {
 
     private static final Map<String, WeatherEntry> sWeatherCache = new HashMap<>();
     private static final Map<String, Long> sWeatherInFlight = new HashMap<>();
+    private static final Map<String, Long> sWeatherRetryAfter = new HashMap<>();
     private static final Object sWeatherLock = new Object();
 
     private static String normalizeCityKey(String city) {
@@ -2122,6 +2172,10 @@ public final class LiveGraphicsManager {
             if (cached != null && cached.valid && (now - cached.fetchedAtMs) < 15L * 60L * 1000L) {
                 return;
             }
+            Long retryAt = sWeatherRetryAfter.get(key);
+            if (retryAt != null && now < retryAt) {
+                return;
+            }
             Long started = sWeatherInFlight.get(key);
             if (started != null && (now - started) < 60_000L) {
                 return;
@@ -2129,6 +2183,7 @@ public final class LiveGraphicsManager {
             sWeatherInFlight.put(key, now);
         }
         new Thread(() -> {
+            boolean ok = false;
             try {
                 String q = java.net.URLEncoder.encode(city, "UTF-8");
                 String geoRaw = httpGetSimple("https://geocoding-api.open-meteo.com/v1/search?name=" + q + "&count=1&language=es&format=json");
@@ -2163,13 +2218,19 @@ public final class LiveGraphicsManager {
 
                 synchronized (sWeatherLock) {
                     sWeatherCache.put(key, entry);
+                    sWeatherRetryAfter.remove(key);
                 }
+                ok = true;
                 sRender.post(LiveGraphicsManager::refreshFrames);
             } catch (Throwable t) {
                 Log.w(TAG, "Weather fetch skipped for " + city + ": " + t.getMessage());
             } finally {
                 synchronized (sWeatherLock) {
                     sWeatherInFlight.remove(key);
+                    if (!ok) {
+                        // Back off 60s when offline so 1-second clock ticks never spawn thread storms
+                        sWeatherRetryAfter.put(key, System.currentTimeMillis() + 60_000L);
+                    }
                 }
             }
         }, "OBS-WeatherFetch").start();

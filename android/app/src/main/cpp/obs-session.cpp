@@ -60,23 +60,53 @@ static jmethodID g_share_text_method = nullptr;
 static std::mutex g_ext_display_mutex;
 static obs_display_t *g_ext_display = nullptr;
 static ANativeWindow *g_ext_window = nullptr;
+static std::atomic<bool> g_shutdown_prepared{false};
+static std::atomic<int> g_thermal_tier{0};
 
+static void detach_external_display_locked();
 namespace { void detach_program_snapshot_now(); }
+
+extern "C" __attribute__((visibility("default"))) int obs_android_get_thermal_tier()
+{
+    return g_thermal_tier.load(std::memory_order_acquire);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_obsandroid_port_NativeBridge_setThermalTier(JNIEnv *, jclass, jint tier)
+{
+    g_thermal_tier.store(tier < 0 ? 0 : (tier > 3 ? 3 : int(tier)), std::memory_order_release);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_obsandroid_port_NativeBridge_reopenSession(JNIEnv *, jclass)
+{
+    android_session_reopen();
+    g_shutdown_prepared.store(false, std::memory_order_release);
+}
 
 extern "C" __attribute__((visibility("default"))) void obs_android_prepare_shutdown()
 {
-    static std::atomic<bool> prepared{false};
-    if (prepared.exchange(true)) return;
+    if (g_shutdown_prepared.exchange(true, std::memory_order_acq_rel)) return;
     android_session_close();
     detach_program_snapshot_now();
+    {
+        std::lock_guard<std::mutex> lock(g_ext_display_mutex);
+        detach_external_display_locked();
+    }
     blog(LOG_INFO, "[android-session] Producer callbacks drained before OBS shutdown");
     using ProbeStopFn = void (*)();
     if (auto stop = reinterpret_cast<ProbeStopFn>(dlsym(RTLD_DEFAULT, "obs_android_performance_probe_shutdown"))) stop();
     android_multistream_shutdown();
     android_iso_replay_shutdown();
     android_srt_shutdown();
-    JavaVM *jvm = g_activity_jvm;
-    if (!jvm || !g_activity_class) return;
+    JavaVM *jvm = nullptr;
+    jclass cls = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm;
+        cls = g_activity_class;
+    }
+    if (!jvm || !cls) return;
     JNIEnv *env = nullptr;
     bool detach = false;
     if (jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
@@ -84,8 +114,8 @@ extern "C" __attribute__((visibility("default"))) void obs_android_prepare_shutd
         detach = true;
     }
     if (env) {
-        jmethodID mid = env->GetStaticMethodID(g_activity_class, "onNativeShutdown", "()V");
-        if (mid) env->CallStaticVoidMethod(g_activity_class, mid);
+        jmethodID mid = env->GetStaticMethodID(cls, "onNativeShutdown", "()V");
+        if (mid) env->CallStaticVoidMethod(cls, mid);
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
     if (detach) jvm->DetachCurrentThread();

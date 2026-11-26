@@ -160,6 +160,7 @@ struct Encoder {
         if (!tex) return 0;
         auto it = tex_cache.find(tex);
         if (it != tex_cache.end()) return it->second;
+        if (tex_cache.size() >= 16) tex_cache.clear();
         GLuint id = 0;
         obs_enter_graphics();
         const auto *ptr = static_cast<const GLuint *>(gs_texture_get_obj(tex));

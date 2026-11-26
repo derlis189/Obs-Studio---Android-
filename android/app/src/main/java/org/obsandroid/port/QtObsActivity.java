@@ -61,6 +61,7 @@ public final class QtObsActivity extends QtActivity {
     private static volatile QtObsActivity sInstance;
     private static volatile Context sAppCtx;
     private AlertDialog mActiveTextDialog;
+    private AlertDialog mActiveQrDialog;
     private long pendingDirReqId = 0;
     private String pendingCameraDevice = "default";
     private float pendingCameraZoom = 1.0f;
@@ -347,7 +348,11 @@ public final class QtObsActivity extends QtActivity {
             Intent i = new Intent(ctx, CaptureService.class)
                 .setAction(CaptureService.STREAM_KEEPALIVE)
                 .putExtra("active", active);
-            ctx.startService(i);
+            if (active && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(i);
+            } else {
+                ctx.startService(i);
+            }
         } catch (Throwable t) {
             Log.w("QtObsActivity", "setBroadcastKeepalive error: " + t.getMessage());
         }
@@ -359,10 +364,11 @@ public final class QtObsActivity extends QtActivity {
         new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
             FloatingSceneOverlay.hide();
             ThermalController.stop();
+            ExternalDisplayManager.stop(sInstance);
             VtuberSourceManager.destroyAll();
             BrowserSourceManager.destroyAll();
             LiveGraphicsManager.destroyAll();
-        PtzControlManager.shutdown();
+            PtzControlManager.shutdown();
             CustomBrowserDockManager.destroyAll();
             FaceTrackerManager.stopBackgroundFrontCamera();
             FaceTrackerManager.stopVmcReceiver();
@@ -644,6 +650,7 @@ public final class QtObsActivity extends QtActivity {
                 if (mime == null || mime.isEmpty()) mime = "video/mp4";
 
                 String absPath = src.getAbsolutePath();
+                boolean isReplayClip = absPath.contains("/Replays/") || src.getName().startsWith("Replay_");
                 boolean inPublicGallery = absPath.startsWith("/storage/emulated/0/Movies/")
                     || absPath.startsWith("/storage/emulated/0/DCIM/")
                     || absPath.startsWith("/storage/emulated/0/Download/");
@@ -686,12 +693,15 @@ public final class QtObsActivity extends QtActivity {
                             }
                         }
                         if (copyOk) {
-                            src.delete();
+                            // Keep Instant Replay clips in place so LaunchReplayFileOnAir and the clip list stay intact
+                            if (!isReplayClip) {
+                                src.delete();
+                            }
                             Log.i("QtObsActivity", "Published recording to Movies/OBS Studio: " + item);
                             QtObsActivity act = sInstance;
                             if (act != null && !act.isFinishing()) {
                                 act.runOnUiThread(() -> Toast.makeText(
-                                    appCtx, "Grabacion guardada en Movies/OBS Studio", Toast.LENGTH_SHORT).show());
+                                    appCtx, "Grabación guardada en Movies/OBS Studio", Toast.LENGTH_SHORT).show());
                             }
                             return;
                         } else {
@@ -1110,6 +1120,8 @@ public final class QtObsActivity extends QtActivity {
         } catch (Exception e) {
             Log.e("QtObsActivity", "setenv failed", e);
         }
+        CaptureService.resetForNewSession();
+        NativeBridge.reopenSession();
         NativeBridge.configurePaths(files.getAbsolutePath(), data.getAbsolutePath(), libs);
         NativeBridge.registerCaptureHost(QtObsActivity.class);
         NativeBridge.registerActivityHost(QtObsActivity.class);
@@ -1198,29 +1210,34 @@ public final class QtObsActivity extends QtActivity {
 
     @Override
     protected void onDestroy() {
-        if (isFinishing()) {
-            NativeBridge.quiesceCallbacks();
-            CaptureService.prepareForNativeShutdown();
-        }
+        boolean finishing = isFinishing();
         try { NativeBridge.saveAllState(); } catch (Throwable ignored) {}
         LiveGraphicsManager.saveState();
-        FloatingSceneOverlay.hide();
-        WebRemoteServer.stop();
-        FaceTrackerManager.stopVmcReceiver();
-        VtuberSourceManager.destroyAll();
-        LiveGraphicsManager.destroyAll();
-        PtzControlManager.shutdown();
-        NdiDiscoveryManager.stopDiscovery();
-        BrowserSourceManager.destroyAll();
-        CustomBrowserDockManager.destroyAll();
-        ExternalDisplayManager.stop(this);
-        ThermalController.stop();
         if (mActiveTextDialog != null && mActiveTextDialog.isShowing()) {
             mActiveTextDialog.dismiss();
             mActiveTextDialog = null;
         }
+        if (mActiveQrDialog != null && mActiveQrDialog.isShowing()) {
+            mActiveQrDialog.dismiss();
+            mActiveQrDialog = null;
+        }
+        if (finishing) {
+            NativeBridge.quiesceCallbacks();
+            CaptureService.prepareForNativeShutdown();
+            FloatingSceneOverlay.hide();
+            WebRemoteServer.stop();
+            FaceTrackerManager.stopVmcReceiver();
+            FaceTrackerManager.stopBackgroundFrontCamera();
+            VtuberSourceManager.destroyAll();
+            LiveGraphicsManager.destroyAll();
+            PtzControlManager.shutdown();
+            NdiDiscoveryManager.stopDiscovery();
+            BrowserSourceManager.destroyAll();
+            CustomBrowserDockManager.destroyAll();
+            ExternalDisplayManager.stop(this);
+            ThermalController.stop();
+        }
         if (sInstance == this) sInstance = null;
-        boolean finishing = isFinishing();
         super.onDestroy();
         if (finishing) {
             stopService(new Intent(this, CaptureService.class));
@@ -1286,7 +1303,11 @@ public final class QtObsActivity extends QtActivity {
                 urlTv.setPadding(0, pad / 2, 0, 0);
                 box.addView(urlTv);
 
-                new AlertDialog.Builder(act)
+                if (act.mActiveQrDialog != null && act.mActiveQrDialog.isShowing()) {
+                    act.mActiveQrDialog.dismiss();
+                    act.mActiveQrDialog = null;
+                }
+                AlertDialog dlg = new AlertDialog.Builder(act)
                     .setTitle(title != null && !title.isEmpty() ? title : "Código QR")
                     .setView(box)
                     .setPositiveButton("WhatsApp / Enviar", (d, w) ->
@@ -1299,7 +1320,13 @@ public final class QtObsActivity extends QtActivity {
                         }
                     })
                     .setNegativeButton("Cerrar", null)
-                    .show();
+                    .create();
+                dlg.setOnDismissListener(d -> {
+                    if (act.mActiveQrDialog == dlg) act.mActiveQrDialog = null;
+                    act.applyImmersiveMode();
+                });
+                act.mActiveQrDialog = dlg;
+                dlg.show();
             } catch (Throwable t) {
                 Log.w("QtObsActivity", "showQrDialog failed: " + t.getMessage());
             }
@@ -1362,8 +1389,12 @@ public final class QtObsActivity extends QtActivity {
         if (children == null) return;
         byte[] buf = new byte[16384];
         String rootPath = root.getCanonicalPath();
+        String rootPrefix = rootPath + java.io.File.separator;
         for (java.io.File f : children) {
-            String rel = f.getCanonicalPath().substring(rootPath.length() + 1).replace('\\', '/');
+            if (java.nio.file.Files.isSymbolicLink(f.toPath())) continue;
+            String canon = f.getCanonicalPath();
+            if (!canon.startsWith(rootPrefix)) continue;
+            String rel = canon.substring(rootPrefix.length()).replace('\\', '/');
             if (f.isDirectory()) {
                 zos.putNextEntry(new java.util.zip.ZipEntry(rel + "/"));
                 zos.closeEntry();
@@ -1381,6 +1412,8 @@ public final class QtObsActivity extends QtActivity {
 
     public static boolean unzipToDirectory(String zipFilePath, String dstDirPath) {
         if (zipFilePath == null || dstDirPath == null) return false;
+        final int MAX_ENTRIES = 2000;
+        final long MAX_TOTAL_BYTES = 256L * 1024L * 1024L;
         java.io.File dstDir = new java.io.File(dstDirPath);
         dstDir.mkdirs();
         try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(
@@ -1388,7 +1421,12 @@ public final class QtObsActivity extends QtActivity {
             String dstCanonical = dstDir.getCanonicalPath() + java.io.File.separator;
             byte[] buf = new byte[16384];
             java.util.zip.ZipEntry entry;
+            int entryCount = 0;
+            long totalBytes = 0;
             while ((entry = zis.getNextEntry()) != null) {
+                if (++entryCount > MAX_ENTRIES) {
+                    throw new SecurityException("Zip archive exceeds entry limit");
+                }
                 java.io.File outFile = new java.io.File(dstDir, entry.getName());
                 String outCanonical = outFile.getCanonicalPath();
                 if (!outCanonical.startsWith(dstCanonical) && !outCanonical.equals(dstDir.getCanonicalPath())) {
@@ -1401,7 +1439,13 @@ public final class QtObsActivity extends QtActivity {
                     try (java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(
                             new java.io.FileOutputStream(outFile))) {
                         int n;
-                        while ((n = zis.read(buf)) > 0) out.write(buf, 0, n);
+                        while ((n = zis.read(buf)) > 0) {
+                            totalBytes += n;
+                            if (totalBytes > MAX_TOTAL_BYTES) {
+                                throw new SecurityException("Zip archive exceeds maximum uncompressed size");
+                            }
+                            out.write(buf, 0, n);
+                        }
                     }
                 }
                 zis.closeEntry();

@@ -28,5 +28,8 @@ El APK final deberá ir acompañado de su código fuente correspondiente, parche
 | MediaPipe Tasks Vision 0.10.35 | Apache-2.0; aviso incluido en `android/app/src/main/assets/licenses/mediapipe/` |
 | MediaPipe Selfie Segmenter Landscape | Modelo Apache-2.0, SHA-256 y procedencia registrados en `android/app/src/main/assets/licenses/mediapipe/NOTICE.txt` |
 | Biblia RV1909 | Texto Reina-Valera 1909. Verificar la procedencia de la transcripción y sus avisos antes de publicar |
+| Open-Meteo (API externa opcional) | Datos meteorológicos bajo CC BY 4.0 cuando el usuario habilita clima automático en la fuente Fecha, Hora y Clima |
+| VDO.Ninja (servicio externo opcional) | Utilizado únicamente como URL remota configurable en el navegador integrado para llamadas WebRTC; no se redistribuye código fuente de VDO.Ninja |
+| Advanced Scene Switcher (cuando se compila) | GPL-2.0-or-later |
 
 El empaquetado excluye el runtime NDI y Live2D Cubism Core. Los respectivos selectores permiten importarlos en el dispositivo. Antes de distribuir, revisa los avisos efectivos de la compilación, los requisitos de Qt y de las dependencias Apache-2.0, y la versión GPL aplicable a la obra combinada. La exclusión de los runtimes no sustituye esa revisión.

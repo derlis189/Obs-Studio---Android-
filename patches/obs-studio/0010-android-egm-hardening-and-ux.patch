@@ -1,0 +1,475 @@
+diff --git a/frontend/utility/android-tools.cpp b/frontend/utility/android-tools.cpp
+index 920e565..ee25df2 100644
+--- a/frontend/utility/android-tools.cpp
++++ b/frontend/utility/android-tools.cpp
+@@ -435,8 +435,29 @@ void SyncBroadcastKeepalive()
+ {
+ 	static int lastState = -1;
+ 	const auto st = GetVerticalStatsJson();
++	bool extraActive = false;
++	if (void *jni = FindAndroidJni()) {
++		using StatsFn = bool (*)(char *, size_t);
++		auto checkJsonActive = [&](const char *sym) {
++			if (extraActive)
++				return;
++			auto fn = reinterpret_cast<StatsFn>(dlsym(jni, sym));
++			if (!fn)
++				return;
++			char buf[2048] = {};
++			if (!fn(buf, sizeof(buf)) || !buf[0])
++				return;
++			auto j = nlohmann::json::parse(buf, nullptr, false);
++			if (!j.is_discarded() && j.value("active", false))
++				extraActive = true;
++		};
++		checkJsonActive("obs_android_iso_get_stats");
++		checkJsonActive("obs_android_replay_get_stats");
++		checkJsonActive("obs_android_srt_output_status");
++		checkJsonActive("obs_android_ndi_output_status");
++	}
+ 	const bool anyActive = obs_frontend_streaming_active() || obs_frontend_recording_active() ||
+-			       obs_frontend_replay_buffer_active() || st.value("any_active", false);
++			       obs_frontend_replay_buffer_active() || st.value("any_active", false) || extraActive;
+ 	if (int(anyActive) == lastState)
+ 		return;
+ 	lastState = int(anyActive);
+@@ -2145,7 +2166,9 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream, boo
+ 	dlg->setAttribute(Qt::WA_DeleteOnClose);
+ 	dlg->setWindowTitle(showMultistream ? QStringLiteral("Emisión y destinos multistream")
+ 					    : QStringLiteral("Captura Vertical 9:16"));
+-	dlg->resize(QSize(920, 560).boundedTo(parent->screen()->availableGeometry().size()));
++	QScreen *scr = (parent && parent->screen()) ? parent->screen() : QGuiApplication::primaryScreen();
++	QSize avail = scr ? scr->availableGeometry().size() : QSize(920, 560);
++	dlg->resize(QSize(920, 560).boundedTo(avail));
+ 
+ 	auto *rootLayout = new QVBoxLayout(dlg);
+ 	rootLayout->setContentsMargins(8, 8, 8, 8);
+@@ -5468,7 +5491,8 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ {
+ 	QDialog dlg(parent);
+ 	dlg.setWindowTitle(QStringLiteral("Respaldar / Restaurar configuración OBS"));
+-	dlg.resize(QSize(560, 400).boundedTo(parent->screen()->availableGeometry().size()));
++	QScreen *scr = (parent && parent->screen()) ? parent->screen() : QGuiApplication::primaryScreen();
++	dlg.resize(QSize(560, 400).boundedTo(scr ? scr->availableGeometry().size() : QSize(560, 400)));
+ 
+ 	const char *filesRoot = obs_android_files_path();
+ 	const QString obsCfgRoot = filesRoot ? (QString::fromUtf8(filesRoot) + "/obs-studio") : QString();
+@@ -5478,7 +5502,7 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 	auto *root = new QVBoxLayout(&dlg);
+ 	root->setSpacing(8);
+ 	auto *info = new QLabel(
+-		QStringLiteral("Guarda todas tus escenas, perfiles, ajustes de Captura Vertical 9:16, fondos y gráficos en:\n%1\n(Sobrevive desinstalaciones y podés copiarlo a otro celular).")
++		QStringLiteral("Guarda tus escenas, perfiles, ajustes de Captura Vertical 9:16, fondos y gráficos en:\n%1\n(Por seguridad, las claves RTMP, contraseñas PTZ y frases SRT se omiten del respaldo exportado).")
+ 			.arg(backupRoot),
+ 		&dlg);
+ 	info->setWordWrap(true);
+@@ -5522,6 +5546,38 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 		btnRestore->setEnabled(list->count() > 0);
+ 	};
+ 
++	auto redactJsonSecrets = [](const QString &filePath) {
++		QFile f(filePath);
++		if (!f.open(QIODevice::ReadOnly))
++			return;
++		auto j = nlohmann::json::parse(f.readAll().toStdString(), nullptr, false);
++		f.close();
++		if (j.is_discarded())
++			return;
++		std::function<void(nlohmann::json &)> scrub = [&](nlohmann::json &node) {
++			if (node.is_object()) {
++				for (auto it = node.begin(); it != node.end(); ++it) {
++					const std::string &k = it.key();
++					if ((k == "key" || k == "password" || k == "passphrase" || k == "stream_key") &&
++					    it.value().is_string()) {
++						it.value() = "";
++					} else {
++						scrub(it.value());
++					}
++				}
++			} else if (node.is_array()) {
++				for (auto &el : node)
++					scrub(el);
++			}
++		};
++		scrub(j);
++		if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++			const std::string out = j.dump(2);
++			f.write(out.data(), qint64(out.size()));
++			f.close();
++		}
++	};
++
+ 	auto copyConfigToDir = [&](const QString &dst) -> bool {
+ 		QDir().mkpath(dst);
+ 		bool ok = true;
+@@ -5536,6 +5592,14 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 		for (const QFileInfo &fi : files) {
+ 			QFile::copy(fi.absoluteFilePath(), dst + "/" + fi.fileName());
+ 		}
++		// Redact sensitive credentials/keys before exporting to public external storage
++		redactJsonSecrets(dst + "/android-multistream.json");
++		redactJsonSecrets(dst + "/android-srt-output.json");
++		redactJsonSecrets(dst + "/android-ptz.json");
++		QDir profilesDir(dst + "/basic/profiles");
++		for (const QString &prof : profilesDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
++			redactJsonSecrets(profilesDir.filePath(prof + "/service.json"));
++		}
+ 		return ok;
+ 	};
+ 
+@@ -7440,10 +7504,10 @@ static QWidget *CreatePtzControlWidget(QWidget *parent = nullptr)
+ 			(*refreshUi)();
+ 		}
+ 	});
+-	QObject::connect(btnScan, &QPushButton::clicked, rootW, [statusLbl, refreshUi]() {
++	QObject::connect(btnScan, &QPushButton::clicked, rootW, [rootW, statusLbl, refreshUi]() {
+ 		PtzExec({{"action", "discover_onvif"}});
+ 		statusLbl->setText(QStringLiteral("Buscando cámaras ONVIF en la red Wi-Fi..."));
+-		QTimer::singleShot(2300, [refreshUi]() { (*refreshUi)(); });
++		QTimer::singleShot(2300, rootW, [refreshUi]() { (*refreshUi)(); });
+ 	});
+ 	QObject::connect(camCombo, qOverload<int>(&QComboBox::activated), rootW, [refreshUi](int idx) {
+ 		PtzExec({{"action", "select_camera"}, {"index", idx}});
+@@ -8032,17 +8096,6 @@ static nlohmann::json LoadWebRtcConfig()
+ 
+ static obs_sceneitem_t *EnsureWebRtcGuestInScene(const QString &sourceName, const QString &viewUrl, bool setVisibility, bool visibleVal)
+ {
+-	obs_data_t *s = obs_data_create();
+-	obs_data_set_bool(s, "is_local_file", false);
+-	obs_data_set_string(s, "url", viewUrl.toUtf8().constData());
+-	obs_data_set_int(s, "width", 1280);
+-	obs_data_set_int(s, "height", 720);
+-	obs_data_set_int(s, "fps", 30);
+-	obs_data_set_bool(s, "transparent", true);
+-	obs_data_set_bool(s, "capture_audio", true);
+-	obs_data_set_bool(s, "shutdown", false);
+-	obs_data_set_string(s, "css", "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
+-
+ 	OBSSourceAutoRelease curSceneSrc = obs_frontend_get_current_scene();
+ 	obs_scene_t *scene = curSceneSrc ? obs_scene_from_source(curSceneSrc) : nullptr;
+ 
+@@ -8064,11 +8117,29 @@ static obs_sceneitem_t *EnsureWebRtcGuestInScene(const QString &sourceName, cons
+ 	}
+ 
+ 	if (src) {
+-		obs_source_update(src, s);
++		// Preserve existing adaptive layout width/height/fps/css when updating URL or toggling visibility
++		obs_data_t *upd = obs_data_create();
++		obs_data_set_bool(upd, "is_local_file", false);
++		obs_data_set_string(upd, "url", viewUrl.toUtf8().constData());
++		obs_data_set_bool(upd, "transparent", true);
++		obs_data_set_bool(upd, "capture_audio", true);
++		obs_data_set_bool(upd, "shutdown", false);
++		obs_source_update(src, upd);
++		obs_data_release(upd);
+ 	} else {
++		obs_data_t *s = obs_data_create();
++		obs_data_set_bool(s, "is_local_file", false);
++		obs_data_set_string(s, "url", viewUrl.toUtf8().constData());
++		obs_data_set_int(s, "width", 1280);
++		obs_data_set_int(s, "height", 720);
++		obs_data_set_int(s, "fps", 30);
++		obs_data_set_bool(s, "transparent", true);
++		obs_data_set_bool(s, "capture_audio", true);
++		obs_data_set_bool(s, "shutdown", false);
++		obs_data_set_string(s, "css", "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
+ 		src = obs_source_create("browser_source", sourceName.toUtf8().constData(), s, nullptr);
++		obs_data_release(s);
+ 	}
+-	obs_data_release(s);
+ 	if (!src) return nullptr;
+ 
+ 	obs_sceneitem_t *item = nullptr;
+@@ -8522,10 +8593,22 @@ static QWidget *CreateWebRtcGuestsWidget(QWidget *parent = nullptr)
+ 		fl->addLayout(brow);
+ 		indivLay->addWidget(frame);
+ 
+-		auto getSrcName = [edName, i]() -> QString {
++		auto lastSrcName = std::make_shared<QString>(
++			QStringLiteral("Llamada: ") +
++			(edName->text().trimmed().isEmpty() ? QStringLiteral("Invitado %1").arg(i + 1) : edName->text().trimmed()));
++		auto getSrcName = [edName, lastSrcName, i]() -> QString {
+ 			QString nm = edName->text().trimmed();
+ 			if (nm.isEmpty()) nm = QStringLiteral("Invitado %1").arg(i + 1);
+-			return QStringLiteral("Llamada: ") + nm;
++			QString nextName = QStringLiteral("Llamada: ") + nm;
++			if (nextName != *lastSrcName) {
++				OBSSourceAutoRelease prev = obs_get_source_by_name(lastSrcName->toUtf8().constData());
++				OBSSourceAutoRelease clash = obs_get_source_by_name(nextName.toUtf8().constData());
++				if (prev && !clash) {
++					obs_source_set_name(prev, nextName.toUtf8().constData());
++				}
++				*lastSrcName = nextName;
++			}
++			return nextName;
+ 		};
+ 		auto getInviteUrl = [cfg, saveCfg, edName, cbGroupCall, i]() -> QString {
+ 			(*cfg)["guests"][i]["name"] = edName->text().trimmed().toStdString();
+@@ -8839,6 +8922,22 @@ static QWidget *CreateAdvancedTitlesWidget(QWidget *parent = nullptr)
+ 	});
+ 
+ 	syncFromState(GfxGetState());
++
++	// Keep ON AIR button synchronized when autoHideSec hides the title automatically in Java
++	auto *airSyncTimer = new QTimer(rootW);
++	airSyncTimer->setInterval(600);
++	QObject::connect(airSyncTimer, &QTimer::timeout, rootW, [rootW, isOnAir, btnAir]() {
++		if (!rootW->isVisible() || !(*isOnAir)) return;
++		auto st = GfxGetState();
++		if (st.contains("advancedTitle") && !st["advancedTitle"].value("onAir", false)) {
++			*isOnAir = false;
++			btnAir->setText(QStringLiteral("LANZAR AL AIRE"));
++			btnAir->setStyleSheet(QStringLiteral(
++				"QPushButton { background:#2563eb; color:white; font-weight:bold; border-radius:6px; padding:8px; }"));
++		}
++	});
++	airSyncTimer->start();
++
+ 	return scroll;
+ }
+ 
+@@ -8857,8 +8956,18 @@ static void OpenAdvancedTitlesDialog(QWidget *parent)
+ 
+ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ {
++    QMenu *menuProd = nullptr;
++    QMenu *menuOut = nullptr;
++    QMenu *menuAudioColor = nullptr;
++    QMenu *menuSys = nullptr;
+     if (toolsMenu) {
+-        auto *ndi = toolsMenu->addAction(QStringLiteral("Salida NDI en red..."));
++        toolsMenu->addSeparator();
++        menuProd = toolsMenu->addMenu(QStringLiteral("Producción en Vivo"));
++        menuOut = toolsMenu->addMenu(QStringLiteral("Salidas y Red"));
++        menuAudioColor = toolsMenu->addMenu(QStringLiteral("Audio y Color"));
++        menuSys = toolsMenu->addMenu(QStringLiteral("Sistema y Seguridad"));
++
++        auto *ndi = menuOut->addAction(QStringLiteral("Salida NDI en red..."));
+         QObject::connect(ndi, &QAction::triggered, mainWindow, [mainWindow] {
+             QDialog dialog(mainWindow);
+             dialog.setWindowTitle(QStringLiteral("Salida NDI"));
+@@ -8889,38 +8998,41 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+                 return false;
+             };
+             QObject::connect(start, &QPushButton::clicked, &dialog, [&] {
+-                if (call("obs_android_ndi_output_start", name->text().toUtf8().constData()))
++                if (call("obs_android_ndi_output_start", name->text().toUtf8().constData())) {
++                    SyncBroadcastKeepalive();
+                     status->setText(QStringLiteral("Enviando Programa y audio por NDI en la red local."));
+-                else
++                } else {
+                     status->setText(QStringLiteral("No se inició. Importa una libndi.so sender para ARM64 y revisa que el runtime tenga NDIlib_send_*."));
++                }
+             });
+             QObject::connect(stop, &QPushButton::clicked, &dialog, [&] {
+                 if (void *jni = FindAndroidJni()) if (auto fn = reinterpret_cast<void (*)()>(dlsym(jni, "obs_android_ndi_output_stop"))) fn();
++                SyncBroadcastKeepalive();
+                 status->setText(QStringLiteral("Estado: detenido"));
+             });
+             QObject::connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+             dialog.resize(520, 230);
+             dialog.exec();
+         });
+-        auto *diagnostics = toolsMenu->addAction(QStringLiteral("Diagnóstico de rendimiento..."));
++        auto *diagnostics = menuSys->addAction(QStringLiteral("Diagnóstico de rendimiento..."));
+         QObject::connect(diagnostics, &QAction::triggered, mainWindow, [mainWindow] { OpenPerformanceDiagnostics(mainWindow); });
+-        auto *hdmiOut = toolsMenu->addAction(QStringLiteral("Salida HDMI / Pantalla Wi-Fi (Miracast)..."));
++        auto *hdmiOut = menuOut->addAction(QStringLiteral("Salida HDMI / Pantalla Wi-Fi (Miracast)..."));
+         QObject::connect(hdmiOut, &QAction::triggered, mainWindow, [mainWindow] { OpenExternalDisplayDialog(mainWindow); });
+-        auto *safeLive = toolsMenu->addAction(QStringLiteral("Modo Directo Seguro (Bloquear toques)"));
++        auto *safeLive = menuSys->addAction(QStringLiteral("Modo Directo Seguro (Bloquear toques)"));
+         QObject::connect(safeLive, &QAction::triggered, mainWindow, [mainWindow] { OpenSafeLiveModeDialog(mainWindow); });
+-        auto *vmixColor = toolsMenu->addAction(QStringLiteral("Ruedas de color (LGG)..."));
++        auto *vmixColor = menuAudioColor->addAction(QStringLiteral("Ruedas de color (LGG)..."));
+         QObject::connect(vmixColor, &QAction::triggered, mainWindow, [mainWindow] { OpenVmixColorCorrectionDialog(mainWindow); });
+-        toolsMenu->addSeparator();
+-        auto *ptzAct = toolsMenu->addAction(QStringLiteral("Control PTZ (VISCA / ONVIF / Mando PS)..."));
++
++        auto *webrtcAct = menuProd->addAction(QStringLiteral("Llamadas e Invitados en Vivo (WebRTC)..."));
++        QObject::connect(webrtcAct, &QAction::triggered, mainWindow, [mainWindow] { OpenWebRtcGuestsDialog(mainWindow); });
++        auto *advTitlesAct = menuProd->addAction(QStringLiteral("Generador Avanzado de Títulos Animados..."));
++        QObject::connect(advTitlesAct, &QAction::triggered, mainWindow, [mainWindow] { OpenAdvancedTitlesDialog(mainWindow); });
++        auto *ptzAct = menuProd->addAction(QStringLiteral("Control PTZ (VISCA / ONVIF / Mando PS)..."));
+         QObject::connect(ptzAct, &QAction::triggered, mainWindow, [mainWindow] { OpenPtzControlDialog(mainWindow); });
+-        auto *isoAct = toolsMenu->addAction(QStringLiteral("Grabación ISO (Multi-fuente)..."));
++        auto *isoAct = menuProd->addAction(QStringLiteral("Grabación ISO (Multi-fuente)..."));
+         QObject::connect(isoAct, &QAction::triggered, mainWindow, [mainWindow] { OpenIsoRecordingDialog(mainWindow); });
+-        auto *replayAct = toolsMenu->addAction(QStringLiteral("Repetición Instantánea (Instant Replay)..."));
++        auto *replayAct = menuProd->addAction(QStringLiteral("Repetición Instantánea (Instant Replay)..."));
+         QObject::connect(replayAct, &QAction::triggered, mainWindow, [mainWindow] { OpenInstantReplayDialog(mainWindow); });
+-        auto *webrtcAct = toolsMenu->addAction(QStringLiteral("Llamadas e Invitados en Vivo..."));
+-        QObject::connect(webrtcAct, &QAction::triggered, mainWindow, [mainWindow] { OpenWebRtcGuestsDialog(mainWindow); });
+-        auto *advTitlesAct = toolsMenu->addAction(QStringLiteral("Generador Avanzado de Títulos Animados..."));
+-        QObject::connect(advTitlesAct, &QAction::triggered, mainWindow, [mainWindow] { OpenAdvancedTitlesDialog(mainWindow); });
+     }
+ 
+ 	SyncVerticalRuntimeFromConfig(LoadMultiConfig());
+@@ -9046,7 +9158,7 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 		obs_frontend_add_dock_by_id("obs_android_dock_vertical", "Vertical 9:16", CreateVerticalDockWidget(mainWindow));
+ 		obs_frontend_add_dock_by_id("obs_android_dock_scoreboard", "Control: Marcador", CreateScoreboardDockWidget());
+ 		obs_frontend_add_dock_by_id("obs_android_dock_lowerthird", "Control: Lower Third", CreateLowerThirdDockWidget());
+-		obs_frontend_add_dock_by_id("obs_android_dock_timer", "Control: Cronometro", CreateTimerDockWidget());
++		obs_frontend_add_dock_by_id("obs_android_dock_timer", "Control: Cronómetro", CreateTimerDockWidget());
+ 		obs_frontend_add_dock_by_id("obs_android_dock_bible", "Control: Biblia", CreateBibleDockWidget());
+ 		obs_frontend_add_dock_by_id("obs_android_dock_ptz", "Control: PTZ (Mando PS)", CreatePtzControlWidget(mainWindow));
+ 		obs_frontend_add_dock_by_id("obs_android_dock_iso", "Control: Grabación ISO", CreateIsoRecordingWidget(mainWindow));
+@@ -9070,9 +9182,8 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 		});
+ 	}
+ 
+-	if (toolsMenu) {
+-		toolsMenu->addSeparator();
+-		auto *dockLayout = toolsMenu->addAction(QStringLiteral("Recuperar paneles en pantalla"));
++	if (toolsMenu && menuProd && menuOut && menuAudioColor && menuSys) {
++		auto *dockLayout = menuSys->addAction(QStringLiteral("Recuperar paneles en pantalla"));
+ 		QObject::connect(dockLayout, &QAction::triggered, mainWindow, [mainWindow] {
+ 			auto *window = qobject_cast<QMainWindow *>(mainWindow);
+ 			if (!window) return;
+@@ -9108,7 +9219,7 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 			window->updateGeometry();
+ 		});
+ 
+-		QAction *actRemote = toolsMenu->addAction(QStringLiteral("Control Remoto Web (QR)..."));
++		QAction *actRemote = menuOut->addAction(QStringLiteral("Control Remoto Web (QR)..."));
+ 		QObject::connect(actRemote, &QAction::triggered, mainWindow, []() {
+ 			if (void *h = FindAndroidJni()) {
+ 				using OpenQrFn = void (*)();
+@@ -9118,8 +9229,8 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 			}
+ 		});
+ 
+-		QAction *actGfx = toolsMenu->addAction(
+-			QStringLiteral("Control de Graficos (Marcador / Lower Third / Cronometro / Biblia)..."));
++		QAction *actGfx = menuProd->addAction(
++			QStringLiteral("Control de Gráficos (Marcador / Lower Third / Cronómetro / Biblia)..."));
+ 		QObject::connect(actGfx, &QAction::triggered, mainWindow, []() {
+ 			if (void *h = FindAndroidJni()) {
+ 				using OpenGfxFn = void (*)();
+@@ -9129,27 +9240,27 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 			}
+ 		});
+ 
+-		QAction *actVertical = toolsMenu->addAction(QStringLiteral("Captura Vertical (9:16)..."));
++		QAction *actVertical = menuProd->addAction(QStringLiteral("Captura Vertical (9:16)..."));
+ 		QObject::connect(actVertical, &QAction::triggered, mainWindow, [mainWindow]() {
+ 			OpenMultistreamAndVerticalDialog(mainWindow, false);
+ 		});
+ 
+-		QAction *actSrt = toolsMenu->addAction(QStringLiteral("Salida SRT (Wi-Fi / Datos moviles)..."));
++		QAction *actSrt = menuOut->addAction(QStringLiteral("Salida SRT (Wi-Fi / Datos móviles)..."));
+ 		QObject::connect(actSrt, &QAction::triggered, mainWindow, [mainWindow]() {
+ 			OpenSrtOutputDialog(mainWindow);
+ 		});
+ 
+-		QAction *actAudioPro = toolsMenu->addAction(QStringLiteral("Audio Pro (Voz limpia en 1 toque)..."));
++		QAction *actAudioPro = menuAudioColor->addAction(QStringLiteral("Audio Pro (Voz limpia en 1 toque)..."));
+ 		QObject::connect(actAudioPro, &QAction::triggered, mainWindow, [mainWindow]() {
+ 			OpenAudioProPresetDialog(mainWindow);
+ 		});
+ 
+-		QAction *actBackup = toolsMenu->addAction(QStringLiteral("Respaldar / Restaurar configuración OBS..."));
++		QAction *actBackup = menuSys->addAction(QStringLiteral("Respaldar / Restaurar configuración OBS..."));
+ 		QObject::connect(actBackup, &QAction::triggered, mainWindow, [mainWindow]() {
+ 			OpenBackupRestoreDialog(mainWindow);
+ 		});
+ 
+-		QAction *actFloat = toolsMenu->addAction(QStringLiteral("Boton flotante de escenas (activar / desactivar)"));
++		QAction *actFloat = menuSys->addAction(QStringLiteral("Botón flotante de escenas (activar / desactivar)"));
+ 		QObject::connect(actFloat, &QAction::triggered, mainWindow, []() {
+ 			if (void *h = FindAndroidJni()) {
+ 				using ToggleFloatFn = void (*)();
+@@ -9179,9 +9290,49 @@ int64_t g_nextBrowserDockId = 1;
+ std::vector<AndroidBrowserDockEntry> g_browserDocks;
+ QPointer<QWidget> g_browserDockMainWin;
+ QPointer<QTimer> g_browserDockSyncTimer;
++QPointer<QObject> g_browserDockEventFilter;
++bool g_browserDockSyncCoalesced = false;
+ bool g_lastBrowserDocksSuspended = false;
+ bool g_browserDockDragSuspended = false;
+ 
++void SyncAllAndroidBrowserDocks();
++
++void ScheduleBrowserDockSyncSoon()
++{
++	if (g_browserDocks.empty() || g_browserDockSyncCoalesced)
++		return;
++	g_browserDockSyncCoalesced = true;
++	QTimer::singleShot(16, g_browserDockMainWin, []() {
++		g_browserDockSyncCoalesced = false;
++		SyncAllAndroidBrowserDocks();
++	});
++}
++
++class AndroidBrowserDockEventFilter : public QObject {
++public:
++	explicit AndroidBrowserDockEventFilter(QObject *parent) : QObject(parent) {}
++	bool eventFilter(QObject *obj, QEvent *ev) override
++	{
++		if (ev) {
++			switch (ev->type()) {
++			case QEvent::Resize:
++			case QEvent::Move:
++			case QEvent::Show:
++			case QEvent::Hide:
++			case QEvent::WindowStateChange:
++			case QEvent::WindowActivate:
++			case QEvent::WindowDeactivate:
++			case QEvent::LayoutRequest:
++				ScheduleBrowserDockSyncSoon();
++				break;
++			default:
++				break;
++			}
++		}
++		return QObject::eventFilter(obj, ev);
++	}
++};
++
+ void BrowserDockCallUpsert(int64_t id, const QString &url, bool desktop)
+ {
+ 	if (void *h = FindAndroidJni()) {
+@@ -9439,7 +9590,7 @@ void AddAndroidCustomBrowserDock(const QString &title, const QString &url, const
+ 		for (auto &it : g_browserDocks) {
+ 			if (it.nativeId == nid) {
+ 				it.desktopMode = !it.desktopMode;
+-				btnDesktop->setText(it.desktopMode ? QStringLiteral("PC") : QStringLiteral("Movil"));
++				btnDesktop->setText(it.desktopMode ? QStringLiteral("PC") : QStringLiteral("Móvil"));
+ 				BrowserDockCallNavigate(nid, 3);
+ 				SaveAndroidCustomBrowserDocks();
+ 				break;
+@@ -9462,6 +9613,10 @@ void AddAndroidCustomBrowserDock(const QString &title, const QString &url, const
+ 	if (g_browserDockMainWin) {
+ 		if (auto *dock = g_browserDockMainWin->findChild<QDockWidget *>(entry.dockObjId)) {
+ 			HardenAndroidDock(dock);
++			if (g_browserDockEventFilter) {
++				dock->installEventFilter(g_browserDockEventFilter);
++				webSlot->installEventFilter(g_browserDockEventFilter);
++			}
+ 			if (showNow) {
+ 				dock->show();
+ 				dock->raise();
+@@ -9473,7 +9628,7 @@ void AddAndroidCustomBrowserDock(const QString &title, const QString &url, const
+ 	if (g_browserDockSyncTimer && !g_browserDockSyncTimer->isActive()) {
+ 		g_browserDockSyncTimer->start();
+ 	}
+-	QTimer::singleShot(80, []() { SyncAllAndroidBrowserDocks(); });
++	ScheduleBrowserDockSyncSoon();
+ }
+ 
+ void OpenManageCustomBrowserDocksDialog()
+@@ -9680,9 +9835,14 @@ void OpenManageCustomBrowserDocksDialog()
+ void InstallAndroidCustomBrowserDocks(QWidget *mainWindow, QMenu *docksMenu, QAction *beforeAction)
+ {
+ 	g_browserDockMainWin = mainWindow;
++	if (!g_browserDockEventFilter && mainWindow) {
++		g_browserDockEventFilter = new AndroidBrowserDockEventFilter(mainWindow);
++		mainWindow->installEventFilter(g_browserDockEventFilter);
++	}
+ 	if (!g_browserDockSyncTimer && mainWindow) {
++		// Low-power 1 Hz fallback; primary sync is event-driven via AndroidBrowserDockEventFilter
+ 		g_browserDockSyncTimer = new QTimer(mainWindow);
+-		g_browserDockSyncTimer->setInterval(70);
++		g_browserDockSyncTimer->setInterval(1000);
+ 		QObject::connect(g_browserDockSyncTimer, &QTimer::timeout, mainWindow,
+ 				 []() { SyncAllAndroidBrowserDocks(); });
+ 	}

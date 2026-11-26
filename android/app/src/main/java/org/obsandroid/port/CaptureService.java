@@ -49,6 +49,27 @@ public final class CaptureService extends Service {
         if (service != null) service.stopAudioAndScreenSynchronously();
     }
 
+    static void resetForNewSession() {
+        nativeShutdownRequested = false;
+    }
+
+    private void satisfyForegroundBeforeStop() {
+        if (android.os.Build.VERSION.SDK_INT < 26) return;
+        try {
+            Notification n = new Notification.Builder(this, "obs_capture")
+                .setSmallIcon(R.drawable.ic_stat_obs)
+                .setContentTitle("OBS Studio")
+                .setContentText("Finalizando sesión...")
+                .build();
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                startForeground(301, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(301, n);
+            }
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } catch (Throwable ignored) {}
+    }
+
     private void stopAudioAndScreenSynchronously() {
         microphoneActive = false;
         java.util.List<AudioCaptureController> old = new java.util.ArrayList<>(microphones.values());
@@ -245,7 +266,7 @@ public final class CaptureService extends Service {
             }
         }
         if (wakeLock != null && (cameraActive || microphoneActive || screenActive || uvcActive || streamRequested || qtBroadcastActive)) {
-            try { wakeLock.acquire(4L * 60L * 60L * 1000L); } catch (Throwable ignored) {}
+            try { if (!wakeLock.isHeld()) wakeLock.acquire(); } catch (Throwable ignored) {}
         } else if (wakeLock != null && wakeLock.isHeld()) {
             try { wakeLock.release(); } catch (Throwable ignored) {}
         }
@@ -285,11 +306,16 @@ public final class CaptureService extends Service {
         String action = intent.getAction();
         if (nativeShutdownRequested) {
             Log.i("ObsCaptureService", "Ignoring capture command after native shutdown began: " + action);
+            satisfyForegroundBeforeStop();
             stopSelf(id);
             return START_NOT_STICKY;
         }
         try {
-            if (STOP.equals(action)) { stopSelf(); return START_NOT_STICKY; }
+            if (STOP.equals(action)) {
+                satisfyForegroundBeforeStop();
+                stopSelf();
+                return START_NOT_STICKY;
+            }
             if (STREAM_KEEPALIVE.equals(action)) {
                 qtBroadcastActive = intent.getBooleanExtra("active", false);
                 foreground();

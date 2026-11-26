@@ -67,10 +67,13 @@ final class ThermalController {
         appliedStatus = status;
         previewLimit = ThermalBudget.previewFps(status);
         browserLimit = ThermalBudget.browserFpsCap(status);
+        int tier = status >= 4 ? 3 : (status >= 3 ? 2 : (status >= 2 ? 1 : 0));
         NativeBridge.setPreviewFpsLimit(previewLimit);
+        NativeBridge.setThermalTier(tier);
         BrowserSourceManager.setThermalFpsCap(browserLimit);
         VtuberSourceManager.setThermalFpsCap(browserLimit);
-        Log.i("ObsThermal", "Auxiliary budget: thermal=" + status + " preview=" + previewLimit
+        LiveGraphicsManager.setThermalTier(tier);
+        Log.i("ObsThermal", "Auxiliary budget: thermal=" + status + " tier=" + tier + " preview=" + previewLimit
             + " browserCap=" + browserLimit + " outputFPS=unchanged");
     }
 

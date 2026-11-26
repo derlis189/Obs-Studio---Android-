@@ -32,3 +32,8 @@ inline bool android_session_close()
     std::unique_lock<std::shared_mutex> drain(android_session_gate().mutex);
     return was_open;
 }
+inline void android_session_reopen()
+{
+    std::unique_lock<std::shared_mutex> lock(android_session_gate().mutex);
+    android_session_gate().open.store(true, std::memory_order_release);
+}

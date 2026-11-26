@@ -19,6 +19,8 @@ final class NativeBridge {
     static native void pushGraphicsFrame(long instanceId, java.nio.ByteBuffer rgba, int width, int height, long timestampNs);
     static native void saveAllState();
     static native void quiesceCallbacks();
+    static native void reopenSession();
+    static native void setThermalTier(int tier);
     static native byte[] captureProgramRgba(int[] outDims);
     static native String remoteGetState();
     static native String remoteExecuteAction(String actionJson);

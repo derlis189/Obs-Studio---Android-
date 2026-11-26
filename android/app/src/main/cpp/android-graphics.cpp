@@ -1,6 +1,7 @@
 #include "android-session-gate.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "android-graphics.h"
+#include "android-rgba-frame.h"
 #include <obs-module.h>
 #include <graphics/vec2.h>
 #include <graphics/vec3.h>
@@ -34,10 +35,11 @@ bool g_gfx_registered = false;
 struct GfxInstance {
     int64_t id{};
     obs_source_t *source{};
-    std::string kind; // "scoreboard", "lowerthird", "timer", "bible"
-    int width{1280};
-    int height{720};
+    std::string kind; // "scoreboard", "lowerthird", "timer", "bible", "datetime_weather", "advanced_title"
+    std::atomic<int> width{1280};
+    std::atomic<int> height{720};
     std::string config_json;
+    AndroidRgbaFrame frame;
 };
 
 std::unordered_map<int64_t, GfxInstance *> g_gfx_instances;
@@ -70,7 +72,7 @@ void push_gfx_config(const GfxInstance *inst)
 
     jstring jKind = env->NewStringUTF(inst->kind.c_str());
     jstring jCfg = env->NewStringUTF(inst->config_json.c_str());
-    env->CallStaticVoidMethod(cls, mid, jlong(inst->id), jKind, jCfg, jint(inst->width), jint(inst->height));
+    env->CallStaticVoidMethod(cls, mid, jlong(inst->id), jKind, jCfg, jint(inst->width.load()), jint(inst->height.load()));
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(jKind);
     env->DeleteLocalRef(jCfg);
@@ -286,16 +288,18 @@ void *gfx_create_common(const char *kind, obs_data_t *s, obs_source_t *source)
     inst->id = ++g_gfx_seq;
     inst->source = source;
     inst->kind = kind;
+    int w = 1280, h = 720;
     if (inst->kind == "datetime_weather" && obs_data_get_bool(s, "dtw_auto_size")) {
-        compute_dtw_auto_size(s, inst->width, inst->height);
+        compute_dtw_auto_size(s, w, h);
     } else {
-        inst->width = int(obs_data_get_int(s, "width"));
-        inst->height = int(obs_data_get_int(s, "height"));
+        w = int(obs_data_get_int(s, "width"));
+        h = int(obs_data_get_int(s, "height"));
     }
-    if (inst->width < 256) inst->width = 1280;
-    if (inst->height < 120) inst->height = 720;
+    if (w < 256) w = 1280;
+    if (h < 120) h = 720;
+    inst->width.store(w, std::memory_order_release);
+    inst->height.store(h, std::memory_order_release);
     inst->config_json = build_gfx_json(inst->kind, s);
-    obs_source_set_async_unbuffered(source, true);
     {
         std::lock_guard<std::mutex> lock(g_gfx_mutex);
         g_gfx_instances[inst->id] = inst;
@@ -317,18 +321,43 @@ void gfx_hide_common(void *data)
     if (inst) set_gfx_visible_java(inst->id, false);
 }
 
+uint32_t gfx_get_width(void *data)
+{
+    auto *inst = static_cast<GfxInstance *>(data);
+    if (!inst) return 0;
+    uint32_t fw = inst->frame.width();
+    return fw > 0 ? fw : uint32_t(inst->width.load(std::memory_order_acquire));
+}
+
+uint32_t gfx_get_height(void *data)
+{
+    auto *inst = static_cast<GfxInstance *>(data);
+    if (!inst) return 0;
+    uint32_t fh = inst->frame.height();
+    return fh > 0 ? fh : uint32_t(inst->height.load(std::memory_order_acquire));
+}
+
+void gfx_video_render(void *data, gs_effect_t *)
+{
+    auto *inst = static_cast<GfxInstance *>(data);
+    if (inst) inst->frame.render();
+}
+
 void gfx_update_common(void *data, obs_data_t *s)
 {
     auto *inst = static_cast<GfxInstance *>(data);
     if (!inst) return;
+    int w = 1280, h = 720;
     if (inst->kind == "datetime_weather" && obs_data_get_bool(s, "dtw_auto_size")) {
-        compute_dtw_auto_size(s, inst->width, inst->height);
+        compute_dtw_auto_size(s, w, h);
     } else {
-        inst->width = int(obs_data_get_int(s, "width"));
-        inst->height = int(obs_data_get_int(s, "height"));
+        w = int(obs_data_get_int(s, "width"));
+        h = int(obs_data_get_int(s, "height"));
     }
-    if (inst->width < 256) inst->width = 1280;
-    if (inst->height < 120) inst->height = 720;
+    if (w < 256) w = 1280;
+    if (h < 120) h = 720;
+    inst->width.store(w, std::memory_order_release);
+    inst->height.store(h, std::memory_order_release);
     inst->config_json = build_gfx_json(inst->kind, s);
     push_gfx_config(inst);
 }
@@ -1091,7 +1120,7 @@ void android_graphics_register()
         obs_source_info info{};
         info.id = id;
         info.type = OBS_SOURCE_TYPE_INPUT;
-        info.output_flags = OBS_SOURCE_ASYNC_VIDEO;
+        info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_SRGB;
         info.get_name = get_name;
         info.create = create;
         info.destroy = gfx_destroy_common;
@@ -1100,6 +1129,9 @@ void android_graphics_register()
         info.update = gfx_update_common;
         info.show = gfx_show_common;
         info.hide = gfx_hide_common;
+        info.get_width = gfx_get_width;
+        info.get_height = gfx_get_height;
+        info.video_render = gfx_video_render;
         info.icon_type = OBS_ICON_TYPE_TEXT;
         obs_register_source(&info);
     };
@@ -1148,16 +1180,22 @@ Java_org_obsandroid_port_NativeBridge_registerGraphicsHost(JNIEnv *env, jclass, 
     env->GetJavaVM(&g_gfx_jvm);
     g_gfx_host_class = static_cast<jclass>(env->NewGlobalRef(hostClass));
     if (!g_gfx_host_class) return;
-    g_mid_gfx_update = env->GetStaticMethodID(
-        g_gfx_host_class, "createOrUpdate", "(JLjava/lang/String;Ljava/lang/String;II)V");
-    g_mid_gfx_destroy = env->GetStaticMethodID(g_gfx_host_class, "destroy", "(J)V");
-    g_mid_gfx_set_visible = env->GetStaticMethodID(g_gfx_host_class, "setSourceVisible", "(JZ)V");
-    g_mid_gfx_open_panel = env->GetStaticMethodID(g_gfx_host_class, "openControlPanel", "(Ljava/lang/String;)V");
-    g_mid_gfx_get_state = env->GetStaticMethodID(g_gfx_host_class, "getStateJsonStatic", "()Ljava/lang/String;");
-    g_mid_gfx_exec = env->GetStaticMethodID(g_gfx_host_class, "executeActionJsonStatic", "(Ljava/lang/String;)Ljava/lang/String;");
-    g_mid_gfx_books = env->GetStaticMethodID(g_gfx_host_class, "getBibleBooksJson", "()Ljava/lang/String;");
-    g_mid_gfx_search = env->GetStaticMethodID(g_gfx_host_class, "searchBibleJsonStatic", "(Ljava/lang/String;)Ljava/lang/String;");
-    if (env->ExceptionCheck()) env->ExceptionClear();
+    auto get_mid = [&](const char *name, const char *sig) -> jmethodID {
+        jmethodID m = env->GetStaticMethodID(g_gfx_host_class, name, sig);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            return nullptr;
+        }
+        return m;
+    };
+    g_mid_gfx_update = get_mid("createOrUpdate", "(JLjava/lang/String;Ljava/lang/String;II)V");
+    g_mid_gfx_destroy = get_mid("destroy", "(J)V");
+    g_mid_gfx_set_visible = get_mid("setSourceVisible", "(JZ)V");
+    g_mid_gfx_open_panel = get_mid("openControlPanel", "(Ljava/lang/String;)V");
+    g_mid_gfx_get_state = get_mid("getStateJsonStatic", "()Ljava/lang/String;");
+    g_mid_gfx_exec = get_mid("executeActionJsonStatic", "(Ljava/lang/String;)Ljava/lang/String;");
+    g_mid_gfx_books = get_mid("getBibleBooksJson", "()Ljava/lang/String;");
+    g_mid_gfx_search = get_mid("searchBibleJsonStatic", "(Ljava/lang/String;)Ljava/lang/String;");
 }
 
 static bool call_gfx_string(jmethodID mid, const char *arg, char *out_buf, size_t out_cap)
@@ -1226,44 +1264,20 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_bible_search(
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_obsandroid_port_NativeBridge_pushGraphicsFrame(
-    JNIEnv *env, jclass, jlong id, jobject rgbaBuf, jint width, jint height, jlong timestampNs)
+    JNIEnv *env, jclass, jlong id, jobject rgbaBuf, jint width, jint height, jlong)
 {
     AndroidCallbackScope callback;
-    if (!callback) return ;
+    if (!callback) return;
     if (!rgbaBuf || width <= 0 || height <= 0) return;
     auto *bytes = static_cast<uint8_t *>(env->GetDirectBufferAddress(rgbaBuf));
     jlong cap = env->GetDirectBufferCapacity(rgbaBuf);
     int64_t expected = int64_t(width) * int64_t(height) * 4;
     if (!bytes || cap < expected) return;
 
-    obs_source_t *src = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_gfx_mutex);
-        auto it = g_gfx_instances.find(int64_t(id));
-        if (it != g_gfx_instances.end() && it->second && it->second->source) {
-            src = obs_source_get_ref(it->second->source);
-        }
+    // Submit premultiplied Android Bitmap RGBA directly to GPU AndroidRgbaFrame (zero CPU un-premultiply loop)
+    std::lock_guard<std::mutex> lock(g_gfx_mutex);
+    auto it = g_gfx_instances.find(int64_t(id));
+    if (it != g_gfx_instances.end() && it->second) {
+        it->second->frame.submit(bytes, uint32_t(width), uint32_t(height), uint32_t(width) * 4, true);
     }
-    if (!src) return;
-
-    // Canvas stores premultiplied RGBA. The async source applies alpha to straight RGBA.
-    for (int64_t offset = 0; offset < expected; offset += 4) {
-        auto *pixel = bytes + offset;
-        const unsigned alpha = pixel[3];
-        if (alpha == 0 || alpha == 255) continue;
-        for (int channel = 0; channel < 3; ++channel) {
-            pixel[channel] = uint8_t(std::min(255u, (pixel[channel] * 255u + alpha / 2) / alpha));
-        }
-    }
-
-    obs_source_frame frame{};
-    frame.format = VIDEO_FORMAT_RGBA;
-    frame.width = uint32_t(width);
-    frame.height = uint32_t(height);
-    frame.data[0] = bytes;
-    frame.linesize[0] = uint32_t(width) * 4;
-    frame.timestamp = uint64_t(timestampNs);
-    video_format_get_parameters(VIDEO_CS_SRGB, VIDEO_RANGE_FULL, frame.color_matrix, frame.color_range_min, frame.color_range_max);
-    obs_source_output_video(src, &frame);
-    obs_source_release(src);
 }

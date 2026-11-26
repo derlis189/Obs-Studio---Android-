@@ -127,7 +127,7 @@ bool on_vt_mode_modified(obs_properties_t *props, obs_property_t *, obs_data_t *
     for (const char *k : {"veadomini_file", "veadomini_state", "png_idle", "png_talk", "png_blink", "png_blink_talk", "png_bounce"}) {
         if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, is_png);
     }
-    for (const char *k : {"live2d_info", "live2d_file"}) {
+    for (const char *k : {"live2d_info", "install_cubism", "live2d_file"}) {
         if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, is_l2d);
     }
     for (const char *k : {"vrm_info", "vrm_file", "vrm_cam_dist", "vrm_cam_y"}) {
@@ -172,8 +172,9 @@ obs_properties_t *vtuber_get_properties(void *data)
     obs_properties_add_bool(props, "png_bounce", "Rebote suave al hablar");
 
     obs_properties_add_text(props, "live2d_info",
-        "Live2D Cubism Core ya viene integrado. Selecciona el archivo .zip completo del modelo (recomendado, incluye .moc3 y texturas .png) o un .model3.json.",
+        "Por licencia, importa una vez live2dcubismcore.min.js con el botón de abajo y luego selecciona el .zip completo del modelo (o .model3.json).",
         OBS_TEXT_INFO);
+    obs_properties_add_button(props, "install_cubism", "Importar Live2D Cubism Core (live2dcubismcore.min.js)...", on_install_cubism_clicked);
     obs_properties_add_path(props, "live2d_file", "Modelo Live2D (.zip / .model3.json / .moc3)", OBS_PATH_FILE, "Todos los archivos (*);;Live2D (*.zip *.json *.moc3)", nullptr);
 
     obs_properties_add_text(props, "vrm_info",

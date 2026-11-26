@@ -4,6 +4,7 @@
 #include <graphics/vec3.h>
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace {
 
@@ -88,6 +89,7 @@ technique Draw
 )EFFECT";
 
 struct VmixColorFilter {
+	std::mutex mutex;
 	obs_source_t *context = nullptr;
 	gs_effect_t *effect = nullptr;
 
@@ -135,32 +137,35 @@ void vmix_color_update(void *data, obs_data_t *settings)
 	const float gain_g = float(obs_data_get_double(settings, "gain_g"));
 	const float gain_b = float(obs_data_get_double(settings, "gain_b"));
 
-	f->lift_rgb.x = std::clamp(lift_r + lift_y, -1.0f, 1.0f);
-	f->lift_rgb.y = std::clamp(lift_g + lift_y, -1.0f, 1.0f);
-	f->lift_rgb.z = std::clamp(lift_b + lift_y, -1.0f, 1.0f);
+	const float gy = std::clamp(gain_y, 0.0f, 3.0f);
+	const float hue_deg = float(obs_data_get_double(settings, "hue"));
+	const float hue_rad = hue_deg * 3.1415926535f / 180.0f;
+	const float sat = std::clamp(1.0f + float(obs_data_get_double(settings, "saturation")), 0.0f, 3.0f);
+	const float temp = std::clamp(float(obs_data_get_double(settings, "temperature")), -1.0f, 1.0f);
+	const float tnt = std::clamp(float(obs_data_get_double(settings, "tint")), -1.0f, 1.0f);
+	const float sp = obs_data_get_bool(settings, "split_compare") ? 0.5f : 0.0f;
 
 	auto to_inv_gamma = [](float g) {
 		float val = std::clamp(1.0f + g, 0.15f, 4.0f);
 		return 1.0f / val;
 	};
+
+	std::lock_guard<std::mutex> lock(f->mutex);
+	f->lift_rgb.x = std::clamp(lift_r + lift_y, -1.0f, 1.0f);
+	f->lift_rgb.y = std::clamp(lift_g + lift_y, -1.0f, 1.0f);
+	f->lift_rgb.z = std::clamp(lift_b + lift_y, -1.0f, 1.0f);
 	f->gamma_inv.x = to_inv_gamma(gamma_r + gamma_y);
 	f->gamma_inv.y = to_inv_gamma(gamma_g + gamma_y);
 	f->gamma_inv.z = to_inv_gamma(gamma_b + gamma_y);
-
-	const float gy = std::clamp(gain_y, 0.0f, 3.0f);
 	f->gain_rgb.x = std::clamp(gain_r * gy, 0.0f, 4.0f);
 	f->gain_rgb.y = std::clamp(gain_g * gy, 0.0f, 4.0f);
 	f->gain_rgb.z = std::clamp(gain_b * gy, 0.0f, 4.0f);
-
-	const float hue_deg = float(obs_data_get_double(settings, "hue"));
-	const float hue_rad = hue_deg * 3.1415926535f / 180.0f;
 	f->hue_cos = std::cos(hue_rad);
 	f->hue_sin = std::sin(hue_rad);
-
-	f->saturation = std::clamp(1.0f + float(obs_data_get_double(settings, "saturation")), 0.0f, 3.0f);
-	f->temperature = std::clamp(float(obs_data_get_double(settings, "temperature")), -1.0f, 1.0f);
-	f->tint = std::clamp(float(obs_data_get_double(settings, "tint")), -1.0f, 1.0f);
-	f->split_pos = obs_data_get_bool(settings, "split_compare") ? 0.5f : 0.0f;
+	f->saturation = sat;
+	f->temperature = temp;
+	f->tint = tnt;
+	f->split_pos = sp;
 }
 
 void vmix_color_get_defaults(obs_data_t *settings)
@@ -268,15 +273,30 @@ void vmix_color_render(void *data, gs_effect_t *)
 	if (!obs_source_process_filter_begin(f->context, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING))
 		return;
 
-	gs_effect_set_vec3(f->p_lift, &f->lift_rgb);
-	gs_effect_set_vec3(f->p_gamma_inv, &f->gamma_inv);
-	gs_effect_set_vec3(f->p_gain, &f->gain_rgb);
-	gs_effect_set_float(f->p_hue_cos, f->hue_cos);
-	gs_effect_set_float(f->p_hue_sin, f->hue_sin);
-	gs_effect_set_float(f->p_saturation, f->saturation);
-	gs_effect_set_float(f->p_temperature, f->temperature);
-	gs_effect_set_float(f->p_tint, f->tint);
-	gs_effect_set_float(f->p_split, f->split_pos);
+	vec3 lift_rgb, gamma_inv, gain_rgb;
+	float hue_cos, hue_sin, saturation, temperature, tint, split_pos;
+	{
+		std::lock_guard<std::mutex> lock(f->mutex);
+		lift_rgb = f->lift_rgb;
+		gamma_inv = f->gamma_inv;
+		gain_rgb = f->gain_rgb;
+		hue_cos = f->hue_cos;
+		hue_sin = f->hue_sin;
+		saturation = f->saturation;
+		temperature = f->temperature;
+		tint = f->tint;
+		split_pos = f->split_pos;
+	}
+
+	gs_effect_set_vec3(f->p_lift, &lift_rgb);
+	gs_effect_set_vec3(f->p_gamma_inv, &gamma_inv);
+	gs_effect_set_vec3(f->p_gain, &gain_rgb);
+	gs_effect_set_float(f->p_hue_cos, hue_cos);
+	gs_effect_set_float(f->p_hue_sin, hue_sin);
+	gs_effect_set_float(f->p_saturation, saturation);
+	gs_effect_set_float(f->p_temperature, temperature);
+	gs_effect_set_float(f->p_tint, tint);
+	gs_effect_set_float(f->p_split, split_pos);
 
 	obs_source_process_filter_end(f->context, f->effect, 0, 0);
 }

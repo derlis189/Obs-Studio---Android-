@@ -1,8 +1,37 @@
 # Arquitectura de OBS para Android
 
-El frontend principal es `QtObsActivity`. Qt posee el ciclo de vida de libobs y el servicio de captura gestiona los controladores y la ejecución en primer plano. El backend Android presenta a través de EGL/GLES y usa MediaCodec para H.264/AAC. El servidor local se mantiene en loopback hasta habilitar el control remoto en LAN. Web Remote y VTuber tienen credenciales separadas.
+## Arquitectura actual implementada (Qt 6.9.3 + libobs + JNI)
 
-## Diagnóstico histórico del port
+El frontend principal es `QtObsActivity` (`org.obsandroid.port`), una `QtActivity` que aloja el frontend completo de OBS compilado con **Qt 6.9.3** para Android ARM64. Qt posee el ciclo de vida de `libobs`, mientras que `CaptureService` mantiene los controladores de captura y el servicio en primer plano (`ForegroundService`) cuando hay captura, emisión, grabación, ISO, Repetición Instantánea, SRT o NDI activos.
+
+```text
+QtObsActivity (Qt 6.9.3 Frontend + Paneles táctiles)
+        │
+        ├── libobs original + backend EGL / GLES 3.2
+        │     ├── Fuentes nativas GPU: Camera2 / MediaProjection (AHardwareBuffer),
+        │     │     Browser/WebRTC & Gráficos (AndroidRgbaFrame premultiplicado),
+        │     │     VTuber (PNG / Live2D / VRM WebGL2), SRT, NDI, OMT
+        │     ├── Filtros GPU: Ruedas de color (LGG), Máscara de forma, Perspectiva 3D,
+        │     │     Quitar Fondo / Bokeh IA (PBO doble buffer asíncrono + MediaPipe)
+        │     ├── Codificadores: MediaCodec H.264 / HEVC (EGL Surface zero-copy) y AAC compartido
+        │     └── Salidas: RTMP/RTMPS, MP4, Vertical 9:16 + Backtrack, ISO Multi-fuente,
+        │           Instant Replay (ring buffer zero-copy), SRT, NDI, HDMI/Miracast
+        │
+        └── Capa Java / JNI (obs-android-jni)
+              ├── CaptureService (FGS + WakeLock + Audio hotplug)
+              ├── ThermalController (presupuesto térmico unificado Java + C++ tier 0..3)
+              ├── BrowserSourceManager (VirtualDisplay + Presentation + pool PixelCopy paralelo)
+              ├── LiveGraphicsManager (Marcador, Lower Third, Cronómetro, Biblia, Clima, Títulos)
+              ├── PtzControlManager (VISCA UDP/TCP, ONVIF SOAP + WS-Discovery, Pelco-D, Gamepad PS)
+              ├── WebRemoteServer (HTTP loopback/LAN con token + validación Host)
+              └── ExternalDisplayManager / PluginInstaller (ELF ARM64 + límites anti Zip-Slip/Zip-Bomb)
+```
+
+El servidor local `WebRemoteServer` permanece ligado a `127.0.0.1` hasta habilitar el control remoto en LAN mediante QR; Web Remote y los assets locales VTuber usan tokens separados y validación de cabecera `Host`. El cierre ordenado (`obs_android_prepare_shutdown` / `android_session_close`) y la reapertura en caliente (`NativeBridge.reopenSession`) evitan bloqueos o carreras JNI entre sesiones.
+
+---
+
+## Diagnóstico histórico del port (Fase 1)
 
 Análisis del commit fijado en `source-lock.json`. Las rutas de esta página son relativas a `upstream/obs-studio/`. `audit-phase1.ps1` vuelve a localizar los puntos críticos y guarda sus líneas reales en `out/phase1/source-evidence.json`; falla si cambian las firmas examinadas.
 

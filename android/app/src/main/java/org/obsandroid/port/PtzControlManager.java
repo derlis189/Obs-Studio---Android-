@@ -193,6 +193,7 @@ public final class PtzControlManager {
     private static void saveLocked() {
         File f = configFile();
         if (f == null) return;
+        File tmp = new File(f.getParentFile(), f.getName() + ".tmp");
         try {
             JSONObject root = new JSONObject();
             root.put("gamepadEnabled", sGamepadEnabled);
@@ -201,10 +202,18 @@ public final class PtzControlManager {
             JSONArray arr = new JSONArray();
             for (CameraConfig c : sCameras) arr.put(c.toJson());
             root.put("cameras", arr);
-            try (FileOutputStream fos = new FileOutputStream(f)) {
+            try (FileOutputStream fos = new FileOutputStream(tmp)) {
                 fos.write(root.toString(2).getBytes(StandardCharsets.UTF_8));
+                fos.getFD().sync();
+            }
+            if (!tmp.renameTo(f)) {
+                try (FileOutputStream fos = new FileOutputStream(f)) {
+                    fos.write(root.toString(2).getBytes(StandardCharsets.UTF_8));
+                }
+                tmp.delete();
             }
         } catch (Throwable t) {
+            tmp.delete();
             Log.w(TAG, "Failed to save PTZ config: " + t.getMessage());
         }
     }
@@ -272,9 +281,9 @@ public final class PtzControlManager {
                     break;
                 }
                 case "update_camera": {
-                    int idx = req.optInt("index", sActiveIndex);
                     CameraConfig updated = CameraConfig.fromJson(req);
                     synchronized (sLock) {
+                        int idx = req.optInt("index", sActiveIndex);
                         if (idx >= 0 && idx < sCameras.size()) {
                             updated.id = sCameras.get(idx).id;
                             sCameras.set(idx, updated);
@@ -286,9 +295,9 @@ public final class PtzControlManager {
                     break;
                 }
                 case "delete_camera": {
-                    int idx = req.optInt("index", sActiveIndex);
                     String removedId = null;
                     synchronized (sLock) {
+                        int idx = req.optInt("index", sActiveIndex);
                         if (idx >= 0 && idx < sCameras.size()) {
                             removedId = sCameras.get(idx).id;
                             sCameras.remove(idx);
@@ -482,6 +491,12 @@ public final class PtzControlManager {
 
         if (code == KeyEvent.KEYCODE_BUTTON_L1 || code == KeyEvent.KEYCODE_BUTTON_R1) {
             int dir = (code == KeyEvent.KEYCODE_BUTTON_R1) ? 1 : -1;
+            CameraConfig prevCam = getActiveCameraCopy();
+            if (sPadWasMoving && prevCam != null) {
+                sPadWasMoving = false;
+                sPadPan = 0f; sPadTilt = 0f; sPadZoom = 0f;
+                sNet.post(() -> doMove(prevCam, 0f, 0f, 0f));
+            }
             String switchedName = null;
             synchronized (sLock) {
                 if (!sCameras.isEmpty()) {
@@ -710,12 +725,24 @@ public final class PtzControlManager {
     private static void sendTcpBytes(CameraConfig cam, byte[] payload) throws Exception {
         Socket sock = sTcpSockets.get(cam.id);
         if (sock == null || sock.isClosed() || !sock.isConnected()) {
-            sock = new Socket();
-            sock.connect(new InetSocketAddress(cam.host, cam.port > 0 ? cam.port : 5678), 1500);
-            sock.setTcpNoDelay(true);
-            sTcpSockets.put(cam.id, sock);
+            Socket fresh = new Socket();
+            try {
+                fresh.connect(new InetSocketAddress(cam.host, cam.port > 0 ? cam.port : 5678), 1500);
+                fresh.setTcpNoDelay(true);
+                sock = fresh;
+                sTcpSockets.put(cam.id, sock);
+            } catch (Exception e) {
+                try { fresh.close(); } catch (Throwable ignored) {}
+                throw e;
+            }
         }
         try {
+            // Drain any pending VISCA/camera ACK bytes so TCP receive buffer never stalls
+            InputStream is = sock.getInputStream();
+            if (is.available() > 0) {
+                byte[] drain = new byte[Math.min(1024, is.available())];
+                is.read(drain);
+            }
             OutputStream os = sock.getOutputStream();
             os.write(payload);
             os.flush();
@@ -814,35 +841,73 @@ public final class PtzControlManager {
         }
     }
 
+    private static boolean isValidCameraEndpointUrl(String urlStr, String expectedHost) {
+        if (urlStr == null || expectedHost == null || expectedHost.isEmpty()) return false;
+        try {
+            URL u = new URL(urlStr);
+            String proto = u.getProtocol();
+            if (!"http".equalsIgnoreCase(proto) && !"https".equalsIgnoreCase(proto)) return false;
+            String h = u.getHost();
+            return h != null && h.equalsIgnoreCase(expectedHost);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static void ensureOnvifEndpoints(CameraConfig cam) throws Exception {
         if (sOnvifProfileTokens.containsKey(cam.id) && sOnvifPtzUrls.containsKey(cam.id)) return;
         String base = "http://" + cam.host + ":" + (cam.port > 0 ? cam.port : 80);
         String ptzUrl = base + "/onvif/ptz_service";
         String mediaUrl = base + "/onvif/media_service";
+        boolean capOk = false;
         try {
             String cap = sendOnvifSoap(base + "/onvif/device_service", cam.username, cam.password,
                 "<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>");
+            capOk = cap != null && !cap.isEmpty();
             Matcher mMedia = Pattern.compile("<[^>]*Media[^>]*>.*?<[^>]*XAddr[^>]*>([^<]+)</", Pattern.DOTALL).matcher(cap);
-            if (mMedia.find()) mediaUrl = mMedia.group(1).trim();
+            if (mMedia.find()) {
+                String cand = mMedia.group(1).trim();
+                if (isValidCameraEndpointUrl(cand, cam.host)) mediaUrl = cand;
+            }
             Matcher mPtz = Pattern.compile("<[^>]*PTZ[^>]*>.*?<[^>]*XAddr[^>]*>([^<]+)</", Pattern.DOTALL).matcher(cap);
-            if (mPtz.find()) ptzUrl = mPtz.group(1).trim();
+            if (mPtz.find()) {
+                String cand = mPtz.group(1).trim();
+                if (isValidCameraEndpointUrl(cand, cam.host)) ptzUrl = cand;
+            }
         } catch (Throwable ignored) {}
 
         String token = "Profile_1";
+        boolean profOk = false;
         try {
             String prof = sendOnvifSoap(mediaUrl, cam.username, cam.password, "<trt:GetProfiles/>");
             Matcher mTok = Pattern.compile("token=\"([^\"]+)\"").matcher(prof);
-            if (mTok.find()) token = mTok.group(1);
+            if (mTok.find()) {
+                token = mTok.group(1);
+                profOk = true;
+            }
         } catch (Throwable ignored) {}
 
-        sOnvifPtzUrls.put(cam.id, ptzUrl);
-        sOnvifProfileTokens.put(cam.id, token);
+        // Only cache endpoints permanently if SOAP discovery succeeded; otherwise use defaults for this call only
+        if (capOk || profOk) {
+            sOnvifPtzUrls.put(cam.id, ptzUrl);
+            sOnvifProfileTokens.put(cam.id, token);
+        }
+    }
+
+    private static String getOnvifPtzUrl(CameraConfig cam) {
+        String u = sOnvifPtzUrls.get(cam.id);
+        return u != null ? u : ("http://" + cam.host + ":" + (cam.port > 0 ? cam.port : 80) + "/onvif/ptz_service");
+    }
+
+    private static String getOnvifToken(CameraConfig cam) {
+        String t = sOnvifProfileTokens.get(cam.id);
+        return t != null ? t : "Profile_1";
     }
 
     private static void onvifContinuousMove(CameraConfig cam, float pan, float tilt, float zoom) throws Exception {
         ensureOnvifEndpoints(cam);
-        String url = sOnvifPtzUrls.get(cam.id);
-        String tok = sOnvifProfileTokens.get(cam.id);
+        String url = getOnvifPtzUrl(cam);
+        String tok = getOnvifToken(cam);
         String body = String.format(Locale.US,
             "<tptz:ContinuousMove><tptz:ProfileToken>%s</tptz:ProfileToken><tptz:Velocity>"
                 + "<tt:PanTilt x=\"%.3f\" y=\"%.3f\"/>"
@@ -855,8 +920,8 @@ public final class PtzControlManager {
 
     private static void onvifStop(CameraConfig cam) throws Exception {
         ensureOnvifEndpoints(cam);
-        String url = sOnvifPtzUrls.get(cam.id);
-        String tok = sOnvifProfileTokens.get(cam.id);
+        String url = getOnvifPtzUrl(cam);
+        String tok = getOnvifToken(cam);
         String body = "<tptz:Stop><tptz:ProfileToken>" + xmlEscape(tok)
             + "</tptz:ProfileToken><tptz:PanTilt>true</tptz:PanTilt><tptz:Zoom>true</tptz:Zoom></tptz:Stop>";
         sendOnvifSoap(url, cam.username, cam.password, body);
@@ -865,16 +930,16 @@ public final class PtzControlManager {
 
     private static void onvifHome(CameraConfig cam) throws Exception {
         ensureOnvifEndpoints(cam);
-        String url = sOnvifPtzUrls.get(cam.id);
-        String tok = sOnvifProfileTokens.get(cam.id);
+        String url = getOnvifPtzUrl(cam);
+        String tok = getOnvifToken(cam);
         sendOnvifSoap(url, cam.username, cam.password,
             "<tptz:GotoHomePosition><tptz:ProfileToken>" + xmlEscape(tok) + "</tptz:ProfileToken></tptz:GotoHomePosition>");
     }
 
     private static void onvifPreset(CameraConfig cam, int num, boolean save) throws Exception {
         ensureOnvifEndpoints(cam);
-        String url = sOnvifPtzUrls.get(cam.id);
-        String tok = sOnvifProfileTokens.get(cam.id);
+        String url = getOnvifPtzUrl(cam);
+        String tok = getOnvifToken(cam);
         String pTok = String.valueOf(num);
         if (save) {
             sendOnvifSoap(url, cam.username, cam.password,
@@ -915,12 +980,17 @@ public final class PtzControlManager {
                     DatagramPacket resp = new DatagramPacket(buf, buf.length);
                     sock.receive(resp);
                     String xml = new String(resp.getData(), 0, resp.getLength(), StandardCharsets.UTF_8);
-                    String ip = resp.getAddress().getHostAddress();
+                    InetAddress sender = resp.getAddress();
+                    if (sender == null || sender.isLoopbackAddress() || sender.isMulticastAddress()) continue;
+                    // Use the actual UDP packet sender IP (prevent spoofed XML IPs)
+                    String ip = sender.getHostAddress();
                     int port = 80;
-                    Matcher m = Pattern.compile("http://([0-9.]+)(?::([0-9]+))?/onvif").matcher(xml);
-                    if (m.find()) {
-                        ip = m.group(1);
-                        if (m.group(2) != null) port = Integer.parseInt(m.group(2));
+                    Matcher m = Pattern.compile("http://([0-9.]+)(?::([0-9]{1,5}))?/onvif").matcher(xml);
+                    if (m.find() && m.group(2) != null) {
+                        try {
+                            int p = Integer.parseInt(m.group(2));
+                            if (p >= 1 && p <= 65535) port = p;
+                        } catch (NumberFormatException ignored) {}
                     }
                     String key = ip + ":" + port;
                     if (!seenHosts.contains(key)) {

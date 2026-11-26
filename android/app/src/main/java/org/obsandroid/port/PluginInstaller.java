@@ -112,7 +112,7 @@ public final class PluginInstaller {
 
     private static void markReadOnlyBinary(File f) {
         try {
-            f.setReadable(true, false);
+            f.setReadable(true, true);
             f.setExecutable(true, true);
             f.setWritable(false, false);
         } catch (Throwable ignored) {}
@@ -278,13 +278,20 @@ public final class PluginInstaller {
         if (!dataDir.isDirectory()) dataDir.mkdirs();
 
         File dstBin = new File(pluginDir, "lib" + pluginName + ".so");
-        String canonicalData = dataDir.getCanonicalPath();
+        String canonicalDataPrefix = dataDir.getCanonicalPath() + File.separator;
+        final int MAX_ENTRIES = 1000;
+        final long MAX_TOTAL_BYTES = 256L * 1024L * 1024L;
 
         // Second pass: extract primary .so and data/ assets safely
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
             ZipEntry entry;
             byte[] buf = new byte[65536];
+            int entries = 0;
+            long totalBytes = 0;
             while ((entry = zis.getNextEntry()) != null) {
+                if (++entries > MAX_ENTRIES) {
+                    return "ERR\tEl archivo .zip contiene demasiados elementos.";
+                }
                 String name = entry.getName().replace('\\', '/');
                 if (entry.isDirectory() || name.contains("..")) continue;
 
@@ -303,7 +310,7 @@ public final class PluginInstaller {
                     }
                 }
                 if (target == null) continue;
-                if (!isPrimaryBin && !target.getCanonicalPath().startsWith(canonicalData)) continue;
+                if (!isPrimaryBin && !target.getCanonicalPath().startsWith(canonicalDataPrefix)) continue;
 
                 File parent = target.getParentFile();
                 if (parent != null && !parent.isDirectory()) parent.mkdirs();
@@ -314,6 +321,10 @@ public final class PluginInstaller {
                 try (FileOutputStream out = new FileOutputStream(target)) {
                     int n;
                     while ((n = zis.read(buf)) != -1) {
+                        totalBytes += n;
+                        if (totalBytes > MAX_TOTAL_BYTES) {
+                            return "ERR\tEl archivo .zip excede el tamaño máximo permitido (256 MB).";
+                        }
                         out.write(buf, 0, n);
                     }
                 }

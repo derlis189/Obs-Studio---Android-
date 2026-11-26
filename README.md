@@ -4,7 +4,23 @@ Base oficial fijada: [`obsproject/obs-studio`](https://github.com/obsproject/obs
 
 El proyecto compila el **libobs original completo** para Android ARM64 y adapta su backend OpenGL a EGL/GLES 3.2. La aplicación JNI utiliza escenas, fuentes, mezcla de audio y transiciones originales. El checkout oficial permanece sin modificaciones en `upstream/`; los parches se aplican en `out/src/obs-studio`.
 
-El APK experimental abre el frontend Qt y admite edición de escenas, Program/Preview, grabación, salidas RTMP y SRT, fuentes Android, gráficos, VTuber y control remoto. Las pruebas históricas y sus límites están en los informes por fase. Las compilaciones locales requieren Android ARM64 con EGL/GLES 3.2.
+El APK experimental abre el frontend Qt 6.9.3 y admite edición de escenas, Modo Estudio (Program/Preview), grabación MP4/ISO, Repetición Instantánea, salidas RTMP/SRT/NDI/HDMI, llamadas WebRTC con invitados, Control PTZ (VISCA/ONVIF/Pelco-D + mando PlayStation), fuentes Android, gráficos animados, VTuber, quita-fondos IA GPU y control remoto web. Las compilaciones locales requieren Android ARM64 con EGL/GLES 3.2.
+
+## Módulos de producción en vivo (`Herramientas`)
+
+El menú **Herramientas** está organizado en 4 categorías:
+
+- **Producción en Vivo:**
+  - **Llamadas e Invitados en Vivo (WebRTC):** sala automática en 1 toque (QR / WhatsApp) o invitados individuales con renderizado GPU paralelo y disposiciones automáticas (`Pantalla completa`, `Lado a lado 640×720`, `Cuadrícula 2×2`, `PIP`).
+  - **Generador Avanzado de Títulos Animados:** motor 30 FPS en GPU (`AndroidRgbaFrame`) con 8 plantillas, 7 animaciones de entrada, 4 de salida, shimmer, ticker y presets.
+  - **Control de Gráficos:** Marcador Deportivo, Lower Third, Cronómetro/Temporizador, Biblia RV1909 offline y fuente **Fecha, Hora y Clima** (Open-Meteo, 6 diseños, auto-tamaño horizontal/vertical).
+  - **Control PTZ:** VISCA sobre IP (UDP/TCP), ONVIF Profile S (SOAP + WS-Discovery), Pelco-D y soporte nativo para mando **PlayStation DualShock 4 / DualSense** (Bluetooth/USB).
+  - **Captura Vertical 9:16 y Backtrack:** lienzo 9:16 independiente con emisión, grabación y clips instantáneos.
+  - **Grabación ISO (Multi-fuente):** hasta 4 pistas MP4 independientes con codificador AAC compartido.
+  - **Repetición Instantánea (Instant Replay):** ring buffer de hasta 60 s con recorte MP4 y reproducción en cámara lenta al aire.
+- **Salidas y Red:** Salida SRT (Caller/Listener Wi-Fi o datos móviles), Salida NDI en red, Salida HDMI / Pantalla Wi-Fi (Miracast) y Control Remoto Web (QR en puerto 4455).
+- **Audio y Color:** Audio Pro (cadena de voz limpia en 1 toque), Ruedas de color (LGG) y filtro GPU Quitar Fondo / Bokeh IA (con PBO doble asíncrono).
+- **Sistema y Seguridad:** Modo Directo Seguro (bloqueo táctil en vivo), Botón flotante de escenas, Diagnóstico de rendimiento/térmica, Respaldar / Restaurar configuración (`.zip` con redacción automática de claves RTMP/SRT/PTZ) y Recuperar paneles en pantalla.
 
 ## Compilar y probar el port actual
 
@@ -49,7 +65,7 @@ La compilación opcional incorpora la fuente y la salida de [OMT para OBS](https
 - La salida RTMP desde **Transmitir desde libobs** permite AAC estéreo a 128–320 kbps en pasos de 32. Se valida el formato contra los codificadores AAC del teléfono antes de iniciar; si el teléfono no anuncia soporte para la tasa elegida, selecciona una menor. Una tasa mayor aumenta el uso de datos y no garantiza por sí sola una mejora audible.
 - Para Control Remoto, abre su diálogo QR desde Herramientas y conecta el navegador en la misma red al puerto TCP 4455. El diálogo permite volver a desactivar el acceso LAN. Usa una red de confianza, ya que el transporte es HTTP.
 - Para descubrir NDI, el teléfono y los emisores deben compartir una red que permita mDNS en UDP 5353. Importa el runtime ARM64 por separado desde el selector de la aplicación.
-- Para enviar el Programa por NDI, abre **Herramientas → Salida NDI en red…**, asigna el nombre visible y pulsa **Iniciar salida**. La función transmite video RGBA y audio estéreo. El runtime ARM64 importado debe incluir `NDIlib_send_create`, `NDIlib_send_send_video_v2` y `NDIlib_send_send_audio_v2`; un runtime únicamente receptor no basta. La salida se detiene desde ese mismo diálogo.
+- Para enviar el Programa por NDI, abre **Herramientas → Salidas y Red → Salida NDI en red…**, asigna el nombre visible y pulsa **Iniciar salida**. La función transmite video RGBA y audio estéreo. El runtime ARM64 importado debe incluir `NDIlib_send_create`, `NDIlib_send_send_video_v2` y `NDIlib_send_send_audio_v2`; un runtime únicamente receptor no basta. La salida se detiene desde ese mismo diálogo.
 - Concede permisos de cámara, micrófono, USB y captura de pantalla al activar las fuentes correspondientes.
 
 ## Reproducir la fase 1 en PowerShell
@@ -59,7 +75,7 @@ Desde esta carpeta, con Git y el SDK/NDK indicados en [dependencias](docs/DEPEND
 ```powershell
 & .\scripts\fetch-source.ps1
 & .\scripts\bootstrap-tools.ps1
-& .\scripts\audit-phase1.ps1 -SdkRoot 'C:\Users\derli\AppData\Local\Android\Sdk'
+& .\scripts\audit-phase1.ps1 -SdkRoot $env:ANDROID_SDK_ROOT
 ```
 
 Los scripts no borran ni resetean un checkout existente. Una discrepancia de commit o una modificación local interrumpe la auditoría. `fetch-source.ps1 -VerifyOnly` comprueba las fuentes sin descargar. La primera ejecución de bootstrap descarga CMake oficial a `tools/` y verifica un SHA256 fijado; no instala herramientas globalmente.

@@ -16,8 +16,10 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern "C" void obs_android_on_recording_finished(const char *file_path);
@@ -108,25 +110,17 @@ struct IsoTrack {
 
 std::mutex g_iso_mutex;
 std::vector<IsoTrack> g_iso_tracks;
+obs_encoder_t *g_iso_shared_aenc = nullptr;
 int64_t g_iso_start_ms = 0;
 
-void release_iso_track(IsoTrack &tr)
+void release_iso_track_cleanup(IsoTrack &tr, std::vector<std::string> *finished_out)
 {
-    std::string finished_path;
     if (tr.output) {
-        if (obs_output_active(tr.output)) {
-            obs_output_stop(tr.output);
-            // Brief wait for muxer trailer flush (max 1.5s)
-            for (int i = 0; i < 30 && obs_output_active(tr.output); ++i) {
-                os_sleep_ms(50);
-            }
-            if (obs_output_active(tr.output)) {
-                obs_output_force_stop(tr.output);
-            }
-        }
         obs_output_release(tr.output);
         tr.output = nullptr;
-        finished_path = tr.file_path;
+        if (tr.active && !tr.file_path.empty() && finished_out) {
+            finished_out->push_back(tr.file_path);
+        }
     }
     if (tr.v_enc) { obs_encoder_release(tr.v_enc); tr.v_enc = nullptr; }
     if (tr.a_enc) { obs_encoder_release(tr.a_enc); tr.a_enc = nullptr; }
@@ -140,9 +134,41 @@ void release_iso_track(IsoTrack &tr)
     }
     if (tr.scene) { obs_scene_release(tr.scene); tr.scene = nullptr; }
     tr.active = false;
-    if (!finished_path.empty()) {
-        obs_android_on_recording_finished(finished_path.c_str());
+}
+
+void release_iso_tracks_parallel(std::vector<IsoTrack> &tracks, std::vector<std::string> &finished_out)
+{
+    // Stop all active outputs in parallel first so we don't sleep sequentially (4 x 1.5s = 6s ANR)
+    for (auto &tr : tracks) {
+        if (tr.output && obs_output_active(tr.output)) {
+            obs_output_stop(tr.output);
+        }
     }
+    for (int i = 0; i < 30; ++i) {
+        bool any = false;
+        for (const auto &tr : tracks) {
+            if (tr.output && obs_output_active(tr.output)) { any = true; break; }
+        }
+        if (!any) break;
+        os_sleep_ms(40);
+    }
+    for (auto &tr : tracks) {
+        if (tr.output && obs_output_active(tr.output)) {
+            obs_output_force_stop(tr.output);
+        }
+        release_iso_track_cleanup(tr, &finished_out);
+    }
+    tracks.clear();
+}
+
+void release_iso_track(IsoTrack &tr)
+{
+    if (tr.output && obs_output_active(tr.output)) {
+        obs_output_stop(tr.output);
+        for (int i = 0; i < 20 && obs_output_active(tr.output); ++i) os_sleep_ms(40);
+        if (obs_output_active(tr.output)) obs_output_force_stop(tr.output);
+    }
+    release_iso_track_cleanup(tr, nullptr);
 }
 
 bool create_source_view(const char *source_name, int width, int height,
@@ -188,6 +214,12 @@ bool create_source_view(const char *source_name, int width, int height,
 
     std::string scene_id = std::string("OBS_Android_View_") + tag + "_" + sanitize_filename(source_name);
     obs_scene_t *scene = obs_scene_create_private(scene_id.c_str());
+    if (!scene) {
+        obs_view_remove(view);
+        obs_view_destroy(view);
+        obs_source_release(src);
+        return false;
+    }
     obs_sceneitem_t *item = obs_scene_add(scene, src);
     obs_source_release(src);
     if (!item) {
@@ -219,7 +251,7 @@ bool create_source_view(const char *source_name, int width, int height,
 // 2. Instant Replay Ring Buffer Engine (Program or Single Camera/Source)
 // =========================================================================
 struct ReplayPacket {
-    std::vector<uint8_t> data;
+    std::shared_ptr<const std::vector<uint8_t>> data;
     int64_t pts_us{};
     bool keyframe{};
     bool is_audio{};
@@ -237,7 +269,12 @@ struct ReplayBufferState {
     std::deque<ReplayPacket> packets;
 };
 
-ReplayBufferState *g_active_replay_state = nullptr;
+struct ReplayHolder {
+    std::shared_ptr<ReplayBufferState> state;
+};
+
+std::mutex g_active_replay_mutex;
+std::shared_ptr<ReplayBufferState> g_active_replay_state;
 
 void replay_prune_locked(ReplayBufferState &st)
 {
@@ -271,8 +308,9 @@ void replay_prune_locked(ReplayBufferState &st)
 
 void replay_encoded_packet(void *data, struct encoder_packet *pkt)
 {
-    auto *st = static_cast<ReplayBufferState *>(data);
-    if (!st || !pkt || !pkt->data || !pkt->size) return;
+    auto *holder = static_cast<ReplayHolder *>(data);
+    if (!holder || !holder->state || !pkt || !pkt->data || !pkt->size) return;
+    ReplayBufferState *st = holder->state.get();
 
     const bool is_audio = (pkt->type == OBS_ENCODER_AUDIO);
     int64_t pts_us = 0;
@@ -281,6 +319,8 @@ void replay_encoded_packet(void *data, struct encoder_packet *pkt)
     } else {
         pts_us = pkt->dts_usec;
     }
+
+    auto payload = std::make_shared<std::vector<uint8_t>>(pkt->data, pkt->data + pkt->size);
 
     std::lock_guard<std::mutex> lock(st->mutex);
     if (!is_audio && st->video_csd.empty()) {
@@ -305,7 +345,7 @@ void replay_encoded_packet(void *data, struct encoder_packet *pkt)
     }
 
     ReplayPacket rp;
-    rp.data.assign(pkt->data, pkt->data + pkt->size);
+    rp.data = std::move(payload);
     rp.pts_us = pts_us;
     rp.keyframe = !is_audio && pkt->keyframe;
     rp.is_audio = is_audio;
@@ -331,13 +371,6 @@ bool write_replay_mp4(const char *path,
     if (first_kf >= pkts.size()) return false;
 
     const int64_t base_v_pts_us = pkts[first_kf].pts_us;
-    int64_t base_a_pts_us = -1;
-    for (size_t i = first_kf; i < pkts.size(); ++i) {
-        if (pkts[i].is_audio) {
-            base_a_pts_us = pkts[i].pts_us;
-            break;
-        }
-    }
 
     int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
     if (fd < 0) return false;
@@ -384,26 +417,29 @@ bool write_replay_mp4(const char *path,
 
     for (size_t i = first_kf; i < pkts.size(); ++i) {
         const auto &p = pkts[i];
-        if (p.data.empty()) continue;
+        if (!p.data || p.data->empty()) continue;
         AMediaCodecBufferInfo info{};
         info.offset = 0;
-        info.size = int32_t(p.data.size());
+        info.size = int32_t(p.data->size());
         if (!p.is_audio) {
-            int64_t pts = std::max<int64_t>(0, p.pts_us - base_v_pts_us);
+            int64_t pts = p.pts_us - base_v_pts_us;
+            if (pts < 0) continue;
             if (pts <= last_v_us) pts = last_v_us + 1000;
             last_v_us = pts;
             info.presentationTimeUs = pts;
             info.flags = p.keyframe ? AMEDIACODEC_BUFFER_FLAG_KEY_FRAME : 0;
-            if (AMediaMuxer_writeSampleData(muxer, vtrack, p.data.data(), &info) == AMEDIA_OK) {
+            if (AMediaMuxer_writeSampleData(muxer, vtrack, p.data->data(), &info) == AMEDIA_OK) {
                 ++written_v;
             }
-        } else if (atrack >= 0 && base_a_pts_us >= 0) {
-            int64_t pts = std::max<int64_t>(0, p.pts_us - base_a_pts_us);
+        } else if (atrack >= 0) {
+            // Rebase audio against video keyframe timeline for exact A/V sync
+            int64_t pts = p.pts_us - base_v_pts_us;
+            if (pts < 0) continue;
             if (pts <= last_a_us) pts = last_a_us + 1000;
             last_a_us = pts;
             info.presentationTimeUs = pts;
             info.flags = 0;
-            if (AMediaMuxer_writeSampleData(muxer, atrack, p.data.data(), &info) == AMEDIA_OK) {
+            if (AMediaMuxer_writeSampleData(muxer, atrack, p.data->data(), &info) == AMEDIA_OK) {
                 ++written_a;
             }
         }
@@ -436,7 +472,10 @@ ReplayEngine g_replay;
 void stop_replay_locked()
 {
     if (g_replay.output) {
-        if (obs_output_active(g_replay.output)) obs_output_force_stop(g_replay.output);
+        if (obs_output_active(g_replay.output)) {
+            obs_output_force_stop(g_replay.output);
+            for (int i = 0; i < 20 && obs_output_active(g_replay.output); ++i) os_sleep_ms(20);
+        }
         obs_output_release(g_replay.output);
         g_replay.output = nullptr;
     }
@@ -465,26 +504,37 @@ void android_iso_replay_register()
     rp.encoded_audio_codecs = "aac";
     rp.get_name = [](void *) { return "Instant Replay Ring Buffer"; };
     rp.create = [](obs_data_t *settings, obs_output_t *output) -> void * {
-        auto *st = new ReplayBufferState();
+        auto st = std::make_shared<ReplayBufferState>();
         st->output = output;
         st->max_seconds = std::clamp(int(obs_data_get_int(settings, "seconds")), 5, 65);
-        g_active_replay_state = st;
-        return st;
+        {
+            std::lock_guard<std::mutex> lock(g_active_replay_mutex);
+            g_active_replay_state = st;
+        }
+        return new ReplayHolder{std::move(st)};
     };
     rp.destroy = [](void *data) {
-        auto *st = static_cast<ReplayBufferState *>(data);
-        if (g_active_replay_state == st) g_active_replay_state = nullptr;
-        delete st;
+        auto *holder = static_cast<ReplayHolder *>(data);
+        if (!holder) return;
+        std::shared_ptr<ReplayBufferState> keep = holder->state;
+        delete holder;
+        if (keep) {
+            std::lock_guard<std::mutex> lock(g_active_replay_mutex);
+            if (g_active_replay_state == keep) g_active_replay_state.reset();
+        }
     };
     rp.start = [](void *data) -> bool {
-        auto *st = static_cast<ReplayBufferState *>(data);
+        auto *holder = static_cast<ReplayHolder *>(data);
+        if (!holder || !holder->state) return false;
+        auto *st = holder->state.get();
         if (!obs_output_can_begin_data_capture(st->output, 0)) return false;
         if (!obs_output_initialize_encoders(st->output, 0)) return false;
         return obs_output_begin_data_capture(st->output, 0);
     };
     rp.stop = [](void *data, uint64_t) {
-        auto *st = static_cast<ReplayBufferState *>(data);
-        obs_output_end_data_capture(st->output);
+        auto *holder = static_cast<ReplayHolder *>(data);
+        if (!holder || !holder->state) return;
+        obs_output_end_data_capture(holder->state->output);
     };
     rp.encoded_packet = replay_encoded_packet;
     obs_register_output(&rp);
@@ -492,12 +542,14 @@ void android_iso_replay_register()
 
 void android_iso_replay_shutdown()
 {
+    std::vector<std::string> finished;
     {
         std::lock_guard<std::mutex> lock(g_iso_mutex);
-        for (auto &tr : g_iso_tracks) release_iso_track(tr);
-        g_iso_tracks.clear();
+        release_iso_tracks_parallel(g_iso_tracks, finished);
+        if (g_iso_shared_aenc) { obs_encoder_release(g_iso_shared_aenc); g_iso_shared_aenc = nullptr; }
         g_iso_start_ms = 0;
     }
+    for (const auto &p : finished) obs_android_on_recording_finished(p.c_str());
     {
         std::lock_guard<std::mutex> lock(g_replay_mutex);
         stop_replay_locked();
@@ -522,89 +574,106 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_iso_start(con
     const bool include_audio = cfg.value("includeAudio", true);
     ensure_dir_recursive(out_dir);
 
-    std::lock_guard<std::mutex> lock(g_iso_mutex);
-    for (auto &tr : g_iso_tracks) release_iso_track(tr);
-    g_iso_tracks.clear();
+    std::vector<std::string> prev_finished;
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> lock(g_iso_mutex);
+        release_iso_tracks_parallel(g_iso_tracks, prev_finished);
+        if (g_iso_shared_aenc) { obs_encoder_release(g_iso_shared_aenc); g_iso_shared_aenc = nullptr; }
 
-    const std::string ts = timestamp_str();
-    int started = 0;
-    int idx = 0;
-    for (const auto &s : cfg["sources"]) {
-        if (!s.is_string() || idx >= 4) break;
-        const std::string src_name = s.get<std::string>();
-        if (src_name.empty()) continue;
-        ++idx;
-
-        IsoTrack tr;
-        tr.source_name = src_name;
-        tr.file_path = out_dir + "/ISO_" + ts + "_" + sanitize_filename(src_name) + ".mp4";
-
-        if (!create_source_view(src_name.c_str(), width, height, tr.view, tr.video, tr.scene, tr.item, "ISO")) {
-            continue;
-        }
-
-        obs_data_t *vs = obs_data_create();
-        obs_data_set_int(vs, "bitrate", bitrate);
-        obs_data_set_int(vs, "keyint_sec", 2);
-        std::string vname = "iso_venc_" + std::to_string(idx);
-        tr.v_enc = obs_video_encoder_create("android_mediacodec_h264", vname.c_str(), vs, nullptr);
-        obs_data_release(vs);
-        if (!tr.v_enc) {
-            release_iso_track(tr);
-            continue;
-        }
-        obs_encoder_set_video(tr.v_enc, tr.video);
-
+        // Share 1 single AAC encoder across all ISO tracks to save CPU/MediaCodec instances
         if (include_audio) {
             obs_data_t *as = obs_data_create();
             obs_data_set_int(as, "bitrate", 128);
-            std::string aname = "iso_aenc_" + std::to_string(idx);
-            tr.a_enc = obs_audio_encoder_create("android_mediacodec_aac", aname.c_str(), as, 0, nullptr);
+            g_iso_shared_aenc = obs_audio_encoder_create("android_mediacodec_aac", "iso_shared_aenc", as, 0, nullptr);
             obs_data_release(as);
-            if (tr.a_enc) obs_encoder_set_audio(tr.a_enc, obs_get_audio());
+            if (g_iso_shared_aenc) obs_encoder_set_audio(g_iso_shared_aenc, obs_get_audio());
         }
 
-        obs_data_t *os = obs_data_create();
-        obs_data_set_string(os, "path", tr.file_path.c_str());
-        obs_data_set_string(os, "muxer_settings", "movflags=frag_keyframe+empty_moov+faststart");
-        std::string oname = "iso_mux_" + std::to_string(idx);
-        tr.output = obs_output_create("ffmpeg_muxer", oname.c_str(), os, nullptr);
-        obs_data_release(os);
-        if (!tr.output) {
-            release_iso_track(tr);
-            continue;
+        const std::string ts = timestamp_str();
+        int started = 0;
+        int idx = 0;
+        for (const auto &s : cfg["sources"]) {
+            if (idx >= 4) break;
+            if (!s.is_string()) continue;
+            const std::string src_name = s.get<std::string>();
+            if (src_name.empty()) continue;
+            ++idx;
+
+            IsoTrack tr;
+            tr.source_name = src_name;
+            tr.file_path = out_dir + "/ISO_" + ts + "_T" + std::to_string(idx) + "_" + sanitize_filename(src_name) + ".mp4";
+
+            if (!create_source_view(src_name.c_str(), width, height, tr.view, tr.video, tr.scene, tr.item, "ISO")) {
+                continue;
+            }
+
+            obs_data_t *vs = obs_data_create();
+            obs_data_set_int(vs, "bitrate", bitrate);
+            obs_data_set_int(vs, "keyint_sec", 2);
+            std::string vname = "iso_venc_" + std::to_string(idx);
+            tr.v_enc = obs_video_encoder_create("android_mediacodec_h264", vname.c_str(), vs, nullptr);
+            obs_data_release(vs);
+            if (!tr.v_enc) {
+                release_iso_track(tr);
+                continue;
+            }
+            obs_encoder_set_video(tr.v_enc, tr.video);
+
+            if (g_iso_shared_aenc) {
+                tr.a_enc = obs_encoder_get_ref(g_iso_shared_aenc);
+            }
+
+            obs_data_t *os = obs_data_create();
+            obs_data_set_string(os, "path", tr.file_path.c_str());
+            obs_data_set_string(os, "muxer_settings", "movflags=frag_keyframe+empty_moov+faststart");
+            std::string oname = "iso_mux_" + std::to_string(idx);
+            tr.output = obs_output_create("ffmpeg_muxer", oname.c_str(), os, nullptr);
+            obs_data_release(os);
+            if (!tr.output) {
+                release_iso_track(tr);
+                continue;
+            }
+
+            obs_output_set_video_encoder(tr.output, tr.v_enc);
+            if (tr.a_enc) obs_output_set_audio_encoder(tr.output, tr.a_enc, 0);
+
+            if (obs_output_start(tr.output)) {
+                tr.active = true;
+                g_iso_tracks.push_back(std::move(tr));
+                ++started;
+                blog(LOG_INFO, "[android-iso] Started ISO track '%s' -> '%s' (%dx%d @ %d kbps)",
+                     src_name.c_str(), g_iso_tracks.back().file_path.c_str(), width, height, bitrate);
+            } else {
+                blog(LOG_WARNING, "[android-iso] Failed to start ISO output for '%s'", src_name.c_str());
+                release_iso_track(tr);
+            }
         }
 
-        obs_output_set_video_encoder(tr.output, tr.v_enc);
-        if (tr.a_enc) obs_output_set_audio_encoder(tr.output, tr.a_enc, 0);
-
-        if (obs_output_start(tr.output)) {
-            tr.active = true;
-            g_iso_tracks.push_back(std::move(tr));
-            ++started;
-            blog(LOG_INFO, "[android-iso] Started ISO track '%s' -> '%s' (%dx%d @ %d kbps)",
-                 src_name.c_str(), g_iso_tracks.back().file_path.c_str(), width, height, bitrate);
-        } else {
-            blog(LOG_WARNING, "[android-iso] Failed to start ISO output for '%s'", src_name.c_str());
-            release_iso_track(tr);
+        if (started > 0) {
+            g_iso_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            ok = true;
+        } else if (g_iso_shared_aenc) {
+            obs_encoder_release(g_iso_shared_aenc);
+            g_iso_shared_aenc = nullptr;
         }
     }
-
-    if (started > 0) {
-        g_iso_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        return true;
-    }
-    return false;
+    for (const auto &p : prev_finished) obs_android_on_recording_finished(p.c_str());
+    return ok;
 }
 
 extern "C" __attribute__((visibility("default"))) void obs_android_iso_stop()
 {
-    std::lock_guard<std::mutex> lock(g_iso_mutex);
-    for (auto &tr : g_iso_tracks) release_iso_track(tr);
-    g_iso_tracks.clear();
-    g_iso_start_ms = 0;
-    blog(LOG_INFO, "[android-iso] Stopped all ISO recording tracks");
+    std::vector<std::string> finished;
+    {
+        std::lock_guard<std::mutex> lock(g_iso_mutex);
+        release_iso_tracks_parallel(g_iso_tracks, finished);
+        if (g_iso_shared_aenc) { obs_encoder_release(g_iso_shared_aenc); g_iso_shared_aenc = nullptr; }
+        g_iso_start_ms = 0;
+        blog(LOG_INFO, "[android-iso] Stopped all ISO recording tracks");
+    }
+    for (const auto &p : finished) obs_android_on_recording_finished(p.c_str());
 }
 
 extern "C" __attribute__((visibility("default"))) bool obs_android_iso_get_stats(char *out_buf, size_t out_cap)
@@ -717,14 +786,20 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_replay_save_c
     int w = 1280, h = 720, sr = 48000;
     std::vector<uint8_t> vcsd, acsd;
     std::vector<ReplayPacket> snap;
+    std::shared_ptr<ReplayBufferState> st_ptr;
 
     {
         std::lock_guard<std::mutex> rlock(g_replay_mutex);
-        if (!g_replay.output || !obs_output_active(g_replay.output) || !g_active_replay_state) {
+        if (!g_replay.output || !obs_output_active(g_replay.output)) {
             return false;
         }
-        std::lock_guard<std::mutex> plock(g_active_replay_state->mutex);
-        auto &st = *g_active_replay_state;
+        std::lock_guard<std::mutex> alock(g_active_replay_mutex);
+        st_ptr = g_active_replay_state;
+    }
+    if (!st_ptr) return false;
+    {
+        std::lock_guard<std::mutex> plock(st_ptr->mutex);
+        auto &st = *st_ptr;
         if (st.packets.empty() || st.video_csd.empty()) return false;
 
         w = st.width;
@@ -768,13 +843,25 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_replay_get_st
 {
     if (!out_buf || out_cap == 0) return false;
     out_buf[0] = '\0';
-    std::lock_guard<std::mutex> rlock(g_replay_mutex);
-    bool active = g_replay.output && obs_output_active(g_replay.output) && g_active_replay_state;
+    bool active = false;
+    std::string src_name;
+    int max_sec = 30;
+    std::shared_ptr<ReplayBufferState> st_ptr;
+    {
+        std::lock_guard<std::mutex> rlock(g_replay_mutex);
+        src_name = g_replay.source_name.empty() ? "__PROGRAM__" : g_replay.source_name;
+        max_sec = g_replay.max_seconds;
+        if (g_replay.output && obs_output_active(g_replay.output)) {
+            std::lock_guard<std::mutex> alock(g_active_replay_mutex);
+            st_ptr = g_active_replay_state;
+            active = (st_ptr != nullptr);
+        }
+    }
     double buffered_sec = 0.0;
     size_t pkt_count = 0;
-    if (active) {
-        std::lock_guard<std::mutex> plock(g_active_replay_state->mutex);
-        const auto &pkts = g_active_replay_state->packets;
+    if (active && st_ptr) {
+        std::lock_guard<std::mutex> plock(st_ptr->mutex);
+        const auto &pkts = st_ptr->packets;
         pkt_count = pkts.size();
         int64_t first_v = -1, last_v = -1;
         for (const auto &p : pkts) {
@@ -789,8 +876,8 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_replay_get_st
     }
     nlohmann::json j = {
         {"active", active},
-        {"source", g_replay.source_name.empty() ? "__PROGRAM__" : g_replay.source_name},
-        {"maxSec", g_replay.max_seconds},
+        {"source", src_name},
+        {"maxSec", max_sec},
         {"bufferedSec", buffered_sec},
         {"packets", int64_t(pkt_count)}
     };
