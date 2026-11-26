@@ -78,10 +78,12 @@ public final class WebRemoteServer {
         }
         SharedPreferences prefs = sAppCtx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         sPort = prefs.getInt(KEY_PORT, DEFAULT_PORT);
-        sToken = prefs.getString(KEY_TOKEN, "");
-        if (sToken == null || sToken.length() < 32) {
+        // Ephemeral per-session LAN token: clear any legacy persisted token and rotate when LAN opens
+        if (prefs.contains(KEY_TOKEN)) {
+            prefs.edit().remove(KEY_TOKEN).apply();
+        }
+        if (lan || sToken == null || sToken.length() < 32) {
             sToken = generateToken();
-            prefs.edit().putString(KEY_TOKEN, sToken).apply();
         }
         try {
             ServerSocket listener = new ServerSocket(sPort, 32,
@@ -147,10 +149,6 @@ public final class WebRemoteServer {
 
     public static synchronized String regenerateToken() {
         sToken = generateToken();
-        if (sAppCtx != null) {
-            sAppCtx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putString(KEY_TOKEN, sToken).apply();
-        }
         return getRemoteUrl();
     }
 

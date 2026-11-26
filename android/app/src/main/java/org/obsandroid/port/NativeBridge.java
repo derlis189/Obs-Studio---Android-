@@ -29,6 +29,7 @@ final class NativeBridge {
     static native void onDirectoryPicked(long requestId, String path);
     static native void pushBrowserAudio(long id, byte[] pcm, int channels, int sampleRate, long timestamp);
     static native boolean pushBrowserBitmap(long instanceId, android.graphics.Bitmap bitmap);
+    static native boolean pushBrowserHardwareBuffer(long instanceId, android.hardware.HardwareBuffer buffer, int width, int height);
     static native boolean pushVtuberArray(long id, byte[] bytes, int offset, int width, int height, boolean flip);
     static native boolean pushVtuberBitmap(long instanceId, android.graphics.Bitmap bitmap);
     static native void pushBrowserFrame(long instanceId, java.nio.ByteBuffer rgba, int width, int height, long timestampNs);

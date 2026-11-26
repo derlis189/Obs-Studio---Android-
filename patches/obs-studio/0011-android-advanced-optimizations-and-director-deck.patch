@@ -1,0 +1,835 @@
+diff --git a/frontend/utility/android-tools.cpp b/frontend/utility/android-tools.cpp
+index ee25df2..0a0dd62 100644
+--- a/frontend/utility/android-tools.cpp
++++ b/frontend/utility/android-tools.cpp
+@@ -24,6 +24,7 @@
+ #include <QAction>
+ #include <QApplication>
+ #include <QButtonGroup>
++#include <QColorDialog>
+ #include <QComboBox>
+ #include <QCheckBox>
+ #include <QCoreApplication>
+@@ -85,6 +86,7 @@
+ #include <map>
+ #include <mutex>
+ #include <string>
++#include <thread>
+ #include <vector>
+ 
+ #ifdef __ANDROID__
+@@ -5578,7 +5580,7 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 		}
+ 	};
+ 
+-	auto copyConfigToDir = [&](const QString &dst) -> bool {
++	auto copyConfigToDir = [obsCfgRoot, redactJsonSecrets](const QString &dst) -> bool {
+ 		QDir().mkpath(dst);
+ 		bool ok = true;
+ 		if (QDir(obsCfgRoot + "/basic").exists())
+@@ -5603,6 +5605,20 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 		return ok;
+ 	};
+ 
++	auto setBusy = [btnCreate, btnExportZip, btnRestore, btnClose, statusLbl](bool busy, const QString &msg = QString()) {
++		btnCreate->setEnabled(!busy);
++		btnExportZip->setEnabled(!busy);
++		btnRestore->setEnabled(!busy);
++		btnClose->setEnabled(!busy);
++		if (!msg.isEmpty()) {
++			statusLbl->setStyleSheet(QStringLiteral("color: #60a5fa; font-weight: bold;"));
++			statusLbl->setText(msg);
++		}
++	};
++
++	QPointer<QDialog> dlgPtr(&dlg);
++	QPointer<QLabel> statusPtr(statusLbl);
++
+ 	QObject::connect(btnCreate, &QPushButton::clicked, &dlg, [&]() {
+ 		if (obsCfgRoot.isEmpty())
+ 			return;
+@@ -5611,12 +5627,22 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 			QStringLiteral("OBS_Backup_%1")
+ 				.arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")));
+ 		const QString dst = backupRoot + "/" + folderName;
+-		bool ok = copyConfigToDir(dst);
+-		refreshBackups();
+-		statusLbl->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
+-					    : QStringLiteral("color: #f59e0b; font-weight: bold;"));
+-		statusLbl->setText(ok ? QStringLiteral("Respaldo creado: %1").arg(folderName)
+-				      : QStringLiteral("Respaldo creado con avisos en: %1").arg(folderName));
++		setBusy(true, QStringLiteral("Creando respaldo en segundo plano..."));
++		std::thread([copyConfigToDir, dst, folderName, dlgPtr, statusPtr, &setBusy, &refreshBackups]() {
++			const bool ok = copyConfigToDir(dst);
++			if (!dlgPtr) return;
++			QMetaObject::invokeMethod(dlgPtr.data(), [dlgPtr, statusPtr, ok, folderName, &setBusy, &refreshBackups]() {
++				if (!dlgPtr) return;
++				setBusy(false);
++				refreshBackups();
++				if (statusPtr) {
++					statusPtr->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
++								    : QStringLiteral("color: #f59e0b; font-weight: bold;"));
++					statusPtr->setText(ok ? QStringLiteral("Respaldo creado: %1").arg(folderName)
++							      : QStringLiteral("Respaldo creado con avisos en: %1").arg(folderName));
++				}
++			}, Qt::QueuedConnection);
++		}).detach();
+ 	});
+ 
+ 	QObject::connect(btnExportZip, &QPushButton::clicked, &dlg, [&]() {
+@@ -5628,21 +5654,31 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 				.arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")));
+ 		const QString stageDir = obsCfgRoot + "/.zip_stage_" + baseName;
+ 		const QString zipPath = backupRoot + "/" + baseName + ".zip";
+-		QDir(stageDir).removeRecursively();
+-		copyConfigToDir(stageDir);
+-		bool ok = false;
+-		if (void *jni = FindAndroidJni()) {
+-			using ZipFn = bool (*)(const char *, const char *);
+-			if (auto fn = reinterpret_cast<ZipFn>(dlsym(jni, "obs_android_zip_directory"))) {
+-				ok = fn(stageDir.toUtf8().constData(), zipPath.toUtf8().constData());
++		setBusy(true, QStringLiteral("Comprimiendo respaldo .zip en segundo plano..."));
++		std::thread([copyConfigToDir, stageDir, zipPath, baseName, dlgPtr, statusPtr, &setBusy, &refreshBackups]() {
++			QDir(stageDir).removeRecursively();
++			copyConfigToDir(stageDir);
++			bool ok = false;
++			if (void *jni = FindAndroidJni()) {
++				using ZipFn = bool (*)(const char *, const char *);
++				if (auto fn = reinterpret_cast<ZipFn>(dlsym(jni, "obs_android_zip_directory"))) {
++					ok = fn(stageDir.toUtf8().constData(), zipPath.toUtf8().constData());
++				}
+ 			}
+-		}
+-		QDir(stageDir).removeRecursively();
+-		refreshBackups();
+-		statusLbl->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
+-					    : QStringLiteral("color: #ef4444; font-weight: bold;"));
+-		statusLbl->setText(ok ? QStringLiteral("Archivo portátil creado: %1.zip").arg(baseName)
+-				      : QStringLiteral("No se pudo generar el archivo .zip."));
++			QDir(stageDir).removeRecursively();
++			if (!dlgPtr) return;
++			QMetaObject::invokeMethod(dlgPtr.data(), [dlgPtr, statusPtr, ok, baseName, &setBusy, &refreshBackups]() {
++				if (!dlgPtr) return;
++				setBusy(false);
++				refreshBackups();
++				if (statusPtr) {
++					statusPtr->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
++								    : QStringLiteral("color: #ef4444; font-weight: bold;"));
++					statusPtr->setText(ok ? QStringLiteral("Archivo portátil creado: %1.zip").arg(baseName)
++							      : QStringLiteral("No se pudo generar el archivo .zip."));
++				}
++			}, Qt::QueuedConnection);
++		}).detach();
+ 	});
+ 
+ 	QObject::connect(btnRestore, &QPushButton::clicked, &dlg, [&]() {
+@@ -5656,50 +5692,71 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 			    QStringLiteral("¿Restaurar '%1'? Reemplazará tus escenas y ajustes actuales.").arg(itemName),
+ 			    QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+ 			return;
+-		QString src = srcPath;
+-		QString tempUnzipDir;
+-		if (itemName.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)) {
+-			tempUnzipDir = obsCfgRoot + "/.unzip_stage";
+-			QDir(tempUnzipDir).removeRecursively();
+-			bool unzipped = false;
+-			if (void *jni = FindAndroidJni()) {
+-				using UnzipFn = bool (*)(const char *, const char *);
+-				if (auto fn = reinterpret_cast<UnzipFn>(dlsym(jni, "obs_android_unzip_to_directory"))) {
+-					unzipped = fn(srcPath.toUtf8().constData(), tempUnzipDir.toUtf8().constData());
++		setBusy(true, QStringLiteral("Restaurando respaldo en segundo plano..."));
++		const QString cfgRootCopy = obsCfgRoot;
++		std::thread([itemName, srcPath, cfgRootCopy, dlgPtr, statusPtr, &setBusy, &refreshBackups]() {
++			QString src = srcPath;
++			QString tempUnzipDir;
++			bool unzipFailed = false;
++			if (itemName.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)) {
++				tempUnzipDir = cfgRootCopy + "/.unzip_stage";
++				QDir(tempUnzipDir).removeRecursively();
++				bool unzipped = false;
++				if (void *jni = FindAndroidJni()) {
++					using UnzipFn = bool (*)(const char *, const char *);
++					if (auto fn = reinterpret_cast<UnzipFn>(dlsym(jni, "obs_android_unzip_to_directory"))) {
++						unzipped = fn(srcPath.toUtf8().constData(), tempUnzipDir.toUtf8().constData());
++					}
++				}
++				if (!unzipped) {
++					QDir(tempUnzipDir).removeRecursively();
++					unzipFailed = true;
++				} else {
++					src = tempUnzipDir;
+ 				}
+ 			}
+-			if (!unzipped) {
+-				QDir(tempUnzipDir).removeRecursively();
+-				statusLbl->setStyleSheet(QStringLiteral("color: #ef4444; font-weight: bold;"));
+-				statusLbl->setText(QStringLiteral("No se pudo descomprimir %1.").arg(itemName));
+-				return;
++			bool ok = !unzipFailed;
++			if (!unzipFailed) {
++				if (QDir(src + "/basic").exists())
++					ok = CopyDirRecursive(src + "/basic", cfgRootCopy + "/basic") && ok;
++				if (QDir(src + "/vertical").exists())
++					CopyDirRecursive(src + "/vertical", cfgRootCopy + "/vertical");
++				if (QDir(src + "/overlay-media").exists())
++					CopyDirRecursive(src + "/overlay-media", cfgRootCopy + "/overlay-media");
++				QDir srcDir(src);
++				const auto files = srcDir.entryInfoList(QStringList{"*.ini", "*.json"}, QDir::Files);
++				for (const QFileInfo &fi : files) {
++					const QString dstFile = cfgRootCopy + "/" + fi.fileName();
++					if (QFile::exists(dstFile))
++						QFile::remove(dstFile);
++					QFile::copy(fi.absoluteFilePath(), dstFile);
++				}
++				if (!tempUnzipDir.isEmpty())
++					QDir(tempUnzipDir).removeRecursively();
+ 			}
+-			src = tempUnzipDir;
+-		}
+-		bool ok = true;
+-		if (QDir(src + "/basic").exists())
+-			ok = CopyDirRecursive(src + "/basic", obsCfgRoot + "/basic") && ok;
+-		if (QDir(src + "/vertical").exists())
+-			CopyDirRecursive(src + "/vertical", obsCfgRoot + "/vertical");
+-		if (QDir(src + "/overlay-media").exists())
+-			CopyDirRecursive(src + "/overlay-media", obsCfgRoot + "/overlay-media");
+-		QDir srcDir(src);
+-		const auto files = srcDir.entryInfoList(QStringList{"*.ini", "*.json"}, QDir::Files);
+-		for (const QFileInfo &fi : files) {
+-			const QString dstFile = obsCfgRoot + "/" + fi.fileName();
+-			if (QFile::exists(dstFile))
+-				QFile::remove(dstFile);
+-			QFile::copy(fi.absoluteFilePath(), dstFile);
+-		}
+-		if (!tempUnzipDir.isEmpty())
+-			QDir(tempUnzipDir).removeRecursively();
+-		SyncVerticalRuntimeFromConfig(LoadMultiConfig());
+-		SyncVerticalToCurrentMainScene();
+-		statusLbl->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
+-					    : QStringLiteral("color: #ef4444; font-weight: bold;"));
+-		statusLbl->setText(
+-			ok ? QStringLiteral("Respaldo restaurado. Cierra y vuelve a abrir OBS para cargar las escenas restauradas.")
+-			   : QStringLiteral("Error al restaurar algunos archivos del respaldo."));
++			if (!dlgPtr) return;
++			QMetaObject::invokeMethod(dlgPtr.data(), [dlgPtr, statusPtr, ok, unzipFailed, itemName, &setBusy, &refreshBackups]() {
++				if (!dlgPtr) return;
++				setBusy(false);
++				refreshBackups();
++				if (unzipFailed) {
++					if (statusPtr) {
++						statusPtr->setStyleSheet(QStringLiteral("color: #ef4444; font-weight: bold;"));
++						statusPtr->setText(QStringLiteral("No se pudo descomprimir %1.").arg(itemName));
++					}
++					return;
++				}
++				SyncVerticalRuntimeFromConfig(LoadMultiConfig());
++				SyncVerticalToCurrentMainScene();
++				if (statusPtr) {
++					statusPtr->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
++								    : QStringLiteral("color: #ef4444; font-weight: bold;"));
++					statusPtr->setText(
++						ok ? QStringLiteral("Respaldo restaurado. Cierra y vuelve a abrir OBS para cargar las escenas restauradas.")
++						   : QStringLiteral("Error al restaurar algunos archivos del respaldo."));
++				}
++			}, Qt::QueuedConnection);
++		}).detach();
+ 	});
+ 	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
+ 
+@@ -5724,7 +5781,8 @@ static nlohmann::json LoadIsoConfig()
+ 			      {"height", 720},
+ 			      {"bitrate", 4000},
+ 			      {"includeAudio", true},
+-			      {"syncMainRec", false}};
++			      {"syncMainRec", false},
++			      {"mosaic", false}};
+ 	std::ifstream f(IsoConfigFilePath());
+ 	if (f.is_open()) {
+ 		try {
+@@ -7618,8 +7676,10 @@ static QWidget *CreateIsoRecordingWidget(QWidget *parent = nullptr)
+ 	root->addLayout(optRow);
+ 
+ 	auto *cbAudio = new QCheckBox(QStringLiteral("Incluir mezcla de audio en cada archivo ISO"), rootW);
++	auto *cbMosaic = new QCheckBox(QStringLiteral("Modo Mosaico 2×2 (1 solo codificador GPU — ideal para 3–4 cámaras sin calentar)"), rootW);
+ 	auto *cbSync = new QCheckBox(QStringLiteral("Iniciar/detener automáticamente con la Grabación principal"), rootW);
+ 	root->addWidget(cbAudio);
++	root->addWidget(cbMosaic);
+ 	root->addWidget(cbSync);
+ 
+ 	auto *btnRow = new QHBoxLayout();
+@@ -7638,7 +7698,7 @@ static QWidget *CreateIsoRecordingWidget(QWidget *parent = nullptr)
+ 	root->addStretch(1);
+ 	scroll->setWidget(rootW);
+ 
+-	auto collectCfg = [srcList, cbRes, cbBr, cbAudio, cbSync]() -> nlohmann::json {
++	auto collectCfg = [srcList, cbRes, cbBr, cbAudio, cbMosaic, cbSync]() -> nlohmann::json {
+ 		nlohmann::json arr = nlohmann::json::array();
+ 		for (int i = 0; i < srcList->count(); ++i) {
+ 			auto *it = srcList->item(i);
+@@ -7654,10 +7714,11 @@ static QWidget *CreateIsoRecordingWidget(QWidget *parent = nullptr)
+ 			{"height", h},
+ 			{"bitrate", cbBr->currentData().toInt()},
+ 			{"includeAudio", cbAudio->isChecked()},
++			{"mosaic", cbMosaic->isChecked()},
+ 			{"syncMainRec", cbSync->isChecked()}};
+ 	};
+ 
+-	auto populateSources = [srcList, cbRes, cbBr, cbAudio, cbSync]() {
++	auto populateSources = [srcList, cbRes, cbBr, cbAudio, cbMosaic, cbSync]() {
+ 		const auto cfg = LoadIsoConfig();
+ 		std::vector<std::string> saved;
+ 		if (cfg.contains("sources") && cfg["sources"].is_array()) {
+@@ -7681,6 +7742,7 @@ static QWidget *CreateIsoRecordingWidget(QWidget *parent = nullptr)
+ 		int brIdx = cbBr->findData(cfg.value("bitrate", 4000));
+ 		if (brIdx >= 0) cbBr->setCurrentIndex(brIdx);
+ 		cbAudio->setChecked(cfg.value("includeAudio", true));
++		cbMosaic->setChecked(cfg.value("mosaic", false));
+ 		cbSync->setChecked(cfg.value("syncMainRec", false));
+ 	};
+ 
+@@ -7714,6 +7776,7 @@ static QWidget *CreateIsoRecordingWidget(QWidget *parent = nullptr)
+ 	};
+ 
+ 	QObject::connect(btnRefresh, &QPushButton::clicked, rootW, populateSources);
++	QObject::connect(cbMosaic, &QCheckBox::toggled, rootW, [collectCfg](bool) { SaveIsoConfig(collectCfg()); });
+ 	QObject::connect(cbSync, &QCheckBox::toggled, rootW, [collectCfg](bool) { SaveIsoConfig(collectCfg()); });
+ 	QObject::connect(btnStart, &QPushButton::clicked, rootW, [collectCfg, statusLbl, pollStats]() {
+ 		auto cfg = collectCfg();
+@@ -7725,12 +7788,27 @@ static QWidget *CreateIsoRecordingWidget(QWidget *parent = nullptr)
+ 		if (!StartIsoRecordingWithConfig(cfg)) {
+ 			statusLbl->setText(QStringLiteral("No se pudo iniciar la grabación ISO. Verifica las fuentes seleccionadas."));
+ 		} else {
++			SyncBroadcastKeepalive();
+ 			pollStats();
+ 		}
+ 	});
+-	QObject::connect(btnStop, &QPushButton::clicked, rootW, [pollStats]() {
+-		StopIsoRecordingNow();
+-		pollStats();
++	QObject::connect(btnStop, &QPushButton::clicked, rootW, [rootW, btnStart, btnStop, statusLbl, pollStats]() {
++		btnStart->setEnabled(false);
++		btnStop->setEnabled(false);
++		statusLbl->setText(QStringLiteral("Finalizando archivos ISO en segundo plano..."));
++		QPointer<QWidget> guard(rootW);
++		QPointer<QPushButton> pStart(btnStart), pStop(btnStop);
++		std::thread([guard, pStart, pStop, pollStats]() {
++			StopIsoRecordingNow();
++			if (!guard) return;
++			QMetaObject::invokeMethod(guard.data(), [guard, pStart, pStop, pollStats]() {
++				if (!guard) return;
++				if (pStart) pStart->setEnabled(true);
++				if (pStop) pStop->setEnabled(true);
++				SyncBroadcastKeepalive();
++				pollStats();
++			}, Qt::QueuedConnection);
++		}).detach();
+ 	});
+ 
+ 	auto *timer = new QTimer(scroll);
+@@ -7959,22 +8037,43 @@ static QWidget *CreateInstantReplayWidget(QWidget *parent = nullptr)
+ 		}
+ 	};
+ 
+-	auto saveClipNow = [cbClipSec, bufStatus, refreshClips]() -> QString {
++	auto saveClipAsync = [rootW, btnLaunch, btnSaveOnly, cbClipSec, bufStatus, refreshClips](bool launchOnAir, int speedPct, bool loop) {
+ 		void *jni = FindAndroidJni();
+-		if (!jni) return {};
++		if (!jni) return;
+ 		using SaveFn = bool (*)(int, const char *);
+ 		auto fn = reinterpret_cast<SaveFn>(dlsym(jni, "obs_android_replay_save_clip"));
+-		if (!fn) return {};
++		if (!fn) return;
+ 		QString dirPath = GetAndroidRecordingsRootDir() + QStringLiteral("/Replays");
+ 		QDir().mkpath(dirPath);
+ 		QString outFile = dirPath + QStringLiteral("/Replay_") +
+ 			QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")) + QStringLiteral(".mp4");
+-		if (!fn(cbClipSec->currentData().toInt(), outFile.toUtf8().constData())) {
+-			bufStatus->setText(QStringLiteral("No hay suficientes fotogramas en el búfer aún. Activa el búfer y espera 2 segundos."));
+-			return {};
+-		}
+-		refreshClips();
+-		return outFile;
++		const int clipSec = cbClipSec->currentData().toInt();
++		btnLaunch->setEnabled(false);
++		btnSaveOnly->setEnabled(false);
++		bufStatus->setText(QStringLiteral("Exportando clip de repetición en segundo plano..."));
++		QPointer<QWidget> guard(rootW);
++		QPointer<QPushButton> pLaunch(btnLaunch), pSave(btnSaveOnly);
++		QPointer<QLabel> pStatus(bufStatus);
++		std::thread([fn, clipSec, outFile, launchOnAir, speedPct, loop, guard, pLaunch, pSave, pStatus, refreshClips]() {
++			const bool ok = fn(clipSec, outFile.toUtf8().constData());
++			if (!guard) return;
++			QMetaObject::invokeMethod(guard.data(), [guard, pLaunch, pSave, pStatus, ok, outFile, launchOnAir, speedPct, loop, refreshClips]() {
++				if (!guard) return;
++				if (pLaunch) pLaunch->setEnabled(true);
++				if (pSave) pSave->setEnabled(true);
++				if (!ok) {
++					if (pStatus) pStatus->setText(QStringLiteral("No hay suficientes fotogramas en el búfer aún. Activa el búfer y espera 2 segundos."));
++					return;
++				}
++				refreshClips();
++				if (launchOnAir) {
++					LaunchReplayFileOnAir(outFile, speedPct, loop);
++					if (pStatus) pStatus->setText(QStringLiteral("REPETICIÓN AL AIRE (%1%)").arg(speedPct));
++				} else if (pStatus) {
++					pStatus->setText(QStringLiteral("Clip guardado: ") + QFileInfo(outFile).fileName());
++				}
++			}, Qt::QueuedConnection);
++		}).detach();
+ 	};
+ 
+ 	QObject::connect(btnRefSrc, &QPushButton::clicked, rootW, populateSrcs);
+@@ -7995,18 +8094,14 @@ static QWidget *CreateInstantReplayWidget(QWidget *parent = nullptr)
+ 				}
+ 			}
+ 		}
++		SyncBroadcastKeepalive();
+ 		pollStats();
+ 	});
+-	QObject::connect(btnLaunch, &QPushButton::clicked, rootW, [saveClipNow, cbSpeed, cbLoop, bufStatus]() {
+-		QString clip = saveClipNow();
+-		if (!clip.isEmpty()) {
+-			LaunchReplayFileOnAir(clip, cbSpeed->currentData().toInt(), cbLoop->isChecked());
+-			bufStatus->setText(QStringLiteral("REPETICIÓN AL AIRE (%1%)").arg(cbSpeed->currentData().toInt()));
+-		}
++	QObject::connect(btnLaunch, &QPushButton::clicked, rootW, [saveClipAsync, cbSpeed, cbLoop]() {
++		saveClipAsync(true, cbSpeed->currentData().toInt(), cbLoop->isChecked());
+ 	});
+-	QObject::connect(btnSaveOnly, &QPushButton::clicked, rootW, [saveClipNow, bufStatus]() {
+-		QString clip = saveClipNow();
+-		if (!clip.isEmpty()) bufStatus->setText(QStringLiteral("Clip guardado: ") + QFileInfo(clip).fileName());
++	QObject::connect(btnSaveOnly, &QPushButton::clicked, rootW, [saveClipAsync]() {
++		saveClipAsync(false, 100, false);
+ 	});
+ 	QObject::connect(btnHide, &QPushButton::clicked, rootW, [bufStatus]() {
+ 		HideReplayOnAir();
+@@ -8094,7 +8189,7 @@ static nlohmann::json LoadWebRtcConfig()
+ 	return cfg;
+ }
+ 
+-static obs_sceneitem_t *EnsureWebRtcGuestInScene(const QString &sourceName, const QString &viewUrl, bool setVisibility, bool visibleVal)
++static obs_sceneitem_t *EnsureWebRtcGuestInScene(const QString &sourceName, const QString &viewUrl, bool setVisibility, bool visibleVal, bool transparentBg = true)
+ {
+ 	OBSSourceAutoRelease curSceneSrc = obs_frontend_get_current_scene();
+ 	obs_scene_t *scene = curSceneSrc ? obs_scene_from_source(curSceneSrc) : nullptr;
+@@ -8121,7 +8216,7 @@ static obs_sceneitem_t *EnsureWebRtcGuestInScene(const QString &sourceName, cons
+ 		obs_data_t *upd = obs_data_create();
+ 		obs_data_set_bool(upd, "is_local_file", false);
+ 		obs_data_set_string(upd, "url", viewUrl.toUtf8().constData());
+-		obs_data_set_bool(upd, "transparent", true);
++		obs_data_set_bool(upd, "transparent", transparentBg);
+ 		obs_data_set_bool(upd, "capture_audio", true);
+ 		obs_data_set_bool(upd, "shutdown", false);
+ 		obs_source_update(src, upd);
+@@ -8133,10 +8228,12 @@ static obs_sceneitem_t *EnsureWebRtcGuestInScene(const QString &sourceName, cons
+ 		obs_data_set_int(s, "width", 1280);
+ 		obs_data_set_int(s, "height", 720);
+ 		obs_data_set_int(s, "fps", 30);
+-		obs_data_set_bool(s, "transparent", true);
++		obs_data_set_bool(s, "transparent", transparentBg);
+ 		obs_data_set_bool(s, "capture_audio", true);
+ 		obs_data_set_bool(s, "shutdown", false);
+-		obs_data_set_string(s, "css", "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
++		obs_data_set_string(s, "css",
++			transparentBg ? "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }"
++				      : "body { background-color: #000000; margin: 0px auto; overflow: hidden; }");
+ 		src = obs_source_create("browser_source", sourceName.toUtf8().constData(), s, nullptr);
+ 		obs_data_release(s);
+ 	}
+@@ -8624,7 +8721,7 @@ static QWidget *CreateWebRtcGuestsWidget(QWidget *parent = nullptr)
+ 		auto getViewUrl = [cfg, saveCfg, edName, i]() -> QString {
+ 			(*cfg)["guests"][i]["name"] = edName->text().trimmed().toStdString();
+ 			saveCfg();
+-			return QStringLiteral("%1/?room=%2&view=%3&solo&cleanoutput&autostart&transparent&cover&codec=h264&bitrate=1600")
++			return QStringLiteral("%1/?room=%2&view=%3&solo&cleanoutput&autostart&cover&codec=h264&bitrate=1600")
+ 				.arg(QString::fromStdString((*cfg)["baseUrl"].get<std::string>()))
+ 				.arg(QString::fromStdString((*cfg)["room"].get<std::string>()))
+ 				.arg(QString::fromStdString((*cfg)["guests"][i]["streamId"].get<std::string>()));
+@@ -8639,18 +8736,18 @@ static QWidget *CreateWebRtcGuestsWidget(QWidget *parent = nullptr)
+ 
+ 		QObject::connect(bInvite, &QPushButton::clicked, frame, [edName, getSrcName, getInviteUrl, getViewUrl, showQr, refreshInd, refreshAutoToggle, statusLbl]() {
+ 			SetCallModeExclusivity(false);
+-			EnsureWebRtcGuestInScene(getSrcName(), getViewUrl(), true, true);
++			EnsureWebRtcGuestInScene(getSrcName(), getViewUrl(), true, true, false);
+ 			refreshAutoToggle();
+ 			refreshInd();
+ 			showQr(QStringLiteral("Invitar a ") + edName->text(),
+ 			       QStringLiteral("Al entrar aparecerá automáticamente en su propio cuadro en OBS."),
+ 			       getInviteUrl());
+-			statusLbl->setText(QStringLiteral("%1 listo y en pantalla (modo individual, sin duplicar la sala).").arg(edName->text()));
++			statusLbl->setText(QStringLiteral("%1 listo y en pantalla (GPU zero-copy, sin duplicar la sala).").arg(edName->text()));
+ 		});
+ 		QObject::connect(bShow, &QPushButton::clicked, frame, [edName, getSrcName, getViewUrl, refreshInd, refreshAutoToggle, statusLbl]() {
+ 			const bool on = IsWebRtcGuestVisibleInCurrentScene(getSrcName());
+ 			if (!on) SetCallModeExclusivity(false);
+-			EnsureWebRtcGuestInScene(getSrcName(), getViewUrl(), true, !on);
++			EnsureWebRtcGuestInScene(getSrcName(), getViewUrl(), true, !on, false);
+ 			refreshAutoToggle();
+ 			refreshInd();
+ 			statusLbl->setText(!on ? QStringLiteral("%1 EN PANTALLA.").arg(edName->text())
+@@ -8770,6 +8867,39 @@ static QWidget *CreateAdvancedTitlesWidget(QWidget *parent = nullptr)
+ 	auto *edTicker = new QLineEdit(rootW);
+ 	auto *edAccent = new QLineEdit(QStringLiteral("#2563EB"), rootW);
+ 	auto *edBg = new QLineEdit(QStringLiteral("#0F172A"), rootW);
++	auto *btnPickAccent = new QPushButton(QStringLiteral("🎨"), rootW);
++	btnPickAccent->setFixedWidth(40);
++	auto *btnPickBg = new QPushButton(QStringLiteral("🎨"), rootW);
++	btnPickBg->setFixedWidth(40);
++	auto syncSwatch = [](QPushButton *btn, const QString &hex) {
++		QColor c(hex.trimmed());
++		if (!c.isValid()) c = QColor(QStringLiteral("#2563EB"));
++		const QString fg = (c.lightness() > 140) ? QStringLiteral("#0f172a") : QStringLiteral("#ffffff");
++		btn->setStyleSheet(QStringLiteral("background:%1; color:%2; border:1px solid #475569; border-radius:5px; padding:4px;")
++			.arg(c.name(), fg));
++	};
++	syncSwatch(btnPickAccent, edAccent->text());
++	syncSwatch(btnPickBg, edBg->text());
++	QObject::connect(edAccent, &QLineEdit::textChanged, rootW, [btnPickAccent, syncSwatch](const QString &t) { syncSwatch(btnPickAccent, t); });
++	QObject::connect(edBg, &QLineEdit::textChanged, rootW, [btnPickBg, syncSwatch](const QString &t) { syncSwatch(btnPickBg, t); });
++	QObject::connect(btnPickAccent, &QPushButton::clicked, rootW, [rootW, edAccent]() {
++		QColor cur(edAccent->text().trimmed());
++		QColor chosen = QColorDialog::getColor(cur.isValid() ? cur : QColor("#2563EB"), rootW, QStringLiteral("Color de acento"));
++		if (chosen.isValid()) edAccent->setText(chosen.name().toUpper());
++	});
++	QObject::connect(btnPickBg, &QPushButton::clicked, rootW, [rootW, edBg]() {
++		QColor cur(edBg->text().trimmed());
++		QColor chosen = QColorDialog::getColor(cur.isValid() ? cur : QColor("#0F172A"), rootW, QStringLiteral("Color de fondo"));
++		if (chosen.isValid()) edBg->setText(chosen.name().toUpper());
++	});
++	auto *accentRow = new QHBoxLayout();
++	accentRow->setSpacing(4);
++	accentRow->addWidget(edAccent, 1);
++	accentRow->addWidget(btnPickAccent);
++	auto *bgRow = new QHBoxLayout();
++	bgRow->setSpacing(4);
++	bgRow->addWidget(edBg, 1);
++	bgRow->addWidget(btnPickBg);
+ 
+ 	auto *timingRow = new QHBoxLayout();
+ 	auto *spInMs = new QSpinBox(rootW); spInMs->setRange(200, 2500); spInMs->setSingleStep(50); spInMs->setSuffix(QStringLiteral(" ms"));
+@@ -8791,8 +8921,8 @@ static QWidget *CreateAdvancedTitlesWidget(QWidget *parent = nullptr)
+ 	form->addRow(QStringLiteral("Título:"), edTitle);
+ 	form->addRow(QStringLiteral("Subtítulo:"), edSub);
+ 	form->addRow(QStringLiteral("Marquesina:"), edTicker);
+-	form->addRow(QStringLiteral("Acento (Hex):"), edAccent);
+-	form->addRow(QStringLiteral("Fondo (Hex):"), edBg);
++	form->addRow(QStringLiteral("Acento:"), accentRow);
++	form->addRow(QStringLiteral("Fondo:"), bgRow);
+ 	form->addRow(cbShimmer);
+ 	root->addLayout(form);
+ 
+@@ -8954,6 +9084,297 @@ static void OpenAdvancedTitlesDialog(QWidget *parent)
+ 	dlg.exec();
+ }
+ 
++// =========================================================================
++// 6. Director Deck (Touch-First Live Switcher >=48dp)
++// =========================================================================
++static QWidget *CreateDirectorDeckWidget(QWidget *parent = nullptr)
++{
++	auto *scroll = new QScrollArea(parent);
++	scroll->setWidgetResizable(true);
++	scroll->setFrameShape(QFrame::NoFrame);
++	QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
++
++	auto *rootW = new QWidget(scroll);
++	auto *root = new QVBoxLayout(rootW);
++	root->setContentsMargins(8, 8, 8, 8);
++	root->setSpacing(8);
++
++	auto *hdr = new QLabel(QStringLiteral("DIRECTOR DECK · Botones táctiles en vivo (≥48dp)"), rootW);
++	hdr->setStyleSheet(QStringLiteral("background:#0f172a; color:#e2e8f0; font-weight:bold; padding:8px; border-radius:6px; font-size:12px;"));
++	root->addWidget(hdr);
++
++	// Primary Broadcast Actions (all >=48px tall for one-thumb live operation)
++	auto *actGrid = new QGridLayout();
++	actGrid->setSpacing(8);
++
++	auto makeBigBtn = [rootW](const QString &label, const QString &bg) -> QPushButton * {
++		auto *b = new QPushButton(label, rootW);
++		b->setMinimumHeight(50);
++		b->setStyleSheet(QStringLiteral(
++			"QPushButton { background:%1; color:white; font-weight:bold; font-size:12px; border-radius:8px; padding:6px; }"
++			"QPushButton:pressed { opacity:0.85; }").arg(bg));
++		return b;
++	};
++
++	auto *btnStream = makeBigBtn(QStringLiteral("TRANSMITIR"), QStringLiteral("#1d4ed8"));
++	auto *btnRecord = makeBigBtn(QStringLiteral("GRABAR"), QStringLiteral("#334155"));
++	auto *btnCut = makeBigBtn(QStringLiteral("TRANSICIÓN / CORTE"), QStringLiteral("#0f766e"));
++	auto *btnReplay = makeBigBtn(QStringLiteral("REPLAY 15s (0.5x)"), QStringLiteral("#b45309"));
++	auto *btnTitle = makeBigBtn(QStringLiteral("TÍTULO AL AIRE"), QStringLiteral("#6d28d9"));
++	auto *btnMic = makeBigBtn(QStringLiteral("MIC ACTIVO"), QStringLiteral("#15803d"));
++
++	actGrid->addWidget(btnStream, 0, 0);
++	actGrid->addWidget(btnRecord, 0, 1);
++	actGrid->addWidget(btnCut, 1, 0);
++	actGrid->addWidget(btnReplay, 1, 1);
++	actGrid->addWidget(btnTitle, 2, 0);
++	actGrid->addWidget(btnMic, 2, 1);
++	root->addLayout(actGrid);
++
++	auto *sceneHdr = new QLabel(QStringLiteral("ESCENAS EN VIVO (toca para cambiar):"), rootW);
++	sceneHdr->setStyleSheet(QStringLiteral("color:#94a3b8; font-weight:bold; font-size:11px; margin-top:4px;"));
++	root->addWidget(sceneHdr);
++
++	auto *sceneHost = new QWidget(rootW);
++	auto *sceneGrid = new QGridLayout(sceneHost);
++	sceneGrid->setContentsMargins(0, 0, 0, 0);
++	sceneGrid->setSpacing(8);
++	root->addWidget(sceneHost);
++
++	auto *statusLbl = new QLabel(QStringLiteral("Listo para producción en vivo."), rootW);
++	statusLbl->setWordWrap(true);
++	statusLbl->setStyleSheet(QStringLiteral("color:#cbd5e1; font-size:11px;"));
++	root->addWidget(statusLbl);
++	root->addStretch(1);
++	scroll->setWidget(rootW);
++
++	auto findPrimaryMic = []() -> obs_source_t * {
++		obs_source_t *found = nullptr;
++		obs_enum_sources(
++			[](void *param, obs_source_t *src) {
++				auto **out = static_cast<obs_source_t **>(param);
++				if (*out) return false;
++				const char *id = obs_source_get_unversioned_id(src);
++				if (id && std::strcmp(id, "android_microphone") == 0) {
++					*out = obs_source_get_ref(src);
++					return false;
++				}
++				return true;
++			},
++			&found);
++		return found;
++	};
++
++	auto lastSceneKey = std::make_shared<QString>();
++	auto sceneButtons = std::make_shared<std::vector<std::pair<QString, QPushButton *>>>();
++
++	auto rebuildScenesIfNeeded = [sceneHost, sceneGrid, lastSceneKey, sceneButtons, statusLbl]() {
++		const auto names = GetAllObsSceneNames(false, true);
++		QString key;
++		for (const auto &n : names) key += QString::fromStdString(n) + QChar('\n');
++		if (key == *lastSceneKey) return;
++		*lastSceneKey = key;
++		sceneButtons->clear();
++		while (QLayoutItem *li = sceneGrid->takeAt(0)) {
++			if (QWidget *w = li->widget()) w->deleteLater();
++			delete li;
++		}
++		int idx = 0;
++		for (const auto &n : names) {
++			const QString qn = QString::fromStdString(n);
++			auto *b = new QPushButton(qn, sceneHost);
++			b->setMinimumHeight(52);
++			b->setStyleSheet(QStringLiteral(
++				"QPushButton { background:#1e293b; color:#f8fafc; font-weight:bold; font-size:12px; border:2px solid #334155; border-radius:8px; padding:6px; }"));
++			QObject::connect(b, &QPushButton::clicked, sceneHost, [qn, statusLbl]() {
++				OBSSourceAutoRelease s = obs_get_source_by_name(qn.toUtf8().constData());
++				if (!s) return;
++				if (obs_frontend_preview_program_mode_active()) {
++					obs_frontend_set_current_preview_scene(s);
++					statusLbl->setText(QStringLiteral("Vista previa: %1 (pulsa TRANSICIÓN para mandar al aire)").arg(qn));
++				} else {
++					obs_frontend_set_current_scene(s);
++					statusLbl->setText(QStringLiteral("En vivo: %1").arg(qn));
++				}
++			});
++			sceneGrid->addWidget(b, idx / 2, idx % 2);
++			sceneButtons->emplace_back(qn, b);
++			++idx;
++		}
++	};
++
++	auto refreshDeck = [hdr, btnStream, btnRecord, btnCut, btnTitle, btnMic, rebuildScenesIfNeeded, sceneButtons, findPrimaryMic]() {
++		rebuildScenesIfNeeded();
++		const bool live = obs_frontend_streaming_active();
++		const bool rec = obs_frontend_recording_active();
++		const bool studio = obs_frontend_preview_program_mode_active();
++
++		btnStream->setText(live ? QStringLiteral("EN VIVO · DETENER") : QStringLiteral("TRANSMITIR"));
++		btnStream->setStyleSheet(live
++			? QStringLiteral("QPushButton { background:#dc2626; color:white; font-weight:bold; font-size:12px; border-radius:8px; }")
++			: QStringLiteral("QPushButton { background:#1d4ed8; color:white; font-weight:bold; font-size:12px; border-radius:8px; }"));
++
++		btnRecord->setText(rec ? QStringLiteral("GRABANDO · DETENER") : QStringLiteral("GRABAR"));
++		btnRecord->setStyleSheet(rec
++			? QStringLiteral("QPushButton { background:#dc2626; color:white; font-weight:bold; font-size:12px; border-radius:8px; }")
++			: QStringLiteral("QPushButton { background:#334155; color:white; font-weight:bold; font-size:12px; border-radius:8px; }"));
++
++		btnCut->setText(studio ? QStringLiteral("TRANSICIÓN AL AIRE") : QStringLiteral("ACTIVAR MODO ESTUDIO"));
++
++		QString progName, prevName;
++		if (OBSSourceAutoRelease cur = obs_frontend_get_current_scene()) {
++			if (const char *nm = obs_source_get_name(cur)) progName = QString::fromUtf8(nm);
++		}
++		if (studio) {
++			if (OBSSourceAutoRelease pv = obs_frontend_get_current_preview_scene()) {
++				if (const char *nm = obs_source_get_name(pv)) prevName = QString::fromUtf8(nm);
++			}
++		}
++		for (auto &pair : *sceneButtons) {
++			const bool isProg = (!progName.isEmpty() && pair.first == progName);
++			const bool isPrev = (!isProg && !prevName.isEmpty() && pair.first == prevName);
++			if (isProg) {
++				pair.second->setStyleSheet(QStringLiteral(
++					"QPushButton { background:#16a34a; color:white; font-weight:bold; font-size:12px; border:2px solid #86efac; border-radius:8px; padding:6px; }"));
++			} else if (isPrev) {
++				pair.second->setStyleSheet(QStringLiteral(
++					"QPushButton { background:#ca8a04; color:white; font-weight:bold; font-size:12px; border:2px solid #fde047; border-radius:8px; padding:6px; }"));
++			} else {
++				pair.second->setStyleSheet(QStringLiteral(
++					"QPushButton { background:#1e293b; color:#f8fafc; font-weight:bold; font-size:12px; border:2px solid #334155; border-radius:8px; padding:6px; }"));
++			}
++		}
++
++		if (obs_source_t *mic = findPrimaryMic()) {
++			const bool muted = obs_source_muted(mic);
++			obs_source_release(mic);
++			btnMic->setText(muted ? QStringLiteral("MIC SILENCIADO") : QStringLiteral("MIC ACTIVO"));
++			btnMic->setStyleSheet(muted
++				? QStringLiteral("QPushButton { background:#b91c1c; color:white; font-weight:bold; font-size:12px; border-radius:8px; }")
++				: QStringLiteral("QPushButton { background:#15803d; color:white; font-weight:bold; font-size:12px; border-radius:8px; }"));
++		}
++
++		auto gfx = GfxGetState();
++		const bool titleOn = gfx.contains("advancedTitle") && gfx["advancedTitle"].value("onAir", false);
++		btnTitle->setText(titleOn ? QStringLiteral("TÍTULO: EN AIRE ✓") : QStringLiteral("TÍTULO AL AIRE"));
++		btnTitle->setStyleSheet(titleOn
++			? QStringLiteral("QPushButton { background:#dc2626; color:white; font-weight:bold; font-size:12px; border-radius:8px; }")
++			: QStringLiteral("QPushButton { background:#6d28d9; color:white; font-weight:bold; font-size:12px; border-radius:8px; }"));
++
++		QString badge = live ? QStringLiteral("● EN VIVO") : (rec ? QStringLiteral("● GRABANDO") : QStringLiteral("DIRECTOR DECK"));
++		if (void *jni = FindAndroidJni()) {
++			using HealthFn = bool (*)(char *, size_t);
++			if (auto fn = reinterpret_cast<HealthFn>(dlsym(jni, "obs_android_get_device_health"))) {
++				char buf[512] = {};
++				if (fn(buf, sizeof(buf)) && buf[0]) {
++					auto j = nlohmann::json::parse(buf, nullptr, false);
++					if (!j.is_discarded()) {
++						badge += QStringLiteral(" · %1°C · Bat %2%")
++							.arg(j.value("temp_c", 0.0), 0, 'f', 1)
++							.arg(j.value("battery", 0));
++					}
++				}
++			}
++		}
++		hdr->setText(badge);
++		hdr->setStyleSheet(live
++			? QStringLiteral("background:#991b1b; color:white; font-weight:bold; padding:8px; border-radius:6px; font-size:12px;")
++			: QStringLiteral("background:#0f172a; color:#e2e8f0; font-weight:bold; padding:8px; border-radius:6px; font-size:12px;"));
++	};
++
++	QObject::connect(btnStream, &QPushButton::clicked, rootW, [refreshDeck]() {
++		if (obs_frontend_streaming_active()) obs_frontend_streaming_stop();
++		else obs_frontend_streaming_start();
++		refreshDeck();
++	});
++	QObject::connect(btnRecord, &QPushButton::clicked, rootW, [refreshDeck]() {
++		if (obs_frontend_recording_active()) obs_frontend_recording_stop();
++		else obs_frontend_recording_start();
++		refreshDeck();
++	});
++	QObject::connect(btnCut, &QPushButton::clicked, rootW, [refreshDeck, statusLbl]() {
++		if (obs_frontend_preview_program_mode_active()) {
++			obs_frontend_preview_program_trigger_transition();
++			statusLbl->setText(QStringLiteral("Transición ejecutada al Programa."));
++		} else {
++			obs_frontend_set_preview_program_mode(true);
++			statusLbl->setText(QStringLiteral("Modo Estudio activado: selecciona vista previa y pulsa TRANSICIÓN."));
++		}
++		refreshDeck();
++	});
++	QObject::connect(btnReplay, &QPushButton::clicked, rootW, [rootW, btnReplay, statusLbl]() {
++		void *jni = FindAndroidJni();
++		if (!jni) return;
++		using SaveFn = bool (*)(int, const char *);
++		auto fn = reinterpret_cast<SaveFn>(dlsym(jni, "obs_android_replay_save_clip"));
++		if (!fn) return;
++		QString dirPath = GetAndroidRecordingsRootDir() + QStringLiteral("/Replays");
++		QDir().mkpath(dirPath);
++		QString outFile = dirPath + QStringLiteral("/Replay_") +
++			QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")) + QStringLiteral(".mp4");
++		btnReplay->setEnabled(false);
++		statusLbl->setText(QStringLiteral("Guardando repetición de 15s..."));
++		QPointer<QWidget> guard(rootW);
++		QPointer<QPushButton> pBtn(btnReplay);
++		QPointer<QLabel> pSt(statusLbl);
++		std::thread([fn, outFile, guard, pBtn, pSt]() {
++			const bool ok = fn(15, outFile.toUtf8().constData());
++			if (!guard) return;
++			QMetaObject::invokeMethod(guard.data(), [guard, pBtn, pSt, ok, outFile]() {
++				if (!guard) return;
++				if (pBtn) pBtn->setEnabled(true);
++				if (ok) {
++					LaunchReplayFileOnAir(outFile, 50, false);
++					if (pSt) pSt->setText(QStringLiteral("REPETICIÓN 15s (0.5x) AL AIRE"));
++				} else if (pSt) {
++					pSt->setText(QStringLiteral("Activa primero el Búfer de Repetición en Producción en Vivo."));
++				}
++			}, Qt::QueuedConnection);
++		}).detach();
++	});
++	QObject::connect(btnTitle, &QPushButton::clicked, rootW, [refreshDeck, statusLbl]() {
++		auto gfx = GfxGetState();
++		const bool curOn = gfx.contains("advancedTitle") && gfx["advancedTitle"].value("onAir", false);
++		GfxExecute({{"action", "at_update"}, {"onAir", !curOn}});
++		statusLbl->setText(!curOn ? QStringLiteral("Título animado EN AIRE.") : QStringLiteral("Título animado retirado."));
++		refreshDeck();
++	});
++	QObject::connect(btnMic, &QPushButton::clicked, rootW, [findPrimaryMic, refreshDeck, statusLbl]() {
++		if (obs_source_t *mic = findPrimaryMic()) {
++			const bool nextMute = !obs_source_muted(mic);
++			obs_source_set_muted(mic, nextMute);
++			obs_source_release(mic);
++			statusLbl->setText(nextMute ? QStringLiteral("Micrófono silenciado.") : QStringLiteral("Micrófono activado."));
++		} else {
++			statusLbl->setText(QStringLiteral("No hay fuente de Micrófono (Android) en la colección actual."));
++		}
++		refreshDeck();
++	});
++
++	auto *timer = new QTimer(scroll);
++	timer->setInterval(1000);
++	QObject::connect(timer, &QTimer::timeout, scroll, [scroll, refreshDeck]() {
++		if (scroll->isVisible()) refreshDeck();
++	});
++	timer->start();
++	refreshDeck();
++	return scroll;
++}
++
++static void OpenDirectorDeckDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Director Deck — Control Táctil en Vivo"));
++	auto *lay = new QVBoxLayout(&dlg);
++	lay->addWidget(CreateDirectorDeckWidget(&dlg), 1);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	btnClose->setMinimumHeight(44);
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++	lay->addWidget(btnClose);
++	dlg.resize(520, 560);
++	dlg.exec();
++}
++
+ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ {
+     QMenu *menuProd = nullptr;
+@@ -9023,6 +9444,8 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+         auto *vmixColor = menuAudioColor->addAction(QStringLiteral("Ruedas de color (LGG)..."));
+         QObject::connect(vmixColor, &QAction::triggered, mainWindow, [mainWindow] { OpenVmixColorCorrectionDialog(mainWindow); });
+ 
++        auto *directorAct = menuProd->addAction(QStringLiteral("Director Deck (Control táctil en vivo ≥48dp)..."));
++        QObject::connect(directorAct, &QAction::triggered, mainWindow, [mainWindow] { OpenDirectorDeckDialog(mainWindow); });
+         auto *webrtcAct = menuProd->addAction(QStringLiteral("Llamadas e Invitados en Vivo (WebRTC)..."));
+         QObject::connect(webrtcAct, &QAction::triggered, mainWindow, [mainWindow] { OpenWebRtcGuestsDialog(mainWindow); });
+         auto *advTitlesAct = menuProd->addAction(QStringLiteral("Generador Avanzado de Títulos Animados..."));
+@@ -9155,6 +9578,7 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 		}
+ 
+ 		// Register independent control dock panels (accessible in Paneles / Docks menu)
++		obs_frontend_add_dock_by_id("obs_android_dock_director", "Control: Director Deck", CreateDirectorDeckWidget(mainWindow));
+ 		obs_frontend_add_dock_by_id("obs_android_dock_vertical", "Vertical 9:16", CreateVerticalDockWidget(mainWindow));
+ 		obs_frontend_add_dock_by_id("obs_android_dock_scoreboard", "Control: Marcador", CreateScoreboardDockWidget());
+ 		obs_frontend_add_dock_by_id("obs_android_dock_lowerthird", "Control: Lower Third", CreateLowerThirdDockWidget());

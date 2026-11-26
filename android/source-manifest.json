@@ -130,7 +130,7 @@
     },
     {
       "path": "frontend/utility/android-tools.cpp",
-      "sha256Lf": "bd60f162042627e81c07afc935ac0786e1a224feb2ca0661d9a3f78fef275680"
+      "sha256Lf": "2245798c2fefeccf44ec6cc86af192b324e5da26ba1b1e4e38c3d204be24f09f"
     },
     {
       "path": "frontend/utility/audio-encoders.cpp",

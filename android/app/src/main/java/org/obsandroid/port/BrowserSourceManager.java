@@ -11,11 +11,13 @@ import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
+import android.hardware.HardwareBuffer;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.Image;
 import android.media.ImageReader;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -93,6 +95,7 @@ public final class BrowserSourceManager {
         ImageReader displayReader;
         int surfaceWidth;
         int surfaceHeight;
+        boolean surfaceZeroCopy;
         volatile boolean capturePending;
         volatile long capturedFrames;
         final BrowserFrameGate frameGate = new BrowserFrameGate();
@@ -206,20 +209,73 @@ public final class BrowserSourceManager {
             displayReader = null;
         }
 
+        boolean wantsZeroCopy() {
+            return id > 0 && !transparent && !interacting && Build.VERSION.SDK_INT >= 29;
+        }
+
         void ensurePresentation(Activity activity) {
             if (interacting || destroyed) return;
+            boolean wantZc = wantsZeroCopy();
             if (presentation != null && presentation.isShowing() &&
-                    surfaceWidth == width && surfaceHeight == height) return;
+                    surfaceWidth == width && surfaceHeight == height && surfaceZeroCopy == wantZc) return;
             releasePresentation();
             try {
                 // Chromium's supported offscreen path: an actual accelerated window
-                // on a private display. This does not mirror or capture the phone screen.
-                displayReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
+                // on a private display. For opaque sources (e.g. WebRTC video guests),
+                // use HardwareBuffer zero-copy GPU textures instead of PixelCopy.
+                ImageReader createdReader = null;
+                boolean actualZc = false;
+                if (wantZc && Build.VERSION.SDK_INT >= 29) {
+                    try {
+                        createdReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3,
+                            HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE | HardwareBuffer.USAGE_GPU_COLOR_OUTPUT);
+                        actualZc = true;
+                    } catch (Throwable ignored) {
+                        createdReader = null;
+                        actualZc = false;
+                    }
+                }
+                if (createdReader == null) {
+                    createdReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
+                }
+                displayReader = createdReader;
+                surfaceZeroCopy = actualZc;
+                if (actualZc) {
+                    releaseBuffers(); // Free unused CPU Bitmap RAM immediately in zero-copy mode
+                }
                 displayReader.setOnImageAvailableListener(reader -> {
                     // Always drain the display consumer, including while PixelCopy is busy.
                     // Blocking this queue would stall Android's shared render thread.
                     try (Image image = reader.acquireLatestImage()) {
-                        if (image != null) markFrameChanged();
+                        if (image == null) return;
+                        if (surfaceZeroCopy && !destroyed && captureActive() && !interacting && Build.VERSION.SDK_INT >= 29) {
+                            long now = SystemClock.uptimeMillis();
+                            if (now < nextCaptureAtMs) return;
+                            HardwareBuffer hb = image.getHardwareBuffer();
+                            if (hb != null) {
+                                int activeCount = activeVisibleBrowserCount();
+                                int effFps = fps;
+                                if (activeCount >= 3) effFps = Math.min(effFps, 24);
+                                long baseInterval = ThermalBudget.captureIntervalMs(effFps, sThermalFpsCap);
+                                nextCaptureAtMs = now + baseInterval;
+                                boolean accepted = false;
+                                try {
+                                    accepted = NativeBridge.pushBrowserHardwareBuffer(id, hb, image.getWidth(), image.getHeight());
+                                } finally {
+                                    hb.close();
+                                }
+                                if (accepted) {
+                                    ++capturedFrames;
+                                    if (capturedFrames == 1 || now - lastCaptureReportMs >= 10000) {
+                                        lastCaptureReportMs = now;
+                                        Log.i(TAG, "Zero-copy GPU browser frames id=" + id + " frames=" + capturedFrames
+                                            + " cap=" + Math.min(effFps, sThermalFpsCap));
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        markFrameChanged();
                     } catch (IllegalStateException ignored) {
                         // The display can be released while a callback is queued.
                     }
@@ -235,8 +291,8 @@ public final class BrowserSourceManager {
                 presentation.setCancelable(false);
                 Window window = presentation.getWindow();
                 if (window == null) throw new IllegalStateException("Ventana de navegador no disponible");
-                window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-                window.setFormat(PixelFormat.TRANSLUCENT);
+                window.setBackgroundDrawable(new ColorDrawable(actualZc ? Color.BLACK : Color.TRANSPARENT));
+                window.setFormat(actualZc ? PixelFormat.RGBA_8888 : PixelFormat.TRANSLUCENT);
                 window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED |
                     WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE);
@@ -250,8 +306,8 @@ public final class BrowserSourceManager {
                 window.setLayout(width, height);
                 surfaceWidth = width;
                 surfaceHeight = height;
-                Log.i(TAG, "Hardware browser window ready id=" + id + " " + width + "x" + height);
-                frameGate.changed();
+                Log.i(TAG, "Hardware browser window ready id=" + id + " " + width + "x" + height + " zeroCopy=" + actualZc);
+                if (!actualZc) frameGate.changed();
             } catch (RuntimeException failure) {
                 releasePresentation();
                 warnCapture("No se pudo preparar la captura GPU: " + failure.getClass().getSimpleName());
@@ -293,6 +349,7 @@ public final class BrowserSourceManager {
 
         void captureFrame() {
             if (destroyed || webView == null || capturePending || !captureActive() || !frameGate.hasFreshFrame()) return;
+            if (surfaceZeroCopy && !interacting) return;
             try {
                 QtObsActivity activity = QtObsActivity.getActiveInstance();
                 if (activity == null || activity.isFinishing()) return;
@@ -405,7 +462,7 @@ public final class BrowserSourceManager {
         wv.setHorizontalScrollBarEnabled(false);
         wv.setOverScrollMode(View.OVER_SCROLL_NEVER);
         wv.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        wv.setBackgroundColor(inst.transparent ? Color.TRANSPARENT : Color.WHITE);
+        wv.setBackgroundColor(inst.transparent ? Color.TRANSPARENT : Color.BLACK);
         wv.getViewTreeObserver().addOnDrawListener(() -> {
             // The private display supplies frame notifications normally. During
             // interaction WebView belongs to the main dialog's window instead.
@@ -538,7 +595,7 @@ public final class BrowserSourceManager {
                 inst.audioBridge = new PageAudioBridge(inst);
                 inst.webView.addJavascriptInterface(inst.audioBridge, "ObsPageAudio");
             } else {
-                inst.webView.setBackgroundColor(inst.transparent ? Color.TRANSPARENT : Color.WHITE);
+                inst.webView.setBackgroundColor(inst.transparent ? Color.TRANSPARENT : Color.BLACK);
             }
 
             inst.ensurePresentation(activity);

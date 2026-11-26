@@ -111,9 +111,11 @@ public final class CustomBrowserDockManager {
         ws.setDisplayZoomControls(false);
         ws.setTextZoom(Math.max(50, Math.min(200, zoomPercent)));
         ws.setMediaPlaybackRequiresUserGesture(false);
-        ws.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        ws.setAllowFileAccess(false);
+        ws.setAllowContentAccess(false);
+        ws.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         ws.setSupportMultipleWindows(false);
-        ws.setJavaScriptCanOpenWindowsAutomatically(true);
+        ws.setJavaScriptCanOpenWindowsAutomatically(false);
         if (desktopMode) {
             ws.setUserAgentString(DESKTOP_UA);
         } else {
@@ -176,7 +178,37 @@ public final class CustomBrowserDockManager {
                         }
                     }
                 });
-                wv.setWebChromeClient(new WebChromeClient());
+                wv.setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public void onPermissionRequest(android.webkit.PermissionRequest request) {
+                        if (request == null) return;
+                        Uri originUri = request.getOrigin();
+                        String scheme = originUri != null && originUri.getScheme() != null
+                            ? originUri.getScheme().toLowerCase(java.util.Locale.US) : "";
+                        String host = originUri != null && originUri.getHost() != null
+                            ? originUri.getHost().toLowerCase(java.util.Locale.US) : "";
+                        boolean isTrustedWebRtc = "https".equals(scheme) && (
+                            "vdo.ninja".equals(host) || host.endsWith(".vdo.ninja")
+                            || "obs.ninja".equals(host) || host.endsWith(".obs.ninja")
+                            || "meet.jit.si".equals(host) || host.endsWith(".jitsi.net"));
+                        if (!isTrustedWebRtc) {
+                            request.deny();
+                            return;
+                        }
+                        java.util.List<String> allowed = new java.util.ArrayList<>();
+                        String[] reqRes = request.getResources();
+                        if (reqRes != null) {
+                            for (String r : reqRes) {
+                                if (android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)
+                                        || android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
+                                    allowed.add(r);
+                                }
+                            }
+                        }
+                        if (!allowed.isEmpty()) request.grant(allowed.toArray(new String[0]));
+                        else request.deny();
+                    }
+                });
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(1, 1);
                 lp.gravity = Gravity.TOP | Gravity.START;
                 host.addView(wv, lp);
@@ -184,7 +216,8 @@ public final class CustomBrowserDockManager {
                 inst.desktopMode = desktopMode;
                 inst.url = normalized;
                 wv.loadUrl(normalized);
-                Log.i(TAG, "Created custom browser dock id=" + id + " url=" + normalized);
+                String safeHost = Uri.parse(normalized).getHost();
+                Log.i(TAG, "Created custom browser dock id=" + id + " host=" + (safeHost != null ? safeHost : "local"));
             } else {
                 boolean uaChanged = (inst.desktopMode != desktopMode);
                 boolean urlChanged = !normalized.equals(inst.url);

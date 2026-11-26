@@ -24,6 +24,7 @@
 #include <vector>
 
 extern "C" bool obs_android_select_video_codec(const char *, char *, size_t);
+extern "C" int obs_android_get_thermal_tier();
 namespace {
 std::mutex codec_budget_mutex;
 std::unordered_map<std::string, int> active_codec_counts;
@@ -130,10 +131,12 @@ struct Encoder {
     AMediaCodec *codec{};
     bool audio{}, hevc{}, started{}, planar{}, surface_mode{};
     uint32_t width{}, height{}, stride{}, slice_height{}, rate{}, fps_num{30}, fps_den{1};
-    int32_t bitrate_kbps{2500}, keyint_sec{2}, bitrate_mode{2}, color_format{21};
+    int32_t bitrate_kbps{2500}, user_bitrate_kbps{2500}, keyint_sec{2}, bitrate_mode{2}, color_format{21};
     int32_t profile{0}, max_bframes{0}, aac_profile{2};
     bool low_latency{true};
     std::atomic<int32_t> pending_bitrate_kbps{0};
+    int32_t last_thermal_tier{0};
+    uint32_t thermal_check_frames{0};
     std::string codec_name;
     bool hardware{true};
     bool budget_reserved{false};
@@ -272,15 +275,29 @@ struct Encoder {
     }
 
     void apply_pending_bitrate() {
+        if (!started || !codec || audio) return;
         int32_t next_br = pending_bitrate_kbps.exchange(0, std::memory_order_acq_rel);
-        if (next_br <= 0 || !started || !codec || audio) return;
-        bitrate_kbps = next_br;
+        bool force_check = false;
+        if (next_br > 0) {
+            user_bitrate_kbps = next_br;
+            force_check = true;
+        }
+        // Check thermal bitrate governor every ~60 frames (~2s) or on explicit user bitrate update
+        if (!force_check && (++thermal_check_frames % 60u) != 0u) return;
+        const int tier = obs_android_get_thermal_tier();
+        const float factor = (tier >= 3) ? 0.65f : (tier == 2 ? 0.80f : 1.0f);
+        const int32_t base_br = user_bitrate_kbps > 0 ? user_bitrate_kbps : bitrate_kbps;
+        const int32_t target_br = std::min(base_br, std::max<int32_t>(600, int32_t(std::lround(base_br * factor))));
+        if (target_br == bitrate_kbps && tier == last_thermal_tier) return;
+        last_thermal_tier = tier;
+        if (target_br == bitrate_kbps) return;
+        bitrate_kbps = target_br;
         AMediaFormat *params = AMediaFormat_new();
         AMediaFormat_setInt32(params, "video-bitrate", bitrate_kbps * 1000);
         media_status_t st = AMediaCodec_setParameters(codec, params);
         AMediaFormat_delete(params);
-        blog(LOG_INFO, "MediaCodec live dynamic bitrate (%s) -> %d kbps (status=%d)",
-             mime_type(), bitrate_kbps, st);
+        blog(LOG_INFO, "MediaCodec live bitrate (%s) -> %d kbps (base=%d, thermalTier=%d, status=%d)",
+             mime_type(), bitrate_kbps, base_br, tier, st);
     }
 
     bool start_codec_surface() {
@@ -445,13 +462,21 @@ struct Encoder {
         if (started) reset_codec();
         if (!audio && !hardware) return fail("Video codec must be hardware accelerated");
         const char *mime = mime_type();
+        if (!audio && !codec_name.empty()) {
+            std::lock_guard<std::mutex> lock(codec_budget_mutex);
+            ++active_codec_counts[codec_name];
+            budget_reserved = true;
+        }
         if (!codec_name.empty()) {
             codec = AMediaCodec_createCodecByName(codec_name.c_str());
         }
         if (!codec) {
             codec = AMediaCodec_createEncoderByType(mime);
         }
-        if (!codec) return fail("AMediaCodec creation failed");
+        if (!codec) {
+            reset_codec();
+            return fail("AMediaCodec creation failed");
+        }
         AMediaFormat *format = AMediaFormat_new();
         AMediaFormat_setString(format, "mime", mime);
         AMediaFormat_setInt32(format, "bitrate", bitrate_kbps * 1000);
@@ -570,6 +595,7 @@ struct Encoder {
         if (cn && *cn) codec_name = cn;
         int64_t br = obs_data_get_int(settings, "bitrate");
         if (br > 0) {
+            user_bitrate_kbps = int32_t(br);
             if (started && !audio && int32_t(br) != bitrate_kbps) {
                 pending_bitrate_kbps.store(int32_t(br), std::memory_order_release);
             }

@@ -8,22 +8,22 @@ El frontend principal es `QtObsActivity` (`org.obsandroid.port`), una `QtActivit
 QtObsActivity (Qt 6.9.3 Frontend + Paneles táctiles)
         │
         ├── libobs original + backend EGL / GLES 3.2
-        │     ├── Fuentes nativas GPU: Camera2 / MediaProjection (AHardwareBuffer),
-        │     │     Browser/WebRTC & Gráficos (AndroidRgbaFrame premultiplicado),
+        │     ├── Fuentes nativas GPU: Camera2 / MediaProjection / WebRTC opaco (AHardwareBuffer → EGLImage),
+        │     │     Browser transparente & Gráficos (AndroidRgbaFrame premultiplicado),
         │     │     VTuber (PNG / Live2D / VRM WebGL2), SRT, NDI, OMT
         │     ├── Filtros GPU: Ruedas de color (LGG), Máscara de forma, Perspectiva 3D,
         │     │     Quitar Fondo / Bokeh IA (PBO doble buffer asíncrono + MediaPipe)
-        │     ├── Codificadores: MediaCodec H.264 / HEVC (EGL Surface zero-copy) y AAC compartido
-        │     └── Salidas: RTMP/RTMPS, MP4, Vertical 9:16 + Backtrack, ISO Multi-fuente,
-        │           Instant Replay (ring buffer zero-copy), SRT, NDI, HDMI/Miracast
+        │     ├── Codificadores: MediaCodec H.264 / HEVC (EGL Surface zero-copy + gobernador térmico bitrate) y AAC compartido
+        │     └── Salidas: RTMP/RTMPS, MP4, Vertical 9:16 + Backtrack, ISO Multi-fuente / Mosaico 2×2,
+        │           Instant Replay (ring buffer asíncrono), SRT, NDI, HDMI/Miracast
         │
         └── Capa Java / JNI (obs-android-jni)
               ├── CaptureService (FGS + WakeLock + Audio hotplug)
               ├── ThermalController (presupuesto térmico unificado Java + C++ tier 0..3)
-              ├── BrowserSourceManager (VirtualDisplay + Presentation + pool PixelCopy paralelo)
+              ├── BrowserSourceManager (VirtualDisplay + Presentation: HardwareBuffer zero-copy / PixelCopy alfa)
               ├── LiveGraphicsManager (Marcador, Lower Third, Cronómetro, Biblia, Clima, Títulos)
               ├── PtzControlManager (VISCA UDP/TCP, ONVIF SOAP + WS-Discovery, Pelco-D, Gamepad PS)
-              ├── WebRemoteServer (HTTP loopback/LAN con token + validación Host)
+              ├── WebRemoteServer (HTTP loopback/LAN con token efímero por sesión + validación Host)
               └── ExternalDisplayManager / PluginInstaller (ELF ARM64 + límites anti Zip-Slip/Zip-Bomb)
 ```
 

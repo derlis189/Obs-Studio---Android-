@@ -102,6 +102,7 @@ struct IsoTrack {
     video_t *video{};
     obs_scene_t *scene{};
     obs_sceneitem_t *item{};
+    std::vector<obs_sceneitem_t *> extra_items;
     obs_encoder_t *v_enc{};
     obs_encoder_t *a_enc{};
     obs_output_t *output{};
@@ -125,6 +126,10 @@ void release_iso_track_cleanup(IsoTrack &tr, std::vector<std::string> *finished_
     if (tr.v_enc) { obs_encoder_release(tr.v_enc); tr.v_enc = nullptr; }
     if (tr.a_enc) { obs_encoder_release(tr.a_enc); tr.a_enc = nullptr; }
     if (tr.item) { obs_sceneitem_release(tr.item); tr.item = nullptr; }
+    for (auto *ei : tr.extra_items) {
+        if (ei) obs_sceneitem_release(ei);
+    }
+    tr.extra_items.clear();
     if (tr.view) {
         obs_view_set_source(tr.view, 0, nullptr);
         obs_view_remove(tr.view);
@@ -572,6 +577,7 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_iso_start(con
     const int height = std::clamp(cfg.value("height", 720), 180, 1080) & ~1;
     const int bitrate = std::clamp(cfg.value("bitrate", 4000), 800, 12000);
     const bool include_audio = cfg.value("includeAudio", true);
+    const bool mosaic_mode = cfg.value("mosaic", false);
     ensure_dir_recursive(out_dir);
 
     std::vector<std::string> prev_finished;
@@ -592,6 +598,100 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_iso_start(con
 
         const std::string ts = timestamp_str();
         int started = 0;
+
+        if (mosaic_mode) {
+            // Single-encoder 2x2 GPU Mosaic: composites up to 4 sources into 1 H.264 stream (75% less MediaCodec load)
+            std::vector<std::pair<std::string, obs_source_t *>> srcs;
+            for (const auto &s : cfg["sources"]) {
+                if (srcs.size() >= 4) break;
+                if (!s.is_string()) continue;
+                const std::string src_name = s.get<std::string>();
+                if (src_name.empty()) continue;
+                obs_source_t *src = obs_get_source_by_name(src_name.c_str());
+                if (src) srcs.emplace_back(src_name, src);
+            }
+            if (!srcs.empty()) {
+                obs_video_info main_ovi{};
+                if (obs_get_video_info(&main_ovi)) {
+                    const int mw = std::clamp(width, 640, 1920) & ~1;
+                    const int mh = std::clamp(height, 360, 1080) & ~1;
+                    obs_video_info ovi = main_ovi;
+                    ovi.base_width = uint32_t(mw);
+                    ovi.base_height = uint32_t(mh);
+                    ovi.output_width = uint32_t(mw);
+                    ovi.output_height = uint32_t(mh);
+                    ovi.output_format = VIDEO_FORMAT_NV12;
+                    ovi.colorspace = VIDEO_CS_709;
+                    ovi.range = VIDEO_RANGE_PARTIAL;
+
+                    IsoTrack tr;
+                    tr.source_name = "Mosaico 2x2 (" + std::to_string(srcs.size()) + " fuentes)";
+                    tr.file_path = out_dir + "/ISO_Mosaic_" + ts + ".mp4";
+                    tr.view = obs_view_create();
+                    tr.video = tr.view ? obs_view_add2(tr.view, &ovi) : nullptr;
+                    tr.scene = tr.video ? obs_scene_create_private("OBS_Android_View_ISO_Mosaic") : nullptr;
+                    if (tr.view && tr.video && tr.scene) {
+                        const size_t n = srcs.size();
+                        for (size_t i = 0; i < n; ++i) {
+                            obs_sceneitem_t *it = obs_scene_add(tr.scene, srcs[i].second);
+                            if (!it) continue;
+                            obs_sceneitem_addref(it);
+                            tr.extra_items.push_back(it);
+                            vec2 pos{0.0f, 0.0f}, bounds{float(mw), float(mh)};
+                            if (n == 2) {
+                                pos = {float(i) * (float(mw) * 0.5f), 0.0f};
+                                bounds = {float(mw) * 0.5f, float(mh)};
+                            } else if (n >= 3) {
+                                pos = {float(i % 2) * (float(mw) * 0.5f), float(i / 2) * (float(mh) * 0.5f)};
+                                bounds = {float(mw) * 0.5f, float(mh) * 0.5f};
+                            }
+                            obs_sceneitem_set_alignment(it, OBS_ALIGN_TOP | OBS_ALIGN_LEFT);
+                            obs_sceneitem_set_pos(it, &pos);
+                            obs_sceneitem_set_rot(it, 0.0f);
+                            obs_sceneitem_set_bounds_type(it, OBS_BOUNDS_SCALE_INNER);
+                            obs_sceneitem_set_bounds_alignment(it, OBS_ALIGN_CENTER);
+                            obs_sceneitem_set_bounds(it, &bounds);
+                        }
+                        obs_view_set_source(tr.view, 0, obs_scene_get_source(tr.scene));
+
+                        obs_data_t *vs = obs_data_create();
+                        obs_data_set_int(vs, "bitrate", bitrate);
+                        obs_data_set_int(vs, "keyint_sec", 2);
+                        tr.v_enc = obs_video_encoder_create("android_mediacodec_h264", "iso_mosaic_venc", vs, nullptr);
+                        obs_data_release(vs);
+                        if (tr.v_enc) {
+                            obs_encoder_set_video(tr.v_enc, tr.video);
+                            if (g_iso_shared_aenc) tr.a_enc = obs_encoder_get_ref(g_iso_shared_aenc);
+                            obs_data_t *os = obs_data_create();
+                            obs_data_set_string(os, "path", tr.file_path.c_str());
+                            obs_data_set_string(os, "muxer_settings", "movflags=frag_keyframe+empty_moov+faststart");
+                            tr.output = obs_output_create("ffmpeg_muxer", "iso_mosaic_mux", os, nullptr);
+                            obs_data_release(os);
+                            if (tr.output) {
+                                obs_output_set_video_encoder(tr.output, tr.v_enc);
+                                if (tr.a_enc) obs_output_set_audio_encoder(tr.output, tr.a_enc, 0);
+                                if (obs_output_start(tr.output)) {
+                                    tr.active = true;
+                                    g_iso_tracks.push_back(std::move(tr));
+                                    ++started;
+                                    blog(LOG_INFO, "[android-iso] Started 2x2 Mosaic ISO (%zu sources) -> '%s' (%dx%d @ %d kbps)",
+                                         n, g_iso_tracks.back().file_path.c_str(), mw, mh, bitrate);
+                                } else {
+                                    release_iso_track(tr);
+                                }
+                            } else {
+                                release_iso_track(tr);
+                            }
+                        } else {
+                            release_iso_track(tr);
+                        }
+                    } else {
+                        release_iso_track(tr);
+                    }
+                }
+                for (auto &p : srcs) obs_source_release(p.second);
+            }
+        } else {
         int idx = 0;
         for (const auto &s : cfg["sources"]) {
             if (idx >= 4) break;
@@ -648,6 +748,7 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_iso_start(con
                 blog(LOG_WARNING, "[android-iso] Failed to start ISO output for '%s'", src_name.c_str());
                 release_iso_track(tr);
             }
+        }
         }
 
         if (started > 0) {

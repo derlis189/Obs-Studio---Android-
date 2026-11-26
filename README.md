@@ -11,16 +11,17 @@ El APK experimental abre el frontend Qt 6.9.3 y admite edición de escenas, Modo
 El menú **Herramientas** está organizado en 4 categorías:
 
 - **Producción en Vivo:**
-  - **Llamadas e Invitados en Vivo (WebRTC):** sala automática en 1 toque (QR / WhatsApp) o invitados individuales con renderizado GPU paralelo y disposiciones automáticas (`Pantalla completa`, `Lado a lado 640×720`, `Cuadrícula 2×2`, `PIP`).
-  - **Generador Avanzado de Títulos Animados:** motor 30 FPS en GPU (`AndroidRgbaFrame`) con 8 plantillas, 7 animaciones de entrada, 4 de salida, shimmer, ticker y presets.
+  - **Director Deck (Control táctil en vivo ≥48dp):** switcher en vivo de un toque con cuadrícula de escenas (Programa verde / Vista previa ámbar), Transición/Corte, Transmitir, Grabar, Replay 15s (0.5x), Título al aire, Silenciar Micrófono y telemetría térmica/batería.
+  - **Llamadas e Invitados en Vivo (WebRTC):** sala automática en 1 toque (QR / WhatsApp) o invitados individuales con captura **GPU zero-copy (`HardwareBuffer` → `EGLImageKHR`)** y disposiciones automáticas (`Pantalla completa`, `Lado a lado 640×720`, `Cuadrícula 2×2`, `PIP`).
+  - **Generador Avanzado de Títulos Animados:** motor 30 FPS en GPU (`AndroidRgbaFrame`) con 8 plantillas, 7 animaciones de entrada, 4 de salida, selectores de color visuales (`QColorDialog`), shimmer, ticker y presets.
   - **Control de Gráficos:** Marcador Deportivo, Lower Third, Cronómetro/Temporizador, Biblia RV1909 offline y fuente **Fecha, Hora y Clima** (Open-Meteo, 6 diseños, auto-tamaño horizontal/vertical).
   - **Control PTZ:** VISCA sobre IP (UDP/TCP), ONVIF Profile S (SOAP + WS-Discovery), Pelco-D y soporte nativo para mando **PlayStation DualShock 4 / DualSense** (Bluetooth/USB).
   - **Captura Vertical 9:16 y Backtrack:** lienzo 9:16 independiente con emisión, grabación y clips instantáneos.
-  - **Grabación ISO (Multi-fuente):** hasta 4 pistas MP4 independientes con codificador AAC compartido.
-  - **Repetición Instantánea (Instant Replay):** ring buffer de hasta 60 s con recorte MP4 y reproducción en cámara lenta al aire.
-- **Salidas y Red:** Salida SRT (Caller/Listener Wi-Fi o datos móviles), Salida NDI en red, Salida HDMI / Pantalla Wi-Fi (Miracast) y Control Remoto Web (QR en puerto 4455).
+  - **Grabación ISO (Multi-fuente y Mosaico 2×2):** hasta 4 pistas MP4 independientes con codificador AAC compartido, o **Modo Mosaico 2×2** en un solo codificador GPU (75% menos carga térmica/MediaCodec), con finalización asíncrona en segundo plano.
+  - **Repetición Instantánea (Instant Replay):** ring buffer de hasta 60 s con exportación MP4 asíncrona y reproducción en cámara lenta al aire.
+- **Salidas y Red:** Salida SRT (Caller/Listener Wi-Fi o datos móviles), Salida NDI en red, Salida HDMI / Pantalla Wi-Fi (Miracast) y Control Remoto Web (QR en puerto 4455 con token efímero por sesión).
 - **Audio y Color:** Audio Pro (cadena de voz limpia en 1 toque), Ruedas de color (LGG) y filtro GPU Quitar Fondo / Bokeh IA (con PBO doble asíncrono).
-- **Sistema y Seguridad:** Modo Directo Seguro (bloqueo táctil en vivo), Botón flotante de escenas, Diagnóstico de rendimiento/térmica, Respaldar / Restaurar configuración (`.zip` con redacción automática de claves RTMP/SRT/PTZ) y Recuperar paneles en pantalla.
+- **Sistema y Seguridad:** Modo Directo Seguro (bloqueo táctil en vivo), Botón flotante de escenas, Diagnóstico de rendimiento/térmica (con gobernador térmico dinámico de bitrate en vivo), Respaldar / Restaurar configuración asíncrono (`.zip` con redacción automática de claves RTMP/SRT/PTZ) y Recuperar paneles en pantalla.
 
 ## Compilar y probar el port actual
 
