@@ -1,0 +1,130 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7acfa74..7ca9265 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,11 +1,19 @@
+ cmake_minimum_required(VERSION 3.28...3.30)
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "Android")
++  list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/linux")
++endif()
++
+ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
+ 
+ project(${_name} VERSION ${_version})
+ 
+ option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" OFF)
+-option(ENABLE_QT "Use Qt functionality" OFF)
++if(ANDROID)
++  set(ENABLE_QT ON CACHE BOOL "Use Qt functionality" FORCE)
++else()
++  option(ENABLE_QT "Use Qt functionality" OFF)
++endif()
+ 
+ include(compilerconfig)
+ include(defaults)
+@@ -14,14 +22,16 @@ include(helpers)
+ # Path were nlohmann_json is supposed to be installed inside the Flatpak runtime
+ set(JSON_TARBALL_PATH "${CMAKE_SOURCE_DIR}/json.tar.xz")
+ 
+-add_library(${CMAKE_PROJECT_NAME} MODULE)
++add_library(${PROJECT_NAME} MODULE)
+ 
+-find_package(libobs REQUIRED)
+-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
++if(NOT TARGET OBS::libobs)
++  find_package(libobs REQUIRED)
++endif()
++target_link_libraries(${PROJECT_NAME} PRIVATE OBS::libobs)
+ 
+ if(ENABLE_FRONTEND_API)
+   find_package(obs-frontend-api REQUIRED)
+-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
++  target_link_libraries(${PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
+ endif()
+ 
+ # Check if nlohmann_json exists
+@@ -41,24 +51,24 @@ endif()
+ 
+ find_package(CURL REQUIRED)
+ 
+-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE nlohmann_json CURL::libcurl)
++target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json CURL::libcurl)
+ 
+ if(APPLE)
+   target_link_libraries(
+-    ${CMAKE_PROJECT_NAME}
++    ${PROJECT_NAME}
+     PRIVATE "$<LINK_LIBRARY:FRAMEWORK,Security.framework>" "$<LINK_LIBRARY:FRAMEWORK,CoreFoundation.framework>"
+   )
+ endif()
+ 
+ if(ENABLE_QT)
+   find_package(Qt6 COMPONENTS Widgets Core Svg Xml)
+-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Svg Qt6::Xml)
++  target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Svg Qt6::Xml)
+   target_compile_options(
+-    ${CMAKE_PROJECT_NAME}
++    ${PROJECT_NAME}
+     PRIVATE $<$<C_COMPILER_ID:Clang,AppleClang>:-Wno-quoted-include-in-framework-header -Wno-comma>
+   )
+   set_target_properties(
+-    ${CMAKE_PROJECT_NAME}
++    ${PROJECT_NAME}
+     PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
+   )
+ endif()
+@@ -98,4 +108,9 @@ target_sources(
+     src/version.h
+ )
+ 
+-set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
++set_target_properties_plugin(${PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
++
++if(ANDROID)
++  # OBS Android's core module loader looks for lib<module>.so.
++  set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "lib")
++endif()
+diff --git a/cmake/common/osconfig.cmake b/cmake/common/osconfig.cmake
+index 87d435a..7f3dc96 100644
+--- a/cmake/common/osconfig.cmake
++++ b/cmake/common/osconfig.cmake
+@@ -2,7 +2,12 @@
+ 
+ include_guard(GLOBAL)
+ 
+-if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
++if(CMAKE_SYSTEM_NAME STREQUAL "Android")
++  set(CMAKE_C_EXTENSIONS FALSE)
++  set(CMAKE_CXX_EXTENSIONS FALSE)
++  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/linux")
++  set(OS_LINUX TRUE)
++elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+   set(CMAKE_C_EXTENSIONS FALSE)
+   set(CMAKE_CXX_EXTENSIONS FALSE)
+   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows")
+diff --git a/src/mask-font-awesome.cpp b/src/mask-font-awesome.cpp
+index 0318417..1cd2fce 100644
+--- a/src/mask-font-awesome.cpp
++++ b/src/mask-font-awesome.cpp
+@@ -10,7 +10,6 @@ extern "C" {
+ #include <algorithm>
+ #include <regex>
+ 
+-#include <obs-frontend-api.h>
+ #include <util/config-file.h>
+ #include <util/platform.h>
+ 
+@@ -377,11 +376,7 @@ bool MaskFontAwesomeFilter::choose_button_clicked(obs_properties_t* props,
+ {
+ 	UNUSED_PARAMETER(property);
+ 	auto obj = static_cast<MaskFontAwesomeFilter*>(data);
+-	const auto mainWindow = static_cast<QMainWindow*>(
+-		obs_frontend_get_main_window());
+-	//const QRect& hostRect = mainWindow->geometry();
+-
+-	auto dialog = new FontAwesomePicker(mainWindow);
++	auto dialog = new FontAwesomePicker(nullptr);
+ 	auto resp = dialog->exec();
+ 	if (resp == QDialog::Accepted) {
+ 		auto selectedIcon = dialog->getSelectedIcon();

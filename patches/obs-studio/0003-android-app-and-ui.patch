@@ -1,8 +1,224 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fdace77..00a67da 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -43,6 +43,16 @@ if(OS_ANDROID)
+       target_enable(obs-ffmpeg)
+       add_subdirectory(plugins/vlc-video)
+       target_enable(vlc-video)
++      if(NOT OBS_ADVANCED_MASKS_SOURCE_DIR OR NOT EXISTS "${OBS_ADVANCED_MASKS_SOURCE_DIR}/CMakeLists.txt")
++        message(FATAL_ERROR "OBS Advanced Masks source is required when building the Android editor.")
++      endif()
++      add_subdirectory("${OBS_ADVANCED_MASKS_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/plugins/obs-advanced-masks")
++      target_enable(obs-advanced-masks)
++      if(NOT OBS_STROKE_GLOW_SHADOW_SOURCE_DIR OR NOT EXISTS "${OBS_STROKE_GLOW_SHADOW_SOURCE_DIR}/CMakeLists.txt")
++        message(FATAL_ERROR "OBS Stroke Glow Shadow source is required when building the Android editor.")
++      endif()
++      add_subdirectory("${OBS_STROKE_GLOW_SHADOW_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/plugins/obs-stroke-glow-shadow")
++      target_enable(obs-stroke-glow-shadow)
+     endif()
+   endif()
+   set_obs_core_modules()
+diff --git a/frontend/settings/OBSBasicSettings_Stream.cpp b/frontend/settings/OBSBasicSettings_Stream.cpp
+index c6cfa0c..e77e971 100644
+--- a/frontend/settings/OBSBasicSettings_Stream.cpp
++++ b/frontend/settings/OBSBasicSettings_Stream.cpp
+@@ -12,6 +12,13 @@
+ #include <qt-wrappers.hpp>
+ 
+ #include <QUuid>
++#include <QScrollBar>
++#include <QTimer>
++#include <QWidget>
++
++#ifdef __ANDROID__
++QWidget *CreateAndroidMultistreamSettingsSection(QWidget *parent);
++#endif
+ 
+ static const QUuid &CustomServerUUID()
+ {
+@@ -75,6 +82,16 @@ void OBSBasicSettings::InitStreamPage()
+ 
+ 	LoadServices(false);
+ 
++#ifdef __ANDROID__
++	ui->destinationGroupBox->setTitle(QStringLiteral("Destinos de emisión"));
++	// Keep extra outputs in the same stream settings scroll area, between the
++	// primary destination and OBS's built-in multitrack video options.
++	ui->streamkeyPageLayout->insertWidget(1, CreateAndroidMultistreamSettingsSection(ui->streamKeyPage));
++	QTimer::singleShot(0, ui->streamKeyScrollArea, [area = ui->streamKeyScrollArea] {
++		area->verticalScrollBar()->setValue(0);
++	});
++#endif
++
+ 	ui->twitchAddonDropdown->addItem(QTStr("Basic.Settings.Stream.TTVAddon.None"));
+ 	ui->twitchAddonDropdown->addItem(QTStr("Basic.Settings.Stream.TTVAddon.BTTV"));
+ 	ui->twitchAddonDropdown->addItem(QTStr("Basic.Settings.Stream.TTVAddon.FFZ"));
 diff --git a/frontend/utility/android-tools.cpp b/frontend/utility/android-tools.cpp
-index 0451ac473..9fdcb0d77 100644
+index 0451ac4..5bd9c70 100644
 --- a/frontend/utility/android-tools.cpp
 +++ b/frontend/utility/android-tools.cpp
-@@ -2695,11 +2695,9 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+@@ -35,6 +35,7 @@
+ #include <QFile>
+ #include <QFileInfo>
+ #include <QFrame>
++#include <QGroupBox>
+ #include <QGridLayout>
+ #include <QInputDialog>
+ #include <QDialogButtonBox>
+@@ -85,6 +86,11 @@
+ #include <string>
+ #include <vector>
+ 
++#ifdef __ANDROID__
++QStringList AndroidPickStartDestinations(QWidget *parent);
++bool AndroidStartSelectedDestination(const QString &destination, QWidget *parent);
++#endif
++
+ namespace {
+ std::atomic<bool> androidFrontendClosing{false};
+ void *FindAndroidJni()
+@@ -123,7 +129,7 @@ std::map<std::string, std::string> g_verticalSceneLinks;
+ std::vector<std::string> g_verticalManagedScenes;
+ uint64_t g_verticalConfigVersion = 0;
+ 
+-void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream = false);
++void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream = false, bool showMultistream = false);
+ 
+ std::string MultiConfigFilePath()
+ {
+@@ -1160,7 +1166,27 @@ void SaveAllObsStateBridge()
+ std::string BuildStateJsonOnGuiThread()
+ {
+ 	nlohmann::json j;
+-	j["streaming"] = obs_frontend_streaming_active();
++	const bool mainStreaming = obs_frontend_streaming_active();
++	const bool verticalStreaming = IsVerticalStreamingActive();
++	bool multistreamActive = false;
++	if (const auto cfg = LoadMultiConfig(); cfg.contains("targets") && cfg["targets"].is_array()) {
++		using IsMultiActiveFn = bool (*)(const char *);
++		void *jni = FindAndroidJni();
++		auto fnIsActive = jni ? reinterpret_cast<IsMultiActiveFn>(dlsym(jni, "obs_android_multistream_is_active")) : nullptr;
++		if (fnIsActive) {
++			for (const auto &target : cfg["targets"]) {
++				const std::string id = target.value("id", "");
++				if (!id.empty() && fnIsActive(id.c_str())) {
++					multistreamActive = true;
++					break;
++				}
++			}
++		}
++	}
++	j["mainStreaming"] = mainStreaming;
++	j["verticalStreaming"] = verticalStreaming;
++	j["multistreamStreaming"] = multistreamActive;
++	j["streaming"] = mainStreaming || verticalStreaming || multistreamActive;
+ 	j["recording"] = obs_frontend_recording_active();
+ 	j["studioMode"] = obs_frontend_preview_program_mode_active();
+ 	j["fps"] = obs_get_active_fps();
+@@ -1306,6 +1332,46 @@ std::string ExecuteActionJsonOnGuiThread(const std::string &body)
+ 			else
+ 				obs_frontend_streaming_start();
+ 			resp["ok"] = true;
++		} else if (act == "stop_all_streams") {
++			if (obs_frontend_streaming_active())
++				obs_frontend_streaming_stop();
++			void *jni = FindAndroidJni();
++			using StopFn = bool (*)(const char *);
++			using StopVerticalFn = bool (*)();
++			auto stopMulti = jni ? reinterpret_cast<StopFn>(dlsym(jni, "obs_android_multistream_stop_target")) : nullptr;
++			auto stopVertical = jni ? reinterpret_cast<StopVerticalFn>(dlsym(jni, "obs_android_vertical_stop_stream")) : nullptr;
++			if (stopVertical)
++				stopVertical();
++			const auto cfg = LoadMultiConfig();
++			if (stopMulti && cfg.contains("targets") && cfg["targets"].is_array()) {
++				for (const auto &target : cfg["targets"]) {
++					const std::string id = target.value("id", "");
++					if (!id.empty())
++						stopMulti(id.c_str());
++				}
++			}
++			resp["ok"] = true;
++		} else if (act == "pick_stream_destinations") {
++			if (auto *mainWin = OBSBasic::Get()) {
++				const QStringList selected = AndroidPickStartDestinations(mainWin);
++				bool startMain = false;
++				QStringList failed;
++				for (const QString &destination : selected) {
++					if (destination == QStringLiteral("@main")) {
++						startMain = true;
++					} else if (!AndroidStartSelectedDestination(destination, mainWin)) {
++						failed << destination;
++					}
++				}
++				if (startMain)
++					mainWin->StartStreamingFromAndroidOverlay();
++				if (!failed.isEmpty())
++					OBSMessageBox::warning(mainWin, QStringLiteral("Emisión"),
++							       QStringLiteral("No se pudieron iniciar: %1").arg(failed.join(QStringLiteral(", "))));
++				resp["ok"] = !selected.isEmpty();
++			} else {
++				resp["error"] = "OBS no esta listo";
++			}
+ 		} else if (act == "toggle_record") {
+ 			if (obs_frontend_recording_active())
+ 				obs_frontend_recording_stop();
+@@ -2038,12 +2104,20 @@ void OpenVerticalScenesDialog(QWidget *parent, std::shared_ptr<nlohmann::json> c
+ 	monitor->SetSource(nullptr);
+ }
+ 
+-void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
++void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream, bool showMultistream)
+ {
+ 	static QPointer<QDialog> activeDialog;
+ 	static QPointer<QTabWidget> activeTabs;
+ 	static QPointer<QWidget> activeVerticalTab;
+ 	static QPointer<QWidget> activeMultiTab;
++	static bool activeShowsMultistream = false;
++	if (activeDialog && activeShowsMultistream != showMultistream) {
++		activeDialog->close();
++		activeDialog = nullptr;
++		activeTabs = nullptr;
++		activeVerticalTab = nullptr;
++		activeMultiTab = nullptr;
++	}
+ 	if (activeDialog) {
+ 		if (activeTabs) {
+ 			if (openMultistream && activeMultiTab)
+@@ -2068,7 +2142,8 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+ 
+ 	auto *dlg = new QDialog(parent);
+ 	dlg->setAttribute(Qt::WA_DeleteOnClose);
+-	dlg->setWindowTitle(QStringLiteral("Captura Vertical 9:16 y Multistreaming"));
++	dlg->setWindowTitle(showMultistream ? QStringLiteral("Emisión y destinos multistream")
++					    : QStringLiteral("Captura Vertical 9:16"));
+ 	dlg->resize(QSize(920, 560).boundedTo(parent->screen()->availableGeometry().size()));
+ 
+ 	auto *rootLayout = new QVBoxLayout(dlg);
+@@ -2077,6 +2152,7 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+ 	auto *tabs = new QTabWidget(dlg);
+ 	activeDialog = dlg;
+ 	activeTabs = tabs;
++	activeShowsMultistream = showMultistream;
+ 	rootLayout->addWidget(tabs, 1);
+ 
+ 	auto cfg = std::make_shared<nlohmann::json>(LoadMultiConfig());
+@@ -2660,11 +2736,12 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+ 		}
+ 	});
+ 
+-	tabs->addTab(vertTab, QStringLiteral("Captura Vertical 9:16"));
++	if (!showMultistream)
++		tabs->addTab(vertTab, QStringLiteral("Captura Vertical 9:16"));
+ 
+ 	// ==================== TAB 2: MULTISTREAMING RTMP ====================
+ 	auto *multiTab = new QWidget(tabs);
+-	activeMultiTab = multiTab;
++	activeMultiTab = showMultistream ? multiTab : nullptr;
+ 	auto *multiLayout = new QVBoxLayout(multiTab);
+ 
+ 	auto *listWidget = new QListWidget(multiTab);
+@@ -2695,11 +2772,9 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
  	};
  
  	auto *multiBtns = new QHBoxLayout();
@@ -15,7 +231,7 @@ index 0451ac473..9fdcb0d77 100644
  	multiBtns->addWidget(btnStartAll);
  	multiBtns->addWidget(btnStopAll);
  	multiBtns->addWidget(btnRemove);
-@@ -2728,6 +2726,12 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+@@ -2728,6 +2803,12 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
  	addForm->addRow(QStringLiteral("Formato:"), cbFeed);
  	addForm->addRow(QStringLiteral("Bitrate (kbps):"), spBitrate);
  	multiLayout->addLayout(addForm);
@@ -28,7 +244,7 @@ index 0451ac473..9fdcb0d77 100644
  	multiLayout->addWidget(btnAdd);
  
  	auto startTarget = [=](const nlohmann::json &t) -> bool {
-@@ -2768,29 +2772,55 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+@@ -2768,29 +2849,75 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
  		refreshList();
  	});
  
@@ -58,6 +274,14 @@ index 0451ac473..9fdcb0d77 100644
 +		layout->addWidget(new QLabel(QStringLiteral("Selecciona uno o varios destinos guardados:"), &picker));
 +		auto *choices = new QListWidget(&picker);
 +		std::vector<std::string> ids;
++		const bool verticalActive = IsVerticalStreamingActive();
++		auto *verticalItem = new QListWidgetItem(QStringLiteral("Transmisión vertical 9:16"), choices);
++		verticalItem->setData(Qt::UserRole, QStringLiteral("@vertical"));
++		verticalItem->setFlags(verticalItem->flags() | Qt::ItemIsUserCheckable);
++		verticalItem->setCheckState(verticalActive ? Qt::Checked : Qt::Unchecked);
++		if (verticalActive)
++			verticalItem->setFlags(verticalItem->flags() & ~Qt::ItemIsEnabled);
++		ids.push_back("@vertical");
 +		for (const auto &target : (*cfg)["targets"]) {
 +			const std::string id = target.value("id", "");
 +			const bool active = fnIsMulti && fnIsMulti(id.c_str());
@@ -83,13 +307,25 @@ index 0451ac473..9fdcb0d77 100644
 +			return;
 +		bool anySelected = false;
 +		QStringList failed;
-+		for (int i = 0; i < choices->count() && i < int((*cfg)["targets"].size()); ++i) {
++		for (int i = 0; i < choices->count(); ++i) {
++			// The vertical destination is listed before the saved RTMP targets.
++			if (i == 0 && choices->item(i)->data(Qt::UserRole).toString() == QStringLiteral("@vertical")) {
++				if (choices->item(i)->checkState() == Qt::Checked) {
++					anySelected = true;
++					if (!verticalActive && !ToggleVerticalStream(dlg, true))
++						failed << QStringLiteral("Transmisión vertical 9:16");
++				}
++				continue;
++			}
 +			if (choices->item(i)->checkState() != Qt::Checked)
  				continue;
 -			startTarget(t);
 +			anySelected = true;
-+			const auto &target = (*cfg)["targets"][i];
-+			const std::string id = ids[size_t(i)];
++			const size_t targetIndex = size_t(i - 1);
++			if (targetIndex >= (*cfg)["targets"].size())
++				continue;
++			const auto &target = (*cfg)["targets"][targetIndex];
++			const std::string id = ids[targetIndex + 1];
 +			if ((!fnIsMulti || !fnIsMulti(id.c_str())) && !startTarget(target))
 +				failed << QString::fromStdString(target.value("name", "Destino"));
 +		}
@@ -104,3 +340,420 @@ index 0451ac473..9fdcb0d77 100644
  		refreshList();
  	});
  
+@@ -2816,8 +2943,9 @@ void OpenMultistreamAndVerticalDialog(QWidget *parent, bool openMultistream)
+ 	});
+ 
+ 	refreshList();
+-	tabs->addTab(multiTab, QStringLiteral("Multistreaming RTMP"));
+-	if (openMultistream)
++	if (showMultistream)
++		tabs->addTab(multiTab, QStringLiteral("Destinos multistream"));
++	if (openMultistream && showMultistream)
+ 		tabs->setCurrentWidget(multiTab);
+ 
+ 	QObject::connect(tabs, &QTabWidget::currentChanged, dlg, [=]() {
+@@ -5497,6 +5625,311 @@ void OnFrontendEventAndroid(enum obs_frontend_event event, void *)
+ }
+ } // namespace
+ 
++QWidget *CreateAndroidMultistreamSettingsSection(QWidget *parent)
++{
++	auto cfg = std::make_shared<nlohmann::json>(LoadMultiConfig());
++	auto *section = new QWidget(parent);
++	auto *root = new QVBoxLayout(section);
++	root->setContentsMargins(4, 0, 4, 0);
++	root->setSpacing(5);
++	auto *sectionTitle = new QLabel(QStringLiteral("OTRAS SALIDAS"), section);
++	sectionTitle->setStyleSheet(QStringLiteral("font-weight: 600; color: palette(text); padding-top: 4px;"));
++	root->addWidget(sectionTitle);
++	auto *description = new QLabel(
++		QStringLiteral("Añade redes adicionales. Se pueden iniciar junto con la emisión principal o vertical."), section);
++	description->setWordWrap(true);
++	root->addWidget(description);
++
++	auto *list = new QListWidget(section);
++	list->setSelectionMode(QAbstractItemView::SingleSelection);
++	list->setWordWrap(false);
++	list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++	list->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++	root->addWidget(list);
++
++	auto *status = new QLabel(section);
++	status->setWordWrap(true);
++	root->addWidget(status);
++
++	auto *actions = new QHBoxLayout();
++	auto *addButton = new QPushButton(QStringLiteral("＋ Agregar destino"), section);
++	auto *editButton = new QPushButton(QStringLiteral("Editar"), section);
++	auto *removeButton = new QPushButton(QStringLiteral("Eliminar"), section);
++	actions->addWidget(addButton, 1);
++	actions->addWidget(editButton);
++	actions->addWidget(removeButton);
++	root->addLayout(actions);
++
++	auto *form = new QWidget(section);
++	auto *formLayout = new QFormLayout(form);
++	formLayout->setContentsMargins(0, 4, 0, 0);
++	formLayout->setVerticalSpacing(8);
++	formLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
++	auto *name = new QLineEdit(form);
++	name->setMinimumHeight(48);
++	name->setPlaceholderText(QStringLiteral("Ej. YouTube, Twitch o TikTok"));
++	auto *server = new QLineEdit(form);
++	server->setMinimumHeight(48);
++	server->setPlaceholderText(QStringLiteral("rtmps://servidor/live"));
++	auto *key = new QLineEdit(form);
++	key->setMinimumHeight(48);
++	key->setEchoMode(QLineEdit::Password);
++	key->setPlaceholderText(QStringLiteral("Clave de transmisión"));
++	auto *format = new QComboBox(form);
++	format->setMinimumHeight(48);
++	format->addItem(QStringLiteral("Programa horizontal · 16:9"), false);
++	format->addItem(QStringLiteral("Lienzo vertical · 9:16"), true);
++	auto *bitrate = new QSpinBox(form);
++	bitrate->setMinimumHeight(48);
++	bitrate->setRange(500, 12000);
++	bitrate->setSingleStep(500);
++	bitrate->setValue(4000);
++	bitrate->setSuffix(QStringLiteral(" kbps"));
++	formLayout->addRow(QStringLiteral("Nombre:"), name);
++	formLayout->addRow(QStringLiteral("Servidor:"), server);
++	formLayout->addRow(QStringLiteral("Clave:"), key);
++	formLayout->addRow(QStringLiteral("Formato:"), format);
++	formLayout->addRow(QStringLiteral("Bitrate:"), bitrate);
++
++	auto *formActions = new QHBoxLayout();
++	formActions->addStretch();
++	auto *cancelButton = new QPushButton(QStringLiteral("Cancelar"), form);
++	auto *saveButton = new QPushButton(QStringLiteral("Guardar destino"), form);
++	cancelButton->setMinimumHeight(46);
++	saveButton->setMinimumHeight(46);
++	formActions->addWidget(cancelButton);
++	formActions->addWidget(saveButton);
++	formLayout->addRow(formActions);
++	form->hide();
++	root->addWidget(form);
++
++	auto editIndex = std::make_shared<int>(-1);
++	auto refresh = [=]() {
++		*cfg = LoadMultiConfig();
++		list->clear();
++		using IsMultiActiveFn = bool (*)(const char *);
++		void *jni = FindAndroidJni();
++		auto isActive = jni ? reinterpret_cast<IsMultiActiveFn>(dlsym(jni, "obs_android_multistream_is_active")) : nullptr;
++		int activeCount = 0;
++		for (size_t i = 0; i < (*cfg)["targets"].size(); ++i) {
++			const auto &target = (*cfg)["targets"][i];
++			const std::string id = target.value("id", "");
++			const bool active = isActive && !id.empty() && isActive(id.c_str());
++			activeCount += active ? 1 : 0;
++			const QString line = QStringLiteral("%1%2  ·  %3  ·  %4 kbps\n%5")
++					     .arg(active ? QStringLiteral("●  ") : QString())
++					     .arg(QString::fromStdString(target.value("name", "Destino")))
++					     .arg(target.value("vertical", false) ? QStringLiteral("Vertical 9:16")
++											 : QStringLiteral("Horizontal 16:9"))
++					     .arg(target.value("bitrate", 4000))
++					     .arg(QString::fromStdString(target.value("server", "")));
++			auto *item = new QListWidgetItem(line, list);
++			item->setSizeHint(QSize(0, 52));
++			item->setToolTip(line);
++		}
++		// Let the parent Emisión scroll area move the complete section; a nested
++		// list scroller traps swipe gestures on Android even when the list is empty.
++		list->setFixedHeight(int((*cfg)["targets"].size()) * 58);
++		if (list->count() == 0) {
++			status->setText(QStringLiteral("Aún no hay destinos guardados."));
++		} else {
++			status->setText(activeCount ? QStringLiteral("%1 destino(s) en vivo.").arg(activeCount)
++						    : QStringLiteral("%1 destino(s) guardado(s). Ninguno está transmitiendo.")
++							  .arg(list->count()));
++		}
++		editButton->setEnabled(list->currentRow() >= 0);
++		removeButton->setEnabled(list->currentRow() >= 0);
++	};
++	auto resetForm = [=]() {
++		*editIndex = -1;
++		name->clear();
++		server->clear();
++		key->clear();
++		format->setCurrentIndex(0);
++		bitrate->setValue(4000);
++		form->hide();
++		addButton->setText(QStringLiteral("＋ Agregar destino"));
++	};
++	QObject::connect(list, &QListWidget::currentRowChanged, section, [=](int row) {
++		editButton->setEnabled(row >= 0);
++		removeButton->setEnabled(row >= 0);
++	});
++	QObject::connect(addButton, &QPushButton::clicked, section, [=]() {
++		if (form->isVisible() && *editIndex < 0) {
++			resetForm();
++			return;
++		}
++		resetForm();
++		form->show();
++		name->setFocus();
++		addButton->setText(QStringLiteral("Cerrar formulario"));
++	});
++	QObject::connect(editButton, &QPushButton::clicked, section, [=]() {
++		const int row = list->currentRow();
++		if (row < 0 || row >= int((*cfg)["targets"].size()))
++			return;
++		const auto &target = (*cfg)["targets"][size_t(row)];
++		*editIndex = row;
++		name->setText(QString::fromStdString(target.value("name", "")));
++		server->setText(QString::fromStdString(target.value("server", "")));
++		key->setText(QString::fromStdString(target.value("key", "")));
++		format->setCurrentIndex(target.value("vertical", false) ? 1 : 0);
++		bitrate->setValue(target.value("bitrate", 4000));
++		form->show();
++		addButton->setText(QStringLiteral("Cerrar formulario"));
++	});
++	QObject::connect(removeButton, &QPushButton::clicked, section, [=]() {
++		const int row = list->currentRow();
++		if (row < 0 || row >= int((*cfg)["targets"].size()))
++			return;
++		const std::string id = (*cfg)["targets"][size_t(row)].value("id", "");
++		if (!id.empty()) {
++			if (void *jni = FindAndroidJni()) {
++				using StopFn = bool (*)(const char *);
++				if (auto stop = reinterpret_cast<StopFn>(dlsym(jni, "obs_android_multistream_stop_target")))
++					stop(id.c_str());
++			}
++		}
++		(*cfg)["targets"].erase((*cfg)["targets"].begin() + row);
++		SaveMultiConfig(*cfg);
++		refresh();
++	});
++	QObject::connect(cancelButton, &QPushButton::clicked, section, [=]() { resetForm(); });
++	QObject::connect(saveButton, &QPushButton::clicked, section, [=]() {
++		const QString srv = server->text().trimmed();
++		if (srv.isEmpty()) {
++			status->setText(QStringLiteral("Escribe la dirección del servidor RTMP/RTMPS."));
++			server->setFocus();
++			return;
++		}
++		QString nm = name->text().trimmed();
++		if (nm.isEmpty())
++			nm = QStringLiteral("Destino %1").arg(*editIndex >= 0 ? *editIndex + 1 : (*cfg)["targets"].size() + 1);
++		nlohmann::json target = {{"name", nm.toStdString()},
++					 {"server", srv.toStdString()},
++					 {"key", key->text().trimmed().toStdString()},
++					 {"vertical", format->currentData().toBool()},
++					 {"bitrate", bitrate->value()}};
++		if (*editIndex >= 0 && *editIndex < int((*cfg)["targets"].size())) {
++			const auto &old = (*cfg)["targets"][size_t(*editIndex)];
++			const std::string id = old.value("id", "");
++			if (!id.empty()) {
++				if (void *jni = FindAndroidJni()) {
++					using IsActiveFn = bool (*)(const char *);
++					if (auto active = reinterpret_cast<IsActiveFn>(dlsym(jni, "obs_android_multistream_is_active"));
++					    active && active(id.c_str())) {
++						status->setText(QStringLiteral("Detén este destino antes de editarlo."));
++						return;
++					}
++				}
++				target["id"] = id;
++			}
++			(*cfg)["targets"][size_t(*editIndex)] = std::move(target);
++		} else {
++			target["id"] = "ms_" + std::to_string(QDateTime::currentMSecsSinceEpoch());
++			(*cfg)["targets"].push_back(std::move(target));
++		}
++		SaveMultiConfig(*cfg);
++		resetForm();
++		refresh();
++	});
++	refresh();
++	return section;
++}
++
++QStringList AndroidPickStartDestinations(QWidget *parent)
++{
++	const auto cfg = LoadMultiConfig();
++	QDialog picker(parent);
++	picker.setWindowTitle(QStringLiteral("Elegir destinos de transmisión"));
++	auto *layout = new QVBoxLayout(&picker);
++	layout->addWidget(new QLabel(QStringLiteral("Selecciona dónde quieres transmitir:"), &picker));
++	auto *choices = new QListWidget(&picker);
++	choices->setSelectionMode(QAbstractItemView::NoSelection);
++	auto addChoice = [choices](const QString &label, const QString &id, bool active) {
++		auto *item = new QListWidgetItem(label, choices);
++		item->setData(Qt::UserRole, id);
++		item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
++		item->setCheckState(active ? Qt::Checked : Qt::Unchecked);
++		if (active)
++			item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
++	};
++	addChoice(QStringLiteral("Emisión principal (Ajustes → Emisión)"), QStringLiteral("@main"),
++		  obs_frontend_streaming_active());
++	const bool verticalActive = IsVerticalStreamingActive();
++	addChoice(QStringLiteral("Transmisión vertical 9:16"), QStringLiteral("@vertical"), verticalActive);
++	void *jni = FindAndroidJni();
++	using IsMultiActiveFn = bool (*)(const char *);
++	auto fnIsMulti = jni ? reinterpret_cast<IsMultiActiveFn>(dlsym(jni, "obs_android_multistream_is_active")) : nullptr;
++	if (cfg.contains("targets") && cfg["targets"].is_array()) {
++		for (const auto &target : cfg["targets"]) {
++			const std::string id = target.value("id", "");
++			if (id.empty())
++				continue;
++			QString label = QString::fromStdString(target.value("name", "Destino"));
++			label += target.value("vertical", false) ? QStringLiteral(" · Vertical 9:16")
++							 : QStringLiteral(" · Horizontal 16:9");
++			const bool active = fnIsMulti && fnIsMulti(id.c_str());
++			if (active)
++				label += QStringLiteral(" · EN VIVO");
++			addChoice(label, QString::fromStdString(id), active);
++		}
++	}
++	layout->addWidget(choices, 1);
++	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &picker);
++	buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Iniciar seleccionados"));
++	QObject::connect(buttons, &QDialogButtonBox::accepted, &picker, &QDialog::accept);
++	QObject::connect(buttons, &QDialogButtonBox::rejected, &picker, &QDialog::reject);
++	layout->addWidget(buttons);
++	if (picker.exec() != QDialog::Accepted)
++		return {};
++	QStringList selected;
++	for (int i = 0; i < choices->count(); ++i) {
++		const auto *item = choices->item(i);
++		if (item->checkState() == Qt::Checked && item->flags().testFlag(Qt::ItemIsEnabled))
++			selected << item->data(Qt::UserRole).toString();
++	}
++	return selected;
++}
++
++bool AndroidStartSelectedDestination(const QString &destination, QWidget *parent)
++{
++	if (destination == QStringLiteral("@vertical"))
++		return ToggleVerticalStream(parent, true);
++	if (destination == QStringLiteral("@main"))
++		return false;
++	const auto cfg = LoadMultiConfig();
++	const std::string id = destination.toStdString();
++	if (!cfg.contains("targets") || !cfg["targets"].is_array())
++		return false;
++	for (const auto &target : cfg["targets"]) {
++		if (target.value("id", "") != id)
++			continue;
++		void *jni = FindAndroidJni();
++		using StartMultiExFn = bool (*)(const char *, const char *, const char *, int, bool, int, int, const char *, int);
++		using IsMultiActiveFn = bool (*)(const char *);
++		auto fnStart = jni ? reinterpret_cast<StartMultiExFn>(dlsym(jni, "obs_android_multistream_start_target_ex")) : nullptr;
++		auto fnIsActive = jni ? reinterpret_cast<IsMultiActiveFn>(dlsym(jni, "obs_android_multistream_is_active")) : nullptr;
++		if (fnIsActive && fnIsActive(id.c_str()))
++			return true;
++		if (!fnStart)
++			break;
++		const auto &vcfg = cfg["vertical"];
++		const int width = vcfg.value("res", 0) == 1 ? 1080 : 720;
++		const int height = vcfg.value("res", 0) == 1 ? 1920 : 1280;
++		SyncVerticalRuntimeFromConfig(cfg);
++		PushVerticalParamsToBackend();
++		const std::string scene = ResolveVerticalBackendSceneName(g_verticalFollowScene);
++		return fnStart(id.c_str(), target.value("server", "").c_str(), target.value("key", "").c_str(),
++			       target.value("bitrate", 4000), target.value("vertical", false), width, height,
++			       scene.c_str(), g_verticalFitMode);
++	}
++	if (parent)
++		OBSMessageBox::warning(parent, QStringLiteral("Multistreaming"),
++				       QStringLiteral("No se pudo iniciar el destino seleccionado."));
++	return false;
++}
++
+ void OpenPerformanceDiagnostics(QWidget *parent)
+ {
+     QDialog dialog(parent);
+@@ -5786,11 +6219,6 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 			OpenMultistreamAndVerticalDialog(mainWindow, false);
+ 		});
+ 
+-		QAction *actMulti = toolsMenu->addAction(QStringLiteral("Multistreaming RTMP..."));
+-		QObject::connect(actMulti, &QAction::triggered, mainWindow, [mainWindow]() {
+-			OpenMultistreamAndVerticalDialog(mainWindow, true);
+-		});
+-
+ 		QAction *actSrt = toolsMenu->addAction(QStringLiteral("Salida SRT (Wi-Fi / Datos moviles)..."));
+ 		QObject::connect(actSrt, &QAction::triggered, mainWindow, [mainWindow]() {
+ 			OpenSrtOutputDialog(mainWindow);
+diff --git a/frontend/widgets/OBSBasic.hpp b/frontend/widgets/OBSBasic.hpp
+index 571de9f..c1818c1 100644
+--- a/frontend/widgets/OBSBasic.hpp
++++ b/frontend/widgets/OBSBasic.hpp
+@@ -1387,6 +1387,7 @@ private:
+ public slots:
+ 	void DisplayStreamStartError();
+ 	void StartStreaming();
++	void StartStreamingFromAndroidOverlay();
+ 	void StopStreaming();
+ 	void ForceStopStreaming();
+ 
+diff --git a/frontend/widgets/OBSBasic_Streaming.cpp b/frontend/widgets/OBSBasic_Streaming.cpp
+index bd6deb5..a771603 100644
+--- a/frontend/widgets/OBSBasic_Streaming.cpp
++++ b/frontend/widgets/OBSBasic_Streaming.cpp
+@@ -26,10 +26,17 @@
+ #endif
+ 
+ #include <qt-wrappers.hpp>
++#include <QStringList>
+ 
+ #define STREAMING_START "==== Streaming Start ==============================================="
+ #define STREAMING_STOP "==== Streaming Stop ================================================"
+ 
++#ifdef __ANDROID__
++QStringList AndroidPickStartDestinations(QWidget *parent);
++bool AndroidStartSelectedDestination(const QString &destination, QWidget *parent);
++static bool dispatchingAndroidDestination = false;
++#endif
++
+ void OBSBasic::DisplayStreamStartError()
+ {
+ 	QString message = !outputHandler->lastError.empty() ? QTStr(outputHandler->lastError.c_str())
+@@ -127,6 +134,18 @@ void OBSBasic::StartStreaming()
+ 	setupStreamingGuard = outputHandler->SetupStreaming(service, finish_stream_setup);
+ }
+ 
++void OBSBasic::StartStreamingFromAndroidOverlay()
++{
++#ifdef __ANDROID__
++	const bool previous = dispatchingAndroidDestination;
++	dispatchingAndroidDestination = true;
++	StreamActionTriggered();
++	dispatchingAndroidDestination = previous;
++#else
++	StreamActionTriggered();
++#endif
++}
++
+ void OBSBasic::StopStreaming()
+ {
+ 	SaveProject();
+@@ -418,6 +437,27 @@ void OBSBasic::StreamActionTriggered()
+ 
+ 		StopStreaming();
+ 	} else {
++#ifdef __ANDROID__
++		if (!dispatchingAndroidDestination) {
++			const QStringList destinations = AndroidPickStartDestinations(this);
++			if (destinations.isEmpty())
++				return;
++			bool startMainStream = false;
++			for (const QString &destination : destinations) {
++				if (destination == QStringLiteral("@main")) {
++					startMainStream = true;
++					continue;
++				}
++				AndroidStartSelectedDestination(destination, this);
++			}
++			if (startMainStream) {
++				dispatchingAndroidDestination = true;
++				StreamActionTriggered();
++				dispatchingAndroidDestination = false;
++			}
++			return;
++		}
++#endif
+ 		if (!UIValidation::NoSourcesConfirmation(this)) {
+ 			return;
+ 		}

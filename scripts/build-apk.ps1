@@ -24,6 +24,28 @@ foreach ($module in @('obs-filters', 'obs-ffmpeg', 'vlc-video')) {
         Copy-Item -Path (Join-Path $ProjectRoot "out/src/obs-studio/plugins/$module/data/*") -Destination (Join-Path $ProjectRoot "android/app/src/main/assets/obs-modules/core/$module") -Recurse -Force
     }
 }
+$advancedMasksSource = Join-Path $ProjectRoot 'out/advanced-masks-src'
+$advancedMasksBinary = Join-Path $ProjectRoot 'out/libobs-arm64/plugins/obs-advanced-masks/libobs-advanced-masks.so'
+if (Test-Path -LiteralPath $advancedMasksBinary) {
+    Copy-Item -LiteralPath $advancedMasksBinary -Destination (Join-Path $ProjectRoot 'out/android/jniLibs/arm64-v8a') -Force
+    $advancedMasksData = Join-Path $ProjectRoot 'android/app/src/main/assets/obs-modules/core/obs-advanced-masks'
+    New-Item -ItemType Directory -Force -Path $advancedMasksData | Out-Null
+    Copy-Item -Path (Join-Path $advancedMasksSource 'data/*') -Destination $advancedMasksData -Recurse -Force
+    $advancedMasksLicense = Join-Path $ProjectRoot 'android/app/src/main/assets/licenses/advanced-masks'
+    New-Item -ItemType Directory -Force -Path $advancedMasksLicense | Out-Null
+    Copy-Item -LiteralPath (Join-Path $advancedMasksSource 'LICENSE') -Destination (Join-Path $advancedMasksLicense 'LICENSE') -Force
+}
+$strokeGlowShadowSource = Join-Path $ProjectRoot 'out/stroke-glow-shadow-src'
+$strokeGlowShadowBinary = Join-Path $ProjectRoot 'out/libobs-arm64/plugins/obs-stroke-glow-shadow/libobs-stroke-glow-shadow.so'
+if (Test-Path -LiteralPath $strokeGlowShadowBinary) {
+    Copy-Item -LiteralPath $strokeGlowShadowBinary -Destination (Join-Path $ProjectRoot 'out/android/jniLibs/arm64-v8a') -Force
+    $strokeGlowShadowData = Join-Path $ProjectRoot 'android/app/src/main/assets/obs-modules/core/obs-stroke-glow-shadow'
+    New-Item -ItemType Directory -Force -Path $strokeGlowShadowData | Out-Null
+    Copy-Item -Path (Join-Path $strokeGlowShadowSource 'data/*') -Destination $strokeGlowShadowData -Recurse -Force
+    $strokeGlowShadowLicense = Join-Path $ProjectRoot 'android/app/src/main/assets/licenses/stroke-glow-shadow'
+    New-Item -ItemType Directory -Force -Path $strokeGlowShadowLicense | Out-Null
+    Copy-Item -LiteralPath (Join-Path $strokeGlowShadowSource 'LICENSE') -Destination (Join-Path $strokeGlowShadowLicense 'LICENSE') -Force
+}
 $libvlcBin = Join-Path $ProjectRoot 'out/deps/libvlc/extracted/jni/arm64-v8a/libvlc.so'
 if (Test-Path -LiteralPath $libvlcBin) {
     Copy-Item -LiteralPath $libvlcBin -Destination (Join-Path $ProjectRoot 'out/android/jniLibs/arm64-v8a/libvlc.so') -Force

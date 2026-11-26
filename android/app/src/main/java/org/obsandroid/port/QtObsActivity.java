@@ -1132,7 +1132,7 @@ public final class QtObsActivity extends QtActivity {
     protected void onResume() {
         super.onResume();
         CustomBrowserDockManager.onActivityPaused(false);
-        FloatingSceneOverlay.onAppForegrounded();
+        FloatingSceneOverlay.onAppForegrounded(this);
         if (CaptureService.sessionBgActive) {
             try {
                 startService(new Intent(this, CaptureService.class)

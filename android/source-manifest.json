@@ -2,7 +2,7 @@
     "files": [
         {
             "path": "CMakeLists.txt",
-            "sha256Lf": "1d62f44f6eff94597ef90765c8f26446192d36f5c1cbe3a0a84e93b922bd23fc"
+            "sha256Lf": "052f26376f0f870ffc6ca7219d45730b768f25927db3673dedd63f0d044ff115"
         },
         {
             "path": "cmake/android/compilerconfig.cmake",
@@ -90,7 +90,7 @@
         },
         {
             "path": "frontend/settings/OBSBasicSettings_Stream.cpp",
-            "sha256Lf": "da3d71f0a988e2e46a74bd4960a41c75936e11a8235827286b273ea535822e37"
+            "sha256Lf": "4534ee32f168356f8f7c08296c79e6025f253f255ed59c406a6e37a7cceaf95d"
         },
         {
             "path": "frontend/utility/AdvancedOutput.cpp",
@@ -118,7 +118,7 @@
         },
         {
             "path": "frontend/utility/android-tools.cpp",
-            "sha256Lf": "747e85cdfa964966fc4286f2863e37c888030d17e511a58fd231439277f0afa7"
+            "sha256Lf": "290b7c567e50607e5b4b0f22233333ea002a5b6ee57a6a4c10a2f8e9fc872831"
         },
         {
             "path": "frontend/utility/audio-encoders.cpp",
@@ -143,6 +143,10 @@
         {
             "path": "frontend/widgets/OBSBasic.cpp",
             "sha256Lf": "8160f45eafd6bb8dc3a409a706059f2295d9f308c9875ce5cbd224176306243b"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic.hpp",
+            "sha256Lf": "73dba8c6d5d48ef5327bd14a599e94cd9997a4c8d5936cff502b134be1cf6927"
         },
         {
             "path": "frontend/widgets/OBSBasicPreview.cpp",
@@ -175,6 +179,10 @@
         {
             "path": "frontend/widgets/OBSBasic_Service.cpp",
             "sha256Lf": "de12d17a89379498e249c76e0dc4cf4d9a5cd3c8429e2e7f8f2a480a68f1a908"
+        },
+        {
+            "path": "frontend/widgets/OBSBasic_Streaming.cpp",
+            "sha256Lf": "248e93c30cfcf1f3852712d0f07e305ae97ac2d2604613465c63af04439ba380"
         },
         {
             "path": "frontend/widgets/OBSBasic_StudioMode.cpp",

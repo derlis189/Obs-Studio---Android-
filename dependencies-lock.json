@@ -23,6 +23,8 @@
     { "name": "uthash", "url": "https://github.com/troydhanson/uthash.git", "tag": "v2.3.0", "commit": "e493aa90a2833b4655927598f169c31cfcdf7861" },
     { "name": "mbedtls", "url": "https://github.com/Mbed-TLS/mbedtls.git", "tag": "mbedtls-3.6.8", "commit": "82e69999f91126589a28b70dd75b69fbcabe2711", "submodules": [{ "path": "framework", "commit": "ced31491c5ec907a6be533512f19dc1779230ac1" }] },
     { "name": "curl", "url": "https://github.com/curl/curl.git", "tag": "curl-8_11_1", "commit": "75a2079d5c28debb2eaa848ca9430f1fe0d7844c" },
-    { "name": "nlohmann_json", "url": "https://github.com/nlohmann/json.git", "tag": "v3.11.3", "commit": "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03" }
+    { "name": "nlohmann_json", "url": "https://github.com/nlohmann/json.git", "tag": "v3.11.3", "commit": "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03" },
+    { "name": "obs-advanced-masks", "url": "https://github.com/FiniteSingularity/obs-advanced-masks.git", "tag": "v1.6.1", "commit": "8c888208162d9e271b10931ef29e45e871210ec0" },
+    { "name": "obs-stroke-glow-shadow", "url": "https://github.com/FiniteSingularity/obs-stroke-glow-shadow.git", "tag": "v1.6.1", "commit": "6742704be21538a66fe15142162e59dac6eee76e" }
   ]
 }
