@@ -174,9 +174,110 @@ std::string build_gfx_json(const std::string &kind, obs_data_t *s)
         js << "\"accentColor\":\"" << json_escape(obs_data_get_string(s, "accent_color")) << "\","
            << "\"style\":" << obs_data_get_int(s, "bible_style") << ","
            << "\"fontSize\":" << obs_data_get_int(s, "font_size");
+    } else if (kind == "datetime_weather") {
+        js << "\"contentMode\":" << obs_data_get_int(s, "dtw_content") << ","
+           << "\"layout\":" << obs_data_get_int(s, "dtw_layout") << ","
+           << "\"style\":" << obs_data_get_int(s, "dtw_style") << ","
+           << "\"timeFormat24\":" << (obs_data_get_bool(s, "dtw_24h") ? "true" : "false") << ","
+           << "\"showSeconds\":" << (obs_data_get_bool(s, "dtw_seconds") ? "true" : "false") << ","
+           << "\"dateFormat\":" << obs_data_get_int(s, "dtw_date_fmt") << ","
+           << "\"city\":\"" << json_escape(obs_data_get_string(s, "dtw_city")) << "\","
+           << "\"showCity\":" << (obs_data_get_bool(s, "dtw_show_city") ? "true" : "false") << ","
+           << "\"tempUnit\":\"" << json_escape(obs_data_get_string(s, "dtw_unit")) << "\","
+           << "\"autoWeather\":" << (obs_data_get_bool(s, "dtw_auto_weather") ? "true" : "false") << ","
+           << "\"manualTemp\":" << obs_data_get_int(s, "dtw_manual_temp") << ","
+           << "\"manualCondition\":" << obs_data_get_int(s, "dtw_manual_cond") << ","
+           << "\"accentColor\":\"" << json_escape(obs_data_get_string(s, "accent_color")) << "\"";
+    } else if (kind == "advanced_title") {
+        js << "\"localMode\":" << (obs_data_get_bool(s, "at_local_mode") ? "true" : "false") << ","
+           << "\"template\":" << obs_data_get_int(s, "at_template") << ","
+           << "\"animIn\":" << obs_data_get_int(s, "at_anim_in") << ","
+           << "\"animOut\":" << obs_data_get_int(s, "at_anim_out") << ","
+           << "\"inMs\":" << obs_data_get_int(s, "at_in_ms") << ","
+           << "\"outMs\":" << obs_data_get_int(s, "at_out_ms") << ","
+           << "\"autoHideSec\":" << obs_data_get_int(s, "at_auto_hide_sec") << ","
+           << "\"shimmer\":" << (obs_data_get_bool(s, "at_shimmer") ? "true" : "false") << ","
+           << "\"badge\":\"" << json_escape(obs_data_get_string(s, "at_badge")) << "\","
+           << "\"title\":\"" << json_escape(obs_data_get_string(s, "at_title")) << "\","
+           << "\"subtitle\":\"" << json_escape(obs_data_get_string(s, "at_subtitle")) << "\","
+           << "\"ticker\":\"" << json_escape(obs_data_get_string(s, "at_ticker")) << "\","
+           << "\"accentColor\":\"" << json_escape(obs_data_get_string(s, "at_accent_color")) << "\","
+           << "\"bgColor\":\"" << json_escape(obs_data_get_string(s, "at_bg_color")) << "\","
+           << "\"textColor\":\"" << json_escape(obs_data_get_string(s, "at_text_color")) << "\","
+           << "\"align\":" << obs_data_get_int(s, "at_align") << ","
+           << "\"scalePct\":" << obs_data_get_int(s, "at_scale") << ","
+           << "\"logoPath\":\"" << json_escape(obs_data_get_string(s, "at_logo")) << "\"";
     }
     js << "}";
     return js.str();
+}
+
+void compute_dtw_auto_size(obs_data_t *s, int &out_w, int &out_h)
+{
+    int cm = int(obs_data_get_int(s, "dtw_content"));
+    int layout = int(obs_data_get_int(s, "dtw_layout"));
+    int style = int(obs_data_get_int(s, "dtw_style"));
+    bool fmt24 = obs_data_get_bool(s, "dtw_24h");
+    bool showSec = obs_data_get_bool(s, "dtw_seconds");
+    int dateFmt = int(obs_data_get_int(s, "dtw_date_fmt"));
+    bool showCity = obs_data_get_bool(s, "dtw_show_city");
+    const char *cityStr = obs_data_get_string(s, "dtw_city");
+    size_t cityLen = cityStr ? std::strlen(cityStr) : 0;
+    bool hasCity = showCity && cityLen > 0;
+
+    bool showDate = (cm == 0 || cm == 2 || cm == 3 || cm == 5);
+    bool showTime = (cm == 0 || cm == 1 || cm == 3 || cm == 4);
+    bool showWeather = (cm == 0 || cm == 1 || cm == 2 || cm == 6);
+    int sections = (showDate ? 1 : 0) + (showTime ? 1 : 0) + (showWeather ? 1 : 0);
+
+    if (layout >= 1) {
+        // Vertical stacked card: genuinely compact width, height grows with stacked rows
+        int w = 300;
+        if (showDate && dateFmt == 2) w = 404;
+        else if (showDate && dateFmt == 0) w = 344;
+        else if (showTime && (showSec || !fmt24)) w = 344;
+        if (showWeather && hasCity && cityLen > 12) w = std::max(w, 368);
+
+        int h = 44;
+        if (showTime) h += 124;
+        if (showDate) h += 76;
+        if (showWeather) h += (hasCity ? 132 : 104);
+        if (sections <= 1) h = std::max(h, 136);
+
+        out_w = (std::clamp(w, 260, 640) + 3) & ~3;
+        out_h = (std::clamp(h, 128, 720) + 3) & ~3;
+        return;
+    }
+
+    // Horizontal layout (layout == 0)
+    if (style == 2 && sections >= 2) {
+        // Style 2: 2-line Broadcast Card
+        int w = (showTime && showWeather) ? 560 : 480;
+        if (showSec || !fmt24 || (showDate && dateFmt == 2)) w += 64;
+        out_w = (std::clamp(w, 380, 920) + 3) & ~3;
+        out_h = 188;
+        return;
+    }
+
+    int w = 64;
+    if (showTime) {
+        if (showSec && !fmt24) w += 284;
+        else if (showSec || !fmt24) w += 248;
+        else w += 196;
+    }
+    if (showDate) {
+        if (dateFmt == 2) w += 360;
+        else if (dateFmt == 0) w += 272;
+        else if (dateFmt == 1) w += 212;
+        else w += 168;
+    }
+    if (showWeather) {
+        w += hasCity ? (cityLen > 12 ? 284 : 252) : 188;
+    }
+    if (style == 1) w += 32; // extra pill end-cap padding
+
+    out_w = (std::clamp(w, 260, 1360) + 3) & ~3;
+    out_h = 136;
 }
 
 void *gfx_create_common(const char *kind, obs_data_t *s, obs_source_t *source)
@@ -185,8 +286,12 @@ void *gfx_create_common(const char *kind, obs_data_t *s, obs_source_t *source)
     inst->id = ++g_gfx_seq;
     inst->source = source;
     inst->kind = kind;
-    inst->width = int(obs_data_get_int(s, "width"));
-    inst->height = int(obs_data_get_int(s, "height"));
+    if (inst->kind == "datetime_weather" && obs_data_get_bool(s, "dtw_auto_size")) {
+        compute_dtw_auto_size(s, inst->width, inst->height);
+    } else {
+        inst->width = int(obs_data_get_int(s, "width"));
+        inst->height = int(obs_data_get_int(s, "height"));
+    }
     if (inst->width < 256) inst->width = 1280;
     if (inst->height < 120) inst->height = 720;
     inst->config_json = build_gfx_json(inst->kind, s);
@@ -216,8 +321,12 @@ void gfx_update_common(void *data, obs_data_t *s)
 {
     auto *inst = static_cast<GfxInstance *>(data);
     if (!inst) return;
-    inst->width = int(obs_data_get_int(s, "width"));
-    inst->height = int(obs_data_get_int(s, "height"));
+    if (inst->kind == "datetime_weather" && obs_data_get_bool(s, "dtw_auto_size")) {
+        compute_dtw_auto_size(s, inst->width, inst->height);
+    } else {
+        inst->width = int(obs_data_get_int(s, "width"));
+        inst->height = int(obs_data_get_int(s, "height"));
+    }
     if (inst->width < 256) inst->width = 1280;
     if (inst->height < 120) inst->height = 720;
     inst->config_json = build_gfx_json(inst->kind, s);
@@ -357,6 +466,193 @@ obs_properties_t *tm_get_properties(void *)
     return p;
 }
 void *tm_create(obs_data_t *s, obs_source_t *src) { return gfx_create_common("timer", s, src); }
+
+// ---- 5. Date, Time & Weather ----
+const char *dtw_get_name(void *) { return "Fecha, Hora y Clima"; }
+bool dtw_on_props_modified(obs_properties_t *props, obs_property_t *, obs_data_t *s)
+{
+    bool auto_sz = obs_data_get_bool(s, "dtw_auto_size");
+    obs_property_t *pw = obs_properties_get(props, "width");
+    obs_property_t *ph = obs_properties_get(props, "height");
+    if (pw) obs_property_set_visible(pw, !auto_sz);
+    if (ph) obs_property_set_visible(ph, !auto_sz);
+    if (auto_sz) {
+        int aw = 780, ah = 136;
+        compute_dtw_auto_size(s, aw, ah);
+        obs_data_set_int(s, "width", aw);
+        obs_data_set_int(s, "height", ah);
+    }
+    return true;
+}
+void dtw_get_defaults(obs_data_t *s)
+{
+    obs_data_set_default_int(s, "dtw_content", 0); // 0=Todo, 1=Hora+Clima, 2=Fecha+Clima, 3=Fecha+Hora, 4=Hora, 5=Fecha, 6=Clima
+    obs_data_set_default_int(s, "dtw_layout", 0);  // 0=Horizontal, 1=Vertical centrado, 2=Vertical izq, 3=Vertical der
+    obs_data_set_default_int(s, "dtw_style", 0);
+    obs_data_set_default_bool(s, "dtw_24h", true);
+    obs_data_set_default_bool(s, "dtw_seconds", false);
+    obs_data_set_default_int(s, "dtw_date_fmt", 0);
+    obs_data_set_default_string(s, "dtw_city", "Asuncion");
+    obs_data_set_default_bool(s, "dtw_show_city", true);
+    obs_data_set_default_string(s, "dtw_unit", "C");
+    obs_data_set_default_bool(s, "dtw_auto_weather", true);
+    obs_data_set_default_int(s, "dtw_manual_temp", 26);
+    obs_data_set_default_int(s, "dtw_manual_cond", 0);
+    obs_data_set_default_string(s, "accent_color", "#2563EB");
+    obs_data_set_default_bool(s, "dtw_auto_size", true);
+    obs_data_set_default_int(s, "width", 780);
+    obs_data_set_default_int(s, "height", 136);
+}
+obs_properties_t *dtw_get_properties(void *)
+{
+    obs_properties_t *p = obs_properties_create();
+    obs_property_t *content = obs_properties_add_list(p, "dtw_content", "Elementos a mostrar", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(content, "Fecha, Hora y Clima (Todo)", 0);
+    obs_property_list_add_int(content, "Solo Hora y Clima", 1);
+    obs_property_list_add_int(content, "Solo Fecha y Clima", 2);
+    obs_property_list_add_int(content, "Solo Fecha y Hora", 3);
+    obs_property_list_add_int(content, "Solo Hora", 4);
+    obs_property_list_add_int(content, "Solo Fecha", 5);
+    obs_property_list_add_int(content, "Solo Clima", 6);
+    obs_property_set_modified_callback(content, dtw_on_props_modified);
+
+    obs_property_t *lay = obs_properties_add_list(p, "dtw_layout", "Disposición", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(lay, "Horizontal (uno al lado del otro)", 0);
+    obs_property_list_add_int(lay, "Vertical centrado (uno encima del otro)", 1);
+    obs_property_list_add_int(lay, "Vertical izquierda (uno encima del otro)", 2);
+    obs_property_list_add_int(lay, "Vertical derecha (uno encima del otro)", 3);
+    obs_property_set_modified_callback(lay, dtw_on_props_modified);
+
+    obs_property_t *st = obs_properties_add_list(p, "dtw_style", "Diseño visual", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(st, "Noticiero TV (Barra compacta)", 0);
+    obs_property_list_add_int(st, "Píldora Moderna (Glass)", 1);
+    obs_property_list_add_int(st, "Tarjeta Broadcast (2 líneas)", 2);
+    obs_property_list_add_int(st, "Minimalista Transparente", 3);
+    obs_property_list_add_int(st, "Editorial Claro (Fondo blanco)", 4);
+    obs_property_list_add_int(st, "Digital LED Alto Contraste", 5);
+    obs_property_set_modified_callback(st, dtw_on_props_modified);
+
+    obs_property_t *p24 = obs_properties_add_bool(p, "dtw_24h", "Formato 24 horas (desmarcar para AM/PM)");
+    obs_property_set_modified_callback(p24, dtw_on_props_modified);
+    obs_property_t *psec = obs_properties_add_bool(p, "dtw_seconds", "Mostrar segundos en la hora");
+    obs_property_set_modified_callback(psec, dtw_on_props_modified);
+
+    obs_property_t *df = obs_properties_add_list(p, "dtw_date_fmt", "Formato de fecha", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(df, "Larga (Jue, 26 Nov 2026)", 0);
+    obs_property_list_add_int(df, "Corta (26/11/2026)", 1);
+    obs_property_list_add_int(df, "Completa (Jueves 26 de Noviembre)", 2);
+    obs_property_list_add_int(df, "Compacta (26 NOV)", 3);
+    obs_property_set_modified_callback(df, dtw_on_props_modified);
+
+    obs_properties_add_bool(p, "dtw_auto_weather", "Clima automático por internet (Open-Meteo)");
+    obs_properties_add_text(p, "dtw_city", "Ciudad (para clima)", OBS_TEXT_DEFAULT);
+    obs_property_t *pshowCity = obs_properties_add_bool(p, "dtw_show_city", "Mostrar nombre de la ciudad");
+    obs_property_set_modified_callback(pshowCity, dtw_on_props_modified);
+
+    obs_property_t *unit = obs_properties_add_list(p, "dtw_unit", "Unidad de temperatura", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+    obs_property_list_add_string(unit, "Celsius (°C)", "C");
+    obs_property_list_add_string(unit, "Fahrenheit (°F)", "F");
+
+    obs_properties_add_int(p, "dtw_manual_temp", "Temperatura manual / respaldo", -40, 60, 1);
+    obs_property_t *cond = obs_properties_add_list(p, "dtw_manual_cond", "Condición manual / respaldo", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(cond, "Soleado / Despejado", 0);
+    obs_property_list_add_int(cond, "Parcialmente nublado", 1);
+    obs_property_list_add_int(cond, "Nublado", 2);
+    obs_property_list_add_int(cond, "Lluvia", 3);
+    obs_property_list_add_int(cond, "Tormenta", 4);
+    obs_property_list_add_int(cond, "Noche despejada", 5);
+    obs_property_list_add_int(cond, "Niebla", 6);
+
+    obs_properties_add_text(p, "accent_color", "Color de acento (Hex)", OBS_TEXT_DEFAULT);
+    obs_property_t *pauto = obs_properties_add_bool(p, "dtw_auto_size", "Ajustar tamaño automáticamente al diseño y disposición");
+    obs_property_set_modified_callback(pauto, dtw_on_props_modified);
+    obs_properties_add_int(p, "width", "Ancho manual", 260, 1920, 16);
+    obs_properties_add_int(p, "height", "Alto manual", 120, 1080, 8);
+    return p;
+}
+void *dtw_create(obs_data_t *s, obs_source_t *src) { return gfx_create_common("datetime_weather", s, src); }
+
+// ---- 6. Advanced Animated Title Generator ----
+const char *at_get_name(void *) { return "Títulos Avanzados (Animados)"; }
+void at_get_defaults(obs_data_t *s)
+{
+    obs_data_set_default_bool(s, "at_local_mode", false);
+    obs_data_set_default_int(s, "at_template", 0);
+    obs_data_set_default_int(s, "at_anim_in", 0);
+    obs_data_set_default_int(s, "at_anim_out", 0);
+    obs_data_set_default_int(s, "at_in_ms", 650);
+    obs_data_set_default_int(s, "at_out_ms", 450);
+    obs_data_set_default_int(s, "at_auto_hide_sec", 0);
+    obs_data_set_default_bool(s, "at_shimmer", true);
+    obs_data_set_default_string(s, "at_badge", "EN VIVO");
+    obs_data_set_default_string(s, "at_title", "TÍTULO PRINCIPAL DEL PROGRAMA");
+    obs_data_set_default_string(s, "at_subtitle", "Subtítulo o descripción en pantalla");
+    obs_data_set_default_string(s, "at_ticker", "ÚLTIMO MOMENTO  •  TRANSMISIÓN EN DIRECTO  •  SÍGUENOS EN REDES SOCIALES  •  ");
+    obs_data_set_default_string(s, "at_accent_color", "#2563EB");
+    obs_data_set_default_string(s, "at_bg_color", "#0F172A");
+    obs_data_set_default_string(s, "at_text_color", "#FFFFFF");
+    obs_data_set_default_int(s, "at_align", 0);
+    obs_data_set_default_int(s, "at_scale", 100);
+    obs_data_set_default_string(s, "at_logo", "");
+    obs_data_set_default_int(s, "width", 1280);
+    obs_data_set_default_int(s, "height", 360);
+}
+obs_properties_t *at_get_properties(void *)
+{
+    obs_properties_t *p = obs_properties_create();
+    obs_properties_add_text(p, "info", "Controla y lanza títulos animados en vivo desde Herramientas -> Generador Avanzado de Títulos (o el panel Control: Títulos Animados).", OBS_TEXT_INFO);
+    obs_properties_add_bool(p, "at_local_mode", "Usar texto y diseño propios de esta fuente (ignorar panel en vivo)");
+
+    obs_property_t *tpl = obs_properties_add_list(p, "at_template", "Plantilla visual", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(tpl, "Noticiero Doble Barra", 0);
+    obs_property_list_add_int(tpl, "Deportes / Impacto Diagonal", 1);
+    obs_property_list_add_int(tpl, "Minimalista Cinematográfico", 2);
+    obs_property_list_add_int(tpl, "Glassmorphism / Podcast", 3);
+    obs_property_list_add_int(tpl, "Marquesina / Ticker Continuo", 4);
+    obs_property_list_add_int(tpl, "Intro Pantalla Completa", 5);
+    obs_property_list_add_int(tpl, "Tarjeta Redes Sociales", 6);
+    obs_property_list_add_int(tpl, "Cita / Frase Destacada", 7);
+
+    obs_property_t *ain = obs_properties_add_list(p, "at_anim_in", "Animación de entrada", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(ain, "Deslizar Izquierda (Broadcast)", 0);
+    obs_property_list_add_int(ain, "Revelado Cortina (Wipe)", 1);
+    obs_property_list_add_int(ain, "Zoom / Pop Elástico", 2);
+    obs_property_list_add_int(ain, "Subir Desde Abajo (Rise)", 3);
+    obs_property_list_add_int(ain, "Máquina de Escribir (Typewriter)", 4);
+    obs_property_list_add_int(ain, "Desvanecer Cinematográfico", 5);
+    obs_property_list_add_int(ain, "Separación Central (Split)", 6);
+
+    obs_property_t *aout = obs_properties_add_list(p, "at_anim_out", "Animación de salida", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(aout, "Inversa de la entrada", 0);
+    obs_property_list_add_int(aout, "Desvanecer suave", 1);
+    obs_property_list_add_int(aout, "Bajar y ocultar", 2);
+    obs_property_list_add_int(aout, "Cortina rápida", 3);
+
+    obs_properties_add_int(p, "at_in_ms", "Duración entrada (ms)", 200, 2500, 50);
+    obs_properties_add_int(p, "at_out_ms", "Duración salida (ms)", 150, 2000, 50);
+    obs_properties_add_int(p, "at_auto_hide_sec", "Auto-ocultar tras (0 = manual, seg)", 0, 120, 1);
+    obs_properties_add_bool(p, "at_shimmer", "Brillo animado continuo (Shimmer)");
+
+    obs_properties_add_text(p, "at_badge", "Etiqueta / Badge", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(p, "at_title", "Título principal", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(p, "at_subtitle", "Subtítulo / Cargo", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(p, "at_ticker", "Texto marquesina / extra", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(p, "at_accent_color", "Color acento (Hex)", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(p, "at_bg_color", "Color fondo (Hex)", OBS_TEXT_DEFAULT);
+    obs_properties_add_text(p, "at_text_color", "Color texto (Hex)", OBS_TEXT_DEFAULT);
+
+    obs_property_t *al = obs_properties_add_list(p, "at_align", "Posición en lienzo", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(al, "Izquierda", 0);
+    obs_property_list_add_int(al, "Centro", 1);
+    obs_property_list_add_int(al, "Derecha", 2);
+
+    obs_properties_add_int(p, "at_scale", "Escala de texto (%)", 60, 140, 5);
+    obs_properties_add_path(p, "at_logo", "Logo opcional (PNG/JPG)", OBS_PATH_FILE, "Imágenes (*.png *.jpg *.webp);;Todos (*)", nullptr);
+    obs_properties_add_int(p, "width", "Ancho", 480, 1920, 16);
+    obs_properties_add_int(p, "height", "Alto", 140, 1080, 16);
+    return p;
+}
+void *at_create(obs_data_t *s, obs_source_t *src) { return gfx_create_common("advanced_title", s, src); }
 
 // ---- 4. Bible ----
 const char *bb_get_name(void *) { return "Biblia (Versiculos)"; }
@@ -812,6 +1108,8 @@ void android_graphics_register()
     reg("android_lowerthird_source", lt_get_name, lt_create, lt_get_defaults, lt_get_properties);
     reg("android_timer_source", tm_get_name, tm_create, tm_get_defaults, tm_get_properties);
     reg("android_bible_source", bb_get_name, bb_create, bb_get_defaults, bb_get_properties);
+    reg("android_datetime_weather_source", dtw_get_name, dtw_create, dtw_get_defaults, dtw_get_properties);
+    reg("android_advanced_title_source", at_get_name, at_create, at_get_defaults, at_get_properties);
 
     obs_source_info maskInfo{};
     maskInfo.id = "android_shape_mask_filter";

@@ -407,6 +407,18 @@ public final class BrowserSourceManager {
         });
         wv.setWebChromeClient(new WebChromeClient() {
             @Override
+            public void onPermissionRequest(android.webkit.PermissionRequest request) {
+                if (request == null) return;
+                String origin = request.getOrigin() != null ? request.getOrigin().toString() : "";
+                // Auto-grant camera/microphone/WebRTC permissions for HTTPS or local loopback guest pages
+                if (origin.startsWith("https://") || origin.startsWith("http://127.0.0.1") || origin.startsWith("http://localhost")) {
+                    request.grant(request.getResources());
+                } else {
+                    request.deny();
+                }
+            }
+
+            @Override
             public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
                 if (consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
                     // URLs can contain room passwords or access tokens; never log the page text.

@@ -10,6 +10,7 @@
 #include "android-browser.h"
 #include "android-ndi.h"
 #include "android-multistream.h"
+#include "android-iso-replay.h"
 #include "android-vtuber.h"
 #include "android-graphics.h"
 #include "android-srt.h"
@@ -51,6 +52,10 @@ static jmethodID g_list_ext_displays_method = nullptr;
 static jmethodID g_start_ext_display_method = nullptr;
 static jmethodID g_stop_ext_display_method = nullptr;
 static jmethodID g_open_wifi_display_method = nullptr;
+static jmethodID g_ptz_get_state_method = nullptr;
+static jmethodID g_ptz_execute_method = nullptr;
+static jmethodID g_show_qr_method = nullptr;
+static jmethodID g_share_text_method = nullptr;
 
 static std::mutex g_ext_display_mutex;
 static obs_display_t *g_ext_display = nullptr;
@@ -68,6 +73,7 @@ extern "C" __attribute__((visibility("default"))) void obs_android_prepare_shutd
     using ProbeStopFn = void (*)();
     if (auto stop = reinterpret_cast<ProbeStopFn>(dlsym(RTLD_DEFAULT, "obs_android_performance_probe_shutdown"))) stop();
     android_multistream_shutdown();
+    android_iso_replay_shutdown();
     android_srt_shutdown();
     JavaVM *jvm = g_activity_jvm;
     if (!jvm || !g_activity_class) return;
@@ -470,6 +476,14 @@ Java_org_obsandroid_port_NativeBridge_registerActivityHost(JNIEnv *env, jclass, 
     if (env->ExceptionCheck()) { env->ExceptionClear(); g_stop_ext_display_method = nullptr; }
     g_open_wifi_display_method = env->GetStaticMethodID(g_activity_class, "openWirelessDisplaySettings", "()V");
     if (env->ExceptionCheck()) { env->ExceptionClear(); g_open_wifi_display_method = nullptr; }
+    g_ptz_get_state_method = env->GetStaticMethodID(g_activity_class, "ptzGetStateJson", "()Ljava/lang/String;");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_ptz_get_state_method = nullptr; }
+    g_ptz_execute_method = env->GetStaticMethodID(g_activity_class, "ptzExecuteJson", "(Ljava/lang/String;)Ljava/lang/String;");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_ptz_execute_method = nullptr; }
+    g_show_qr_method = env->GetStaticMethodID(g_activity_class, "showQrDialog", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_show_qr_method = nullptr; }
+    g_share_text_method = env->GetStaticMethodID(g_activity_class, "shareText", "(Ljava/lang/String;Ljava/lang/String;)V");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_share_text_method = nullptr; }
 }
 
 extern "C" __attribute__((visibility("default"))) void obs_android_set_broadcast_keepalive(bool active)
@@ -603,6 +617,113 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_start_externa
     if (env->ExceptionCheck()) { env->ExceptionClear(); res = JNI_FALSE; }
     if (detach) jvm->DetachCurrentThread();
     return res == JNI_TRUE;
+}
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_ptz_get_state(char *out_buf, size_t out_cap)
+{
+    if (!out_buf || out_cap == 0) return false;
+    out_buf[0] = '\0';
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class; mid = g_ptz_get_state_method;
+    }
+    if (!jvm || !cls || !mid) return false;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return false; detach = true; }
+    else if (st != JNI_OK) return false;
+    jstring jres = static_cast<jstring>(env->CallStaticObjectMethod(cls, mid));
+    bool ok = false;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    } else if (jres) {
+        const char *utf = env->GetStringUTFChars(jres, nullptr);
+        if (utf) {
+            std::snprintf(out_buf, out_cap, "%s", utf);
+            env->ReleaseStringUTFChars(jres, utf);
+            ok = true;
+        }
+        env->DeleteLocalRef(jres);
+    }
+    if (detach) jvm->DetachCurrentThread();
+    return ok;
+}
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_ptz_execute(const char *action_json, char *out_buf, size_t out_cap)
+{
+    if (out_buf && out_cap > 0) out_buf[0] = '\0';
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class; mid = g_ptz_execute_method;
+    }
+    if (!jvm || !cls || !mid || !action_json) return false;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return false; detach = true; }
+    else if (st != JNI_OK) return false;
+    jstring jreq = env->NewStringUTF(action_json);
+    jstring jres = static_cast<jstring>(env->CallStaticObjectMethod(cls, mid, jreq));
+    env->DeleteLocalRef(jreq);
+    bool ok = false;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    } else if (jres) {
+        const char *utf = env->GetStringUTFChars(jres, nullptr);
+        if (utf && out_buf && out_cap > 0) {
+            std::snprintf(out_buf, out_cap, "%s", utf);
+        }
+        if (utf) env->ReleaseStringUTFChars(jres, utf);
+        env->DeleteLocalRef(jres);
+        ok = true;
+    }
+    if (detach) jvm->DetachCurrentThread();
+    return ok;
+}
+
+extern "C" __attribute__((visibility("default"))) void obs_android_show_qr_dialog(const char *title, const char *subtitle, const char *url)
+{
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class; mid = g_show_qr_method;
+    }
+    if (!jvm || !cls || !mid || !url) return;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return; detach = true; }
+    else if (st != JNI_OK) return;
+    jstring jt = env->NewStringUTF(title ? title : "");
+    jstring js = env->NewStringUTF(subtitle ? subtitle : "");
+    jstring ju = env->NewStringUTF(url);
+    env->CallStaticVoidMethod(cls, mid, jt, js, ju);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(jt);
+    env->DeleteLocalRef(js);
+    env->DeleteLocalRef(ju);
+    if (detach) jvm->DetachCurrentThread();
+}
+
+extern "C" __attribute__((visibility("default"))) void obs_android_share_text(const char *title, const char *text)
+{
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class; mid = g_share_text_method;
+    }
+    if (!jvm || !cls || !mid || !text) return;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return; detach = true; }
+    else if (st != JNI_OK) return;
+    jstring jt = env->NewStringUTF(title ? title : "");
+    jstring jx = env->NewStringUTF(text);
+    env->CallStaticVoidMethod(cls, mid, jt, jx);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(jt);
+    env->DeleteLocalRef(jx);
+    if (detach) jvm->DetachCurrentThread();
 }
 
 extern "C" __attribute__((visibility("default"))) void obs_android_stop_external_display()
@@ -964,6 +1085,7 @@ bool obs_module_load(void)
     android_ndi_register();
     android_vtuber_register();
     android_graphics_register();
+    android_iso_replay_register();
     android_vertical_register();
     android_srt_register();
     android_move_transition_register();
@@ -976,6 +1098,7 @@ void obs_module_unload(void)
 {
     android_bg_removal_filter_shutdown();
     android_multistream_shutdown();
+    android_iso_replay_shutdown();
     android_srt_shutdown();
     android_ndi_shutdown();
     android_vtuber_shutdown();

@@ -113,13 +113,37 @@ public final class LiveGraphicsManager {
         String bbAccent = "#D97706";
         int bbStyle = 0;
         int bbFontSize = 32;
+
+        // Advanced Animated Title Generator
+        boolean atOnAir = false;
+        int atTemplate = 0; // 0..7
+        int atAnimIn = 0;   // 0..6
+        int atAnimOut = 0;  // 0..3
+        int atInMs = 650;
+        int atOutMs = 450;
+        int atAutoHideSec = 0;
+        boolean atShimmer = true;
+        String atBadge = "EN VIVO";
+        String atTitle = "TÍTULO PRINCIPAL DEL PROGRAMA";
+        String atSubtitle = "Subtítulo o descripción en pantalla";
+        String atTicker = "ÚLTIMO MOMENTO  •  TRANSMISIÓN EN DIRECTO  •  SÍGUENOS EN REDES SOCIALES  •  ";
+        String atAccent = "#2563EB";
+        String atBg = "#0F172A";
+        String atText = "#FFFFFF";
+        int atAlign = 0;
+        int atScale = 100;
+        String atLogo = "";
+        long atTriggerSeq = 0L;
+        final List<JSONObject> atPresets = new ArrayList<>();
     }
 
     private static final State sState = new State();
     private static String sLoadedHomeLogoPath = "";
     private static String sLoadedAwayLogoPath = "";
+    private static String sLoadedAtLogoPath = "";
     private static Bitmap sHomeLogoBmp = null;
     private static Bitmap sAwayLogoBmp = null;
+    private static Bitmap sAtLogoBmp = null;
 
     private static Bitmap decodeLogo(String path) {
         BitmapFactory.Options options = new BitmapFactory.Options();
@@ -131,6 +155,18 @@ public final class LiveGraphicsManager {
         while (largest / options.inSampleSize > 256) options.inSampleSize *= 2;
         options.inJustDecodeBounds = false;
         return BitmapFactory.decodeFile(path, options);
+    }
+
+    private static Bitmap getCachedAtLogo(String path) {
+        String p = path != null ? path.trim() : "";
+        if (!p.equals(sLoadedAtLogoPath)) {
+            sLoadedAtLogoPath = p;
+            if (sAtLogoBmp != null) { sAtLogoBmp.recycle(); sAtLogoBmp = null; }
+            if (!p.isEmpty() && new File(p).isFile()) {
+                try { sAtLogoBmp = decodeLogo(p); } catch (Throwable ignored) {}
+            }
+        }
+        return sAtLogoBmp;
     }
 
     private static Bitmap getCachedLogo(String path, boolean isHome) {
@@ -177,6 +213,15 @@ public final class LiveGraphicsManager {
         ByteBuffer rgba;
         float animAlpha = 1f;
         JSONObject localLowerThird;
+        JSONObject localDtwConfig;
+        JSONObject localAtConfig;
+        // Advanced Title animation state machine
+        float atProgress = 0f;
+        boolean atWasOnAir = false;
+        long atLastTriggerSeq = -1L;
+        long atLastTickMs = 0L;
+        long atOnAirSinceMs = 0L;
+        float atTickerX = 0f;
         boolean showing = false;
         volatile boolean destroyed = false;
 
@@ -292,6 +337,35 @@ public final class LiveGraphicsManager {
                     sState.bbStyle = bb.optInt("style", 0);
                     sState.bbFontSize = bb.optInt("fontSize", 32);
                 }
+                JSONObject at = j.optJSONObject("advancedTitle");
+                if (at != null) {
+                    sState.atOnAir = at.optBoolean("onAir", false);
+                    sState.atTemplate = at.optInt("template", 0);
+                    sState.atAnimIn = at.optInt("animIn", 0);
+                    sState.atAnimOut = at.optInt("animOut", 0);
+                    sState.atInMs = Math.max(150, at.optInt("inMs", 650));
+                    sState.atOutMs = Math.max(150, at.optInt("outMs", 450));
+                    sState.atAutoHideSec = Math.max(0, at.optInt("autoHideSec", 0));
+                    sState.atShimmer = at.optBoolean("shimmer", true);
+                    sState.atBadge = at.optString("badge", "EN VIVO");
+                    sState.atTitle = at.optString("title", "TÍTULO PRINCIPAL DEL PROGRAMA");
+                    sState.atSubtitle = at.optString("subtitle", "Subtítulo o descripción en pantalla");
+                    sState.atTicker = at.optString("ticker", sState.atTicker);
+                    sState.atAccent = at.optString("accentColor", "#2563EB");
+                    sState.atBg = at.optString("bgColor", "#0F172A");
+                    sState.atText = at.optString("textColor", "#FFFFFF");
+                    sState.atAlign = at.optInt("align", 0);
+                    sState.atScale = Math.max(60, Math.min(140, at.optInt("scalePct", 100)));
+                    sState.atLogo = at.optString("logoPath", "");
+                    JSONArray ap = at.optJSONArray("presets");
+                    sState.atPresets.clear();
+                    if (ap != null) {
+                        for (int i = 0; i < ap.length(); ++i) {
+                            JSONObject po = ap.optJSONObject(i);
+                            if (po != null) sState.atPresets.add(po);
+                        }
+                    }
+                }
             } catch (Throwable t) {
                 Log.w(TAG, "Failed to load graphics state", t);
             }
@@ -345,9 +419,20 @@ public final class LiveGraphicsManager {
             if (act != null) init(act);
             ensureStateLoaded();
             JSONObject localLowerThird = null;
+            JSONObject localDtwConfig = null;
+            JSONObject localAtConfig = null;
             try {
                 JSONObject obj = new JSONObject(configJson != null ? configJson : "{}");
                 if ("lowerthird".equals(kind) && obj.optBoolean("localContent")) localLowerThird = obj;
+                if ("datetime_weather".equals(kind)) {
+                    localDtwConfig = obj;
+                    if (obj.optBoolean("autoWeather", true)) {
+                        requestWeatherAsync(obj.optString("city", "Asuncion"));
+                    }
+                }
+                if ("advanced_title".equals(kind) && obj.optBoolean("localMode", false)) {
+                    localAtConfig = obj;
+                }
                 boolean apply = obj.optBoolean("applyText", false);
                 synchronized (sStateLock) {
                     if ("scoreboard".equals(kind)) {
@@ -403,6 +488,14 @@ public final class LiveGraphicsManager {
                 inst.height = height;
             }
             inst.localLowerThird = localLowerThird;
+            inst.localDtwConfig = localDtwConfig;
+            inst.localAtConfig = localAtConfig;
+            if ("advanced_title".equals(kind) && localAtConfig != null) {
+                // Local standalone title plays its entrance animation when updated/shown
+                inst.atProgress = 0f;
+                inst.atLastTickMs = 0L;
+                inst.atOnAirSinceMs = System.currentTimeMillis();
+            }
             if (inst.showing) {
                 sRender.removeCallbacks(inst.tick);
                 sRender.post(inst.tick);
@@ -446,10 +539,13 @@ public final class LiveGraphicsManager {
             for (Long id : sInstances.keySet().toArray(new Long[0])) destroyOnRenderThread(id);
             if (sHomeLogoBmp != null) sHomeLogoBmp.recycle();
             if (sAwayLogoBmp != null) sAwayLogoBmp.recycle();
+            if (sAtLogoBmp != null) sAtLogoBmp.recycle();
             sHomeLogoBmp = null;
             sAwayLogoBmp = null;
+            sAtLogoBmp = null;
             sLoadedHomeLogoPath = "";
             sLoadedAwayLogoPath = "";
+            sLoadedAtLogoPath = "";
         });
     }
 
@@ -496,6 +592,84 @@ public final class LiveGraphicsManager {
                     case "bible":
                         targetVis = sState.bbVisible;
                         break;
+                    case "datetime_weather": {
+                        targetVis = true;
+                        JSONObject dtw = inst.localDtwConfig;
+                        int cm = dtw != null ? dtw.optInt("contentMode", 0) : 0;
+                        boolean hasTime = (cm == 0 || cm == 1 || cm == 3 || cm == 4);
+                        boolean showSec = dtw != null && dtw.optBoolean("showSeconds", false);
+                        if (hasTime && showSec) {
+                            clockDelay = 1000L - now % 1000L;
+                        } else {
+                            clockDelay = 60000L - now % 60000L;
+                        }
+                        if (dtw != null && dtw.optBoolean("autoWeather", true) &&
+                            (cm == 0 || cm == 1 || cm == 2 || cm == 6)) {
+                            requestWeatherAsync(dtw.optString("city", "Asuncion"));
+                        }
+                        break;
+                    }
+                    case "advanced_title": {
+                        // Dedicated high-framerate animation timeline for Advanced Titles
+                        boolean localMode = (inst.localAtConfig != null);
+                        boolean wantOnAir = localMode || sState.atOnAir;
+                        int inMs = Math.max(150, localMode ? inst.localAtConfig.optInt("inMs", 650) : sState.atInMs);
+                        int outMs = Math.max(150, localMode ? inst.localAtConfig.optInt("outMs", 450) : sState.atOutMs);
+                        int autoHideSec = Math.max(0, localMode ? inst.localAtConfig.optInt("autoHideSec", 0) : sState.atAutoHideSec);
+                        int tpl = localMode ? inst.localAtConfig.optInt("template", 0) : sState.atTemplate;
+                        boolean shimmer = localMode ? inst.localAtConfig.optBoolean("shimmer", true) : sState.atShimmer;
+                        long trigSeq = localMode ? 0L : sState.atTriggerSeq;
+
+                        if (!localMode && trigSeq != inst.atLastTriggerSeq) {
+                            inst.atLastTriggerSeq = trigSeq;
+                            if (wantOnAir) {
+                                inst.atProgress = 0f;
+                                inst.atOnAirSinceMs = now;
+                                inst.atLastTickMs = now;
+                            }
+                        }
+                        if (wantOnAir && !inst.atWasOnAir) {
+                            inst.atOnAirSinceMs = now;
+                            inst.atLastTickMs = now;
+                        }
+                        inst.atWasOnAir = wantOnAir;
+
+                        if (!localMode && wantOnAir && autoHideSec > 0 && inst.atOnAirSinceMs > 0 &&
+                            (now - inst.atOnAirSinceMs) >= autoHideSec * 1000L) {
+                            sState.atOnAir = false;
+                            wantOnAir = false;
+                        }
+
+                        long dtMs = inst.atLastTickMs > 0 ? Math.min(100L, Math.max(16L, now - inst.atLastTickMs)) : 33L;
+                        inst.atLastTickMs = now;
+                        if (wantOnAir) {
+                            inst.atProgress = Math.min(1f, inst.atProgress + dtMs / (float) inMs);
+                        } else {
+                            inst.atProgress = Math.max(0f, inst.atProgress - dtMs / (float) outMs);
+                        }
+
+                        if (tpl == 4 && inst.atProgress > 0.01f) {
+                            inst.atTickerX += dtMs * 0.14f;
+                        }
+
+                        if (inst.atProgress > 0.005f) {
+                            drawAdvancedTitle(c, w, h, inst.atProgress, !wantOnAir,
+                                Math.max(0L, now - inst.atOnAirSinceMs), inst.atTickerX, inst.localAtConfig);
+                        }
+
+                        inst.rgba.clear();
+                        inst.bitmap.copyPixelsToBuffer(inst.rgba);
+                        NativeBridge.pushGraphicsFrame(inst.id, inst.rgba, w, h, System.nanoTime());
+
+                        boolean animating = (wantOnAir && inst.atProgress < 0.999f) || (!wantOnAir && inst.atProgress > 0.001f);
+                        if (animating) return 33L;
+                        if (wantOnAir && (tpl == 4 || shimmer)) return 33L;
+                        if (wantOnAir && !localMode && autoHideSec > 0) {
+                            long rem = autoHideSec * 1000L - (now - inst.atOnAirSinceMs);
+                            return Math.max(50L, Math.min(500L, rem));
+                        }
+                        return 0L;
+                    }
                     default:
                         targetVis = true;
                 }
@@ -512,6 +686,7 @@ public final class LiveGraphicsManager {
                 else if ("lowerthird".equals(inst.kind)) drawLowerThird(c, w, h, inst.animAlpha, inst.localLowerThird);
                 else if ("timer".equals(inst.kind)) drawTimer(c, w, h, inst.animAlpha);
                 else if ("bible".equals(inst.kind)) drawBible(c, w, h, inst.animAlpha);
+                else if ("datetime_weather".equals(inst.kind)) drawDateTimeWeather(c, w, h, inst.animAlpha, inst.localDtwConfig);
             }
 
             inst.rgba.clear();
@@ -1285,6 +1460,30 @@ public final class LiveGraphicsManager {
                 bb.put("chapters", sAppCtx != null ? BibleDatabase.getChapterCount(sAppCtx, sState.bbBook) : 1);
                 bb.put("verses", sAppCtx != null ? BibleDatabase.getVerseCount(sAppCtx, sState.bbBook, sState.bbChapter) : 1);
                 root.put("bible", bb);
+
+                JSONObject at = new JSONObject();
+                at.put("onAir", sState.atOnAir);
+                at.put("template", sState.atTemplate);
+                at.put("animIn", sState.atAnimIn);
+                at.put("animOut", sState.atAnimOut);
+                at.put("inMs", sState.atInMs);
+                at.put("outMs", sState.atOutMs);
+                at.put("autoHideSec", sState.atAutoHideSec);
+                at.put("shimmer", sState.atShimmer);
+                at.put("badge", sState.atBadge);
+                at.put("title", sState.atTitle);
+                at.put("subtitle", sState.atSubtitle);
+                at.put("ticker", sState.atTicker);
+                at.put("accentColor", sState.atAccent);
+                at.put("bgColor", sState.atBg);
+                at.put("textColor", sState.atText);
+                at.put("align", sState.atAlign);
+                at.put("scalePct", sState.atScale);
+                at.put("logoPath", sState.atLogo);
+                JSONArray ap = new JSONArray();
+                for (JSONObject p : sState.atPresets) ap.put(p);
+                at.put("presets", ap);
+                root.put("advancedTitle", at);
             }
         } catch (Throwable ignored) {}
         return root;
@@ -1459,6 +1658,92 @@ public final class LiveGraphicsManager {
                         sState.bbUseCustom = !sState.bbCustomText.trim().isEmpty();
                         if (req.has("visible")) sState.bbVisible = req.optBoolean("visible", sState.bbVisible);
                         break;
+                    case "at_update":
+                        if (req.has("template")) sState.atTemplate = req.optInt("template", sState.atTemplate);
+                        if (req.has("animIn")) sState.atAnimIn = req.optInt("animIn", sState.atAnimIn);
+                        if (req.has("animOut")) sState.atAnimOut = req.optInt("animOut", sState.atAnimOut);
+                        if (req.has("inMs")) sState.atInMs = Math.max(150, Math.min(2500, req.optInt("inMs", sState.atInMs)));
+                        if (req.has("outMs")) sState.atOutMs = Math.max(150, Math.min(2000, req.optInt("outMs", sState.atOutMs)));
+                        if (req.has("autoHideSec")) sState.atAutoHideSec = Math.max(0, Math.min(120, req.optInt("autoHideSec", sState.atAutoHideSec)));
+                        if (req.has("shimmer")) sState.atShimmer = req.optBoolean("shimmer", sState.atShimmer);
+                        if (req.has("badge")) sState.atBadge = req.optString("badge", sState.atBadge);
+                        if (req.has("title")) sState.atTitle = req.optString("title", sState.atTitle);
+                        if (req.has("subtitle")) sState.atSubtitle = req.optString("subtitle", sState.atSubtitle);
+                        if (req.has("ticker")) sState.atTicker = req.optString("ticker", sState.atTicker);
+                        if (req.has("accentColor")) sState.atAccent = req.optString("accentColor", sState.atAccent);
+                        if (req.has("bgColor")) sState.atBg = req.optString("bgColor", sState.atBg);
+                        if (req.has("textColor")) sState.atText = req.optString("textColor", sState.atText);
+                        if (req.has("align")) sState.atAlign = req.optInt("align", sState.atAlign);
+                        if (req.has("scalePct")) sState.atScale = Math.max(60, Math.min(140, req.optInt("scalePct", sState.atScale)));
+                        if (req.has("logoPath")) sState.atLogo = req.optString("logoPath", sState.atLogo);
+                        if (req.has("onAir")) {
+                            boolean nextAir = req.optBoolean("onAir", sState.atOnAir);
+                            if (nextAir) sState.atTriggerSeq++;
+                            sState.atOnAir = nextAir;
+                        }
+                        break;
+                    case "at_trigger": {
+                        boolean nextAir = req.has("onAir") ? req.optBoolean("onAir", true) : !sState.atOnAir;
+                        if (nextAir) sState.atTriggerSeq++;
+                        sState.atOnAir = nextAir;
+                        break;
+                    }
+                    case "at_save_preset": {
+                        JSONObject p = new JSONObject();
+                        p.put("name", req.optString("name", sState.atTitle));
+                        p.put("template", sState.atTemplate);
+                        p.put("animIn", sState.atAnimIn);
+                        p.put("animOut", sState.atAnimOut);
+                        p.put("inMs", sState.atInMs);
+                        p.put("outMs", sState.atOutMs);
+                        p.put("autoHideSec", sState.atAutoHideSec);
+                        p.put("shimmer", sState.atShimmer);
+                        p.put("badge", sState.atBadge);
+                        p.put("title", sState.atTitle);
+                        p.put("subtitle", sState.atSubtitle);
+                        p.put("ticker", sState.atTicker);
+                        p.put("accentColor", sState.atAccent);
+                        p.put("bgColor", sState.atBg);
+                        p.put("textColor", sState.atText);
+                        p.put("align", sState.atAlign);
+                        p.put("scalePct", sState.atScale);
+                        p.put("logoPath", sState.atLogo);
+                        sState.atPresets.add(p);
+                        break;
+                    }
+                    case "at_apply_preset": {
+                        int idx = req.optInt("index", -1);
+                        if (idx >= 0 && idx < sState.atPresets.size()) {
+                            JSONObject p = sState.atPresets.get(idx);
+                            sState.atTemplate = p.optInt("template", 0);
+                            sState.atAnimIn = p.optInt("animIn", 0);
+                            sState.atAnimOut = p.optInt("animOut", 0);
+                            sState.atInMs = Math.max(150, p.optInt("inMs", 650));
+                            sState.atOutMs = Math.max(150, p.optInt("outMs", 450));
+                            sState.atAutoHideSec = Math.max(0, p.optInt("autoHideSec", 0));
+                            sState.atShimmer = p.optBoolean("shimmer", true);
+                            sState.atBadge = p.optString("badge", "");
+                            sState.atTitle = p.optString("title", "");
+                            sState.atSubtitle = p.optString("subtitle", "");
+                            sState.atTicker = p.optString("ticker", sState.atTicker);
+                            sState.atAccent = p.optString("accentColor", "#2563EB");
+                            sState.atBg = p.optString("bgColor", "#0F172A");
+                            sState.atText = p.optString("textColor", "#FFFFFF");
+                            sState.atAlign = p.optInt("align", 0);
+                            sState.atScale = Math.max(60, Math.min(140, p.optInt("scalePct", 100)));
+                            sState.atLogo = p.optString("logoPath", "");
+                            if (req.optBoolean("launch", true)) {
+                                sState.atTriggerSeq++;
+                                sState.atOnAir = true;
+                            }
+                        }
+                        break;
+                    }
+                    case "at_delete_preset": {
+                        int idx = req.optInt("index", -1);
+                        if (idx >= 0 && idx < sState.atPresets.size()) sState.atPresets.remove(idx);
+                        break;
+                    }
                     default:
                         return "{\"ok\":false}";
                 }
@@ -1763,6 +2048,1020 @@ public final class LiveGraphicsManager {
         }));
         p.addView(searchRow);
         p.addView(resultsBox);
+    }
+
+    // ---- 5. Date, Time & Weather (Open-Meteo + 6 Broadcast Styles) ----
+    private static final class WeatherEntry {
+        double tempC;
+        int cond; // 0=sun, 1=partly, 2=cloudy, 3=rain, 4=storm, 5=clear-night, 6=fog
+        String condLabel;
+        String resolvedCity;
+        long fetchedAtMs;
+        boolean valid;
+    }
+
+    private static final Map<String, WeatherEntry> sWeatherCache = new HashMap<>();
+    private static final Map<String, Long> sWeatherInFlight = new HashMap<>();
+    private static final Object sWeatherLock = new Object();
+
+    private static String normalizeCityKey(String city) {
+        String s = city != null ? city.trim() : "";
+        return s.isEmpty() ? "asuncion" : s.toLowerCase(Locale.ROOT);
+    }
+
+    private static int wmoToCondition(int wmo, boolean isDay) {
+        if (wmo == 0) return isDay ? 0 : 5;
+        if (wmo == 1 || wmo == 2) return isDay ? 1 : 2;
+        if (wmo == 3) return 2;
+        if (wmo == 45 || wmo == 48) return 6;
+        if ((wmo >= 51 && wmo <= 67) || (wmo >= 80 && wmo <= 82)) return 3;
+        if (wmo >= 95) return 4;
+        if (wmo >= 71 && wmo <= 86) return 3;
+        return isDay ? 1 : 2;
+    }
+
+    private static String conditionLabelEs(int cond) {
+        switch (cond) {
+            case 0: return "Despejado";
+            case 1: return "Parc. nublado";
+            case 2: return "Nublado";
+            case 3: return "Lluvia";
+            case 4: return "Tormenta";
+            case 5: return "Despejado";
+            case 6: return "Niebla";
+            default: return "Clima";
+        }
+    }
+
+    private static String httpGetSimple(String urlStr) throws Exception {
+        java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(urlStr).openConnection();
+        conn.setConnectTimeout(5000);
+        conn.setReadTimeout(6000);
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("User-Agent", "OBSAndroidPort/1.0");
+        try {
+            if (conn.getResponseCode() != 200) return null;
+            try (java.io.InputStream is = conn.getInputStream();
+                 java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = is.read(buf)) > 0) out.write(buf, 0, n);
+                return out.toString("UTF-8");
+            }
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static void requestWeatherAsync(String rawCity) {
+        final String city = (rawCity != null && !rawCity.trim().isEmpty()) ? rawCity.trim() : "Asuncion";
+        final String key = normalizeCityKey(city);
+        final long now = System.currentTimeMillis();
+        synchronized (sWeatherLock) {
+            WeatherEntry cached = sWeatherCache.get(key);
+            if (cached != null && cached.valid && (now - cached.fetchedAtMs) < 15L * 60L * 1000L) {
+                return;
+            }
+            Long started = sWeatherInFlight.get(key);
+            if (started != null && (now - started) < 60_000L) {
+                return;
+            }
+            sWeatherInFlight.put(key, now);
+        }
+        new Thread(() -> {
+            try {
+                String q = java.net.URLEncoder.encode(city, "UTF-8");
+                String geoRaw = httpGetSimple("https://geocoding-api.open-meteo.com/v1/search?name=" + q + "&count=1&language=es&format=json");
+                if (geoRaw == null) return;
+                JSONObject geo = new JSONObject(geoRaw);
+                JSONArray results = geo.optJSONArray("results");
+                if (results == null || results.length() == 0) return;
+                JSONObject first = results.getJSONObject(0);
+                double lat = first.getDouble("latitude");
+                double lon = first.getDouble("longitude");
+                String resolved = first.optString("name", city);
+
+                String wxUrl = String.format(Locale.US,
+                    "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code,is_day&timezone=auto",
+                    lat, lon);
+                String wxRaw = httpGetSimple(wxUrl);
+                if (wxRaw == null) return;
+                JSONObject wx = new JSONObject(wxRaw);
+                JSONObject cur = wx.optJSONObject("current");
+                if (cur == null) return;
+                double tempC = cur.optDouble("temperature_2m", 25.0);
+                int wmo = cur.optInt("weather_code", 0);
+                boolean isDay = cur.optInt("is_day", 1) != 0;
+
+                WeatherEntry entry = new WeatherEntry();
+                entry.tempC = tempC;
+                entry.cond = wmoToCondition(wmo, isDay);
+                entry.condLabel = conditionLabelEs(entry.cond);
+                entry.resolvedCity = resolved;
+                entry.fetchedAtMs = System.currentTimeMillis();
+                entry.valid = true;
+
+                synchronized (sWeatherLock) {
+                    sWeatherCache.put(key, entry);
+                }
+                sRender.post(LiveGraphicsManager::refreshFrames);
+            } catch (Throwable t) {
+                Log.w(TAG, "Weather fetch skipped for " + city + ": " + t.getMessage());
+            } finally {
+                synchronized (sWeatherLock) {
+                    sWeatherInFlight.remove(key);
+                }
+            }
+        }, "OBS-WeatherFetch").start();
+    }
+
+    private static String formatSpanishDate(int fmt) {
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        String[] daysShort = {"", "Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"};
+        String[] daysFull = {"", "Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"};
+        String[] monthsShort = {"Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"};
+        String[] monthsFull = {"Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"};
+        int dow = cal.get(java.util.Calendar.DAY_OF_WEEK);
+        int day = cal.get(java.util.Calendar.DAY_OF_MONTH);
+        int mon = cal.get(java.util.Calendar.MONTH);
+        int year = cal.get(java.util.Calendar.YEAR);
+        switch (fmt) {
+            case 1:
+                return String.format(Locale.US, "%02d/%02d/%04d", day, mon + 1, year);
+            case 2:
+                return daysFull[dow] + " " + day + " de " + monthsFull[mon];
+            case 3:
+                return String.format(Locale.US, "%02d %s", day, monthsShort[mon].toUpperCase(Locale.ROOT));
+            default:
+                return daysShort[dow] + ", " + day + " " + monthsShort[mon] + " " + year;
+        }
+    }
+
+    private static String formatCurrentTime(boolean format24, boolean showSeconds) {
+        java.util.Date now = new java.util.Date();
+        String pattern;
+        if (format24) {
+            pattern = showSeconds ? "HH:mm:ss" : "HH:mm";
+        } else {
+            pattern = showSeconds ? "hh:mm:ss a" : "hh:mm a";
+        }
+        return new java.text.SimpleDateFormat(pattern, Locale.US).format(now);
+    }
+
+    private static void drawWeatherIcon(Canvas c, float cx, float cy, float r, int cond, int a255, boolean darkTheme) {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        int sunCol = Color.argb(a255, 250, 204, 21);
+        int cloudCol = darkTheme ? Color.argb(a255, 226, 232, 240) : Color.argb(a255, 100, 116, 139);
+        int rainCol = Color.argb(a255, 56, 189, 248);
+
+        if (cond == 0) {
+            // Sun
+            p.setColor(sunCol);
+            c.drawCircle(cx, cy, r * 0.48f, p);
+            p.setStrokeWidth(Math.max(2f, r * 0.12f));
+            p.setStrokeCap(Paint.Cap.ROUND);
+            for (int i = 0; i < 8; ++i) {
+                double ang = i * Math.PI / 4.0;
+                c.drawLine(
+                    (float) (cx + Math.cos(ang) * r * 0.64f),
+                    (float) (cy + Math.sin(ang) * r * 0.64f),
+                    (float) (cx + Math.cos(ang) * r * 0.92f),
+                    (float) (cy + Math.sin(ang) * r * 0.92f), p);
+            }
+            return;
+        }
+        if (cond == 5) {
+            // Clear night crescent moon
+            p.setColor(Color.argb(a255, 253, 224, 71));
+            c.drawCircle(cx, cy, r * 0.62f, p);
+            p.setColor(darkTheme ? Color.argb(a255, 15, 23, 42) : Color.argb(a255, 241, 245, 249));
+            c.drawCircle(cx + r * 0.28f, cy - r * 0.18f, r * 0.52f, p);
+            return;
+        }
+        if (cond == 1) {
+            // Partly cloudy (sun behind cloud)
+            p.setColor(sunCol);
+            c.drawCircle(cx - r * 0.24f, cy - r * 0.22f, r * 0.36f, p);
+        }
+        // Cloud body for 1, 2, 3, 4, 6
+        float cloudY = (cond == 3 || cond == 4) ? cy - r * 0.12f : cy + r * 0.08f;
+        p.setColor(cloudCol);
+        c.drawCircle(cx - r * 0.28f, cloudY + r * 0.04f, r * 0.30f, p);
+        c.drawCircle(cx + r * 0.04f, cloudY - r * 0.14f, r * 0.36f, p);
+        c.drawCircle(cx + r * 0.34f, cloudY + r * 0.06f, r * 0.26f, p);
+        c.drawRoundRect(new RectF(cx - r * 0.54f, cloudY, cx + r * 0.56f, cloudY + r * 0.34f), r * 0.18f, r * 0.18f, p);
+
+        if (cond == 3) {
+            // Rain drops
+            p.setColor(rainCol);
+            p.setStrokeWidth(Math.max(2f, r * 0.12f));
+            p.setStrokeCap(Paint.Cap.ROUND);
+            for (int i = -1; i <= 1; ++i) {
+                float rx = cx + i * r * 0.32f;
+                c.drawLine(rx, cloudY + r * 0.44f, rx - r * 0.10f, cloudY + r * 0.76f, p);
+            }
+        } else if (cond == 4) {
+            // Lightning bolt
+            p.setColor(sunCol);
+            p.setStrokeWidth(Math.max(2.5f, r * 0.14f));
+            p.setStrokeCap(Paint.Cap.ROUND);
+            c.drawLine(cx + r * 0.06f, cloudY + r * 0.34f, cx - r * 0.12f, cloudY + r * 0.62f, p);
+            c.drawLine(cx - r * 0.12f, cloudY + r * 0.62f, cx + r * 0.10f, cloudY + r * 0.62f, p);
+            c.drawLine(cx + r * 0.10f, cloudY + r * 0.62f, cx - r * 0.08f, cloudY + r * 0.90f, p);
+        } else if (cond == 6) {
+            // Fog lines
+            p.setColor(Color.argb(Math.round(a255 * 0.78f), 148, 163, 184));
+            p.setStrokeWidth(Math.max(2f, r * 0.11f));
+            p.setStrokeCap(Paint.Cap.ROUND);
+            c.drawLine(cx - r * 0.55f, cloudY + r * 0.48f, cx + r * 0.55f, cloudY + r * 0.48f, p);
+            c.drawLine(cx - r * 0.40f, cloudY + r * 0.68f, cx + r * 0.40f, cloudY + r * 0.68f, p);
+        }
+    }
+
+    private static void drawTextFit(Canvas c, String text, float x, float y, float maxW, float baseSize, Paint paint) {
+        if (text == null || text.isEmpty()) return;
+        float sz = baseSize;
+        paint.setTextSize(sz);
+        float tw = paint.measureText(text);
+        if (tw > maxW && tw > 1f) {
+            sz = Math.max(12f, sz * (maxW / tw));
+            paint.setTextSize(sz);
+        }
+        c.drawText(text, x, y, paint);
+    }
+
+    private static float drawTextFitCenteredY(Canvas c, String text, float x, float centerY, float maxW, float baseSize, Paint paint) {
+        if (text == null || text.isEmpty()) return 0f;
+        float sz = baseSize;
+        paint.setTextSize(sz);
+        float tw = paint.measureText(text);
+        if (tw > maxW && tw > 1f) {
+            sz = Math.max(12f, sz * (maxW / tw));
+            paint.setTextSize(sz);
+            tw = paint.measureText(text);
+        }
+        float baseline = centerY - (paint.ascent() + paint.descent()) * 0.5f;
+        c.drawText(text, x, baseline, paint);
+        return tw;
+    }
+
+    private static void drawDateTimeWeather(Canvas c, int w, int h, float alpha, JSONObject cfg) {
+        int contentMode = cfg != null ? cfg.optInt("contentMode", 0) : 0;
+        int layout = cfg != null ? cfg.optInt("layout", 0) : 0; // 0=Horizontal, 1=Vert Center, 2=Vert Left, 3=Vert Right
+        int style = cfg != null ? cfg.optInt("style", 0) : 0;
+        boolean fmt24 = cfg == null || cfg.optBoolean("timeFormat24", true);
+        boolean showSec = cfg != null && cfg.optBoolean("showSeconds", false);
+        int dateFmt = cfg != null ? cfg.optInt("dateFormat", 0) : 0;
+        String city = cfg != null ? cfg.optString("city", "Asuncion").trim() : "Asuncion";
+        boolean showCity = cfg == null || cfg.optBoolean("showCity", true);
+        String unit = cfg != null ? cfg.optString("tempUnit", "C") : "C";
+        boolean autoWx = cfg == null || cfg.optBoolean("autoWeather", true);
+        int manualTemp = cfg != null ? cfg.optInt("manualTemp", 26) : 26;
+        int manualCond = cfg != null ? cfg.optInt("manualCondition", 0) : 0;
+        int accent = parseColorSafe(cfg != null ? cfg.optString("accentColor", "#2563EB") : "#2563EB", Color.parseColor("#2563EB"));
+
+        boolean showDate = (contentMode == 0 || contentMode == 2 || contentMode == 3 || contentMode == 5);
+        boolean showTime = (contentMode == 0 || contentMode == 1 || contentMode == 3 || contentMode == 4);
+        boolean showWeather = (contentMode == 0 || contentMode == 1 || contentMode == 2 || contentMode == 6);
+        boolean vertical = (layout >= 1);
+
+        String timeStr = showTime ? formatCurrentTime(fmt24, showSec) : "";
+        String dateStr = showDate ? formatSpanishDate(dateFmt) : "";
+
+        double tempC = manualTemp;
+        int cond = manualCond;
+        String displayCity = city;
+        if (autoWx) {
+            synchronized (sWeatherLock) {
+                WeatherEntry entry = sWeatherCache.get(normalizeCityKey(city));
+                if (entry != null && entry.valid) {
+                    tempC = entry.tempC;
+                    cond = entry.cond;
+                    if (displayCity.isEmpty() && entry.resolvedCity != null) displayCity = entry.resolvedCity;
+                }
+            }
+        }
+        int displayTemp = "F".equalsIgnoreCase(unit)
+            ? (int) Math.round(tempC * 9.0 / 5.0 + 32.0)
+            : (int) Math.round(tempC);
+        String tempStr = displayTemp + "°" + ("F".equalsIgnoreCase(unit) ? "F" : "C");
+        String wxSub = showCity && !displayCity.isEmpty()
+            ? (displayCity + " · " + conditionLabelEs(cond))
+            : conditionLabelEs(cond);
+
+        int a255 = Math.round(alpha * 255);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        Paint txt = new Paint(Paint.ANTI_ALIAS_FLAG);
+        txt.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
+
+        float padX = vertical ? w * 0.045f : w * 0.025f;
+        float padY = vertical ? h * 0.045f : h * 0.09f;
+        RectF card = new RectF(padX, padY, w - padX, h - padY);
+        float cw = card.width();
+        float ch = card.height();
+
+        boolean lightStyle = (style == 4);
+        int primaryText = lightStyle ? Color.argb(a255, 15, 23, 42) : Color.argb(a255, 248, 250, 252);
+        int secondaryText = lightStyle ? Color.argb(a255, 71, 85, 105) : Color.argb(a255, 203, 213, 225);
+        int dividerCol = lightStyle ? Color.argb(Math.round(90 * alpha), 15, 23, 42) : Color.argb(Math.round(90 * alpha), 255, 255, 255);
+
+        // Background per style
+        if (style == 0) {
+            // 0: Noticiero TV (Barra / Panel con acento)
+            p.setShader(new LinearGradient(card.left, card.top, card.right, card.bottom,
+                Color.argb(Math.round(240 * alpha), 12, 20, 38),
+                Color.argb(Math.round(235 * alpha), 23, 37, 68), Shader.TileMode.CLAMP));
+            c.drawRoundRect(card, vertical ? 14f : 10f, vertical ? 14f : 10f, p);
+            p.setShader(null);
+            p.setColor((accent & 0x00FFFFFF) | (a255 << 24));
+            if (vertical) {
+                c.drawRoundRect(new RectF(card.left, card.top, card.right, card.top + Math.max(8f, ch * 0.024f)), 6f, 6f, p);
+                c.drawRect(card.left, card.bottom - 5f, card.right, card.bottom, p);
+            } else {
+                c.drawRoundRect(new RectF(card.left, card.top, card.left + Math.max(10f, cw * 0.016f), card.bottom), 6f, 6f, p);
+                c.drawRect(card.left, card.bottom - 4f, card.right, card.bottom, p);
+            }
+        } else if (style == 1) {
+            // 1: Pildora / Tarjeta Glass Moderna
+            float rad = vertical ? Math.min(cw, ch) * 0.12f : Math.min(ch * 0.5f, cw * 0.22f);
+            p.setShader(new LinearGradient(card.left, card.top, card.left, card.bottom,
+                Color.argb(Math.round(215 * alpha), 15, 23, 42),
+                Color.argb(Math.round(200 * alpha), 30, 41, 59), Shader.TileMode.CLAMP));
+            c.drawRoundRect(card, rad, rad, p);
+            p.setShader(null);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(2.5f);
+            p.setColor(Color.argb(Math.round(115 * alpha), 255, 255, 255));
+            c.drawRoundRect(card, rad, rad, p);
+            p.setStyle(Paint.Style.FILL);
+        } else if (style == 2) {
+            // 2: Tarjeta Broadcast
+            p.setShader(new LinearGradient(card.left, card.top, card.right, card.bottom,
+                Color.argb(Math.round(238 * alpha), 15, 23, 42),
+                Color.argb(Math.round(228 * alpha), 30, 41, 59), Shader.TileMode.CLAMP));
+            c.drawRoundRect(card, 18f, 18f, p);
+            p.setShader(null);
+            p.setColor((accent & 0x00FFFFFF) | (a255 << 24));
+            c.drawRoundRect(new RectF(card.left + 18f, card.top, card.right - 18f, card.top + 6f), 3f, 3f, p);
+        } else if (style == 3) {
+            // 3: Minimalista Transparente (sin fondo, con sombra)
+            txt.setShadowLayer(6f, 2f, 2f, Color.argb(Math.round(215 * alpha), 0, 0, 0));
+        } else if (style == 4) {
+            // 4: Editorial Claro (Fondo blanco)
+            p.setColor(Color.argb(Math.round(244 * alpha), 248, 250, 252));
+            c.drawRoundRect(card, 14f, 14f, p);
+            p.setColor((accent & 0x00FFFFFF) | (a255 << 24));
+            if (vertical) {
+                c.drawRoundRect(new RectF(card.left, card.top, card.right, card.top + Math.max(8f, ch * 0.024f)), 6f, 6f, p);
+            } else {
+                c.drawRoundRect(new RectF(card.left, card.top, card.left + Math.max(10f, cw * 0.018f), card.bottom), 6f, 6f, p);
+            }
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(2f);
+            p.setColor(Color.argb(Math.round(60 * alpha), 15, 23, 42));
+            c.drawRoundRect(card, 14f, 14f, p);
+            p.setStyle(Paint.Style.FILL);
+        } else {
+            // 5: Digital LED Alto Contraste
+            p.setColor(Color.argb(Math.round(245 * alpha), 5, 8, 15));
+            c.drawRoundRect(card, 12f, 12f, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(3.5f);
+            p.setColor((accent & 0x00FFFFFF) | (a255 << 24));
+            c.drawRoundRect(card, 12f, 12f, p);
+            p.setStyle(Paint.Style.FILL);
+            txt.setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.BOLD));
+        }
+
+        // Count active sections
+        int sections = (showTime ? 1 : 0) + (showDate ? 1 : 0) + (showWeather ? 1 : 0);
+        if (sections == 0) return;
+
+        // Vertical stacked layout (layout 1=Center, 2=Left, 3=Right)
+        if (vertical) {
+            float innerL = card.left + cw * 0.075f;
+            float innerR = card.right - cw * 0.075f;
+            float innerW = Math.max(40f, innerR - innerL);
+            float innerT = card.top + ch * (style == 0 || style == 4 ? 0.075f : 0.055f);
+            float innerB = card.bottom - ch * 0.055f;
+            float innerH = Math.max(40f, innerB - innerT);
+
+            Paint.Align align = (layout == 2) ? Paint.Align.LEFT : (layout == 3 ? Paint.Align.RIGHT : Paint.Align.CENTER);
+            float anchorX = (layout == 2) ? innerL : (layout == 3 ? innerR : card.centerX());
+
+            float wTime = showTime ? 1.35f : 0f;
+            float wDate = showDate ? 0.78f : 0f;
+            float wWx = showWeather ? (showCity && !displayCity.isEmpty() ? 1.18f : 0.96f) : 0f;
+            float totalW = Math.max(0.1f, wTime + wDate + wWx);
+
+            float cursorY = innerT;
+            int drawn = 0;
+
+            if (showTime) {
+                float rowH = innerH * (wTime / totalW);
+                float rowMidY = cursorY + rowH * 0.5f;
+                if (style == 0 && sections > 1) {
+                    p.setColor((accent & 0x00FFFFFF) | (Math.round(220 * alpha) << 24));
+                    c.drawRoundRect(new RectF(innerL, cursorY + rowH * 0.08f, innerR, cursorY + rowH * 0.90f), 10f, 10f, p);
+                    txt.setColor(Color.argb(a255, 255, 255, 255));
+                } else if (style == 5) {
+                    txt.setColor((accent & 0x00FFFFFF) | (a255 << 24));
+                } else {
+                    txt.setColor(primaryText);
+                }
+                txt.setTextAlign(align);
+                float padInline = (style == 0 && sections > 1) ? cw * 0.04f : 0f;
+                float tx = (layout == 2) ? (innerL + padInline) : (layout == 3 ? (innerR - padInline) : card.centerX());
+                drawTextFitCenteredY(c, timeStr, tx, rowMidY, Math.max(40f, innerW - padInline * 2f),
+                    Math.min(rowH * 0.70f, innerW * 0.34f), txt);
+                cursorY += rowH;
+                drawn++;
+            }
+
+            if (showDate) {
+                if (drawn > 0 && style != 3) {
+                    p.setColor(dividerCol);
+                    c.drawRect(innerL, cursorY - 1f, innerR, cursorY + 1f, p);
+                }
+                float rowH = innerH * (wDate / totalW);
+                float rowMidY = cursorY + rowH * 0.5f;
+                txt.setTextAlign(align);
+                txt.setColor(sections == 1 ? primaryText : secondaryText);
+                drawTextFitCenteredY(c, dateStr, anchorX, rowMidY, innerW,
+                    Math.min(rowH * 0.54f, innerW * 0.14f), txt);
+                cursorY += rowH;
+                drawn++;
+            }
+
+            if (showWeather) {
+                if (drawn > 0 && style != 3) {
+                    p.setColor(dividerCol);
+                    c.drawRect(innerL, cursorY - 1f, innerR, cursorY + 1f, p);
+                }
+                float rowH = innerH * (wWx / totalW);
+                boolean hasSub = showCity && !displayCity.isEmpty();
+                float topLineY = hasSub ? (cursorY + rowH * 0.38f) : (cursorY + rowH * 0.50f);
+                float iconR = Math.min(rowH * (hasSub ? 0.24f : 0.32f), innerW * 0.11f);
+                float gap = iconR * 0.75f;
+
+                Paint tempPaint = new Paint(txt);
+                tempPaint.setColor(primaryText);
+                float tempSz = Math.min(rowH * (hasSub ? 0.44f : 0.56f), innerW * 0.24f);
+                tempPaint.setTextSize(tempSz);
+                float maxTempW = Math.max(30f, innerW - iconR * 2.2f - gap);
+                float tempTw = tempPaint.measureText(tempStr);
+                if (tempTw > maxTempW && tempTw > 1f) {
+                    tempSz = Math.max(12f, tempSz * (maxTempW / tempTw));
+                    tempPaint.setTextSize(tempSz);
+                    tempTw = tempPaint.measureText(tempStr);
+                }
+                float groupW = iconR * 2f + gap + tempTw;
+                float groupLeft;
+                if (layout == 2) {
+                    groupLeft = innerL;
+                } else if (layout == 3) {
+                    groupLeft = innerR - groupW;
+                } else {
+                    groupLeft = card.centerX() - groupW * 0.5f;
+                }
+                drawWeatherIcon(c, groupLeft + iconR, topLineY, iconR, cond, a255, !lightStyle);
+                tempPaint.setTextAlign(Paint.Align.LEFT);
+                float tempBase = topLineY - (tempPaint.ascent() + tempPaint.descent()) * 0.5f;
+                c.drawText(tempStr, groupLeft + iconR * 2f + gap, tempBase, tempPaint);
+
+                if (hasSub) {
+                    Paint subP = new Paint(txt);
+                    subP.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
+                    subP.setColor(secondaryText);
+                    subP.setTextAlign(align);
+                    drawTextFitCenteredY(c, wxSub, anchorX, cursorY + rowH * 0.78f, innerW,
+                        Math.min(rowH * 0.27f, innerW * 0.11f), subP);
+                }
+            }
+            return;
+        }
+
+        // Style 2 (Tarjeta 2 lineas): top row = Time + Weather, bottom row = Date + City/Condition
+        if (style == 2 && sections >= 2) {
+            float innerL = card.left + cw * 0.05f;
+            float innerR = card.right - cw * 0.05f;
+            float innerW = innerR - innerL;
+            float topY = card.top + ch * 0.50f;
+            float botY = card.top + ch * 0.84f;
+
+            if (showTime && showWeather) {
+                txt.setTextAlign(Paint.Align.LEFT);
+                txt.setColor(primaryText);
+                drawTextFit(c, timeStr, innerL, topY, innerW * 0.54f, ch * 0.40f, txt);
+
+                float iconR = ch * 0.19f;
+                txt.setTextAlign(Paint.Align.RIGHT);
+                txt.setColor(primaryText);
+                drawTextFit(c, tempStr, innerR, topY, innerW * 0.30f, ch * 0.38f, txt);
+                float tempW = txt.measureText(tempStr);
+                drawWeatherIcon(c, innerR - tempW - iconR * 1.45f, topY - ch * 0.13f, iconR, cond, a255, !lightStyle);
+            } else if (showTime) {
+                txt.setTextAlign(Paint.Align.CENTER);
+                txt.setColor(primaryText);
+                drawTextFit(c, timeStr, card.centerX(), topY, innerW, ch * 0.44f, txt);
+            } else if (showWeather) {
+                float iconR = ch * 0.21f;
+                txt.setTextAlign(Paint.Align.LEFT);
+                txt.setColor(primaryText);
+                drawWeatherIcon(c, card.centerX() - ch * 0.55f, topY - ch * 0.13f, iconR, cond, a255, !lightStyle);
+                drawTextFit(c, tempStr, card.centerX() - ch * 0.18f, topY, innerW * 0.55f, ch * 0.42f, txt);
+            }
+
+            p.setColor(dividerCol);
+            c.drawRect(innerL, card.top + ch * 0.58f, innerR, card.top + ch * 0.595f, p);
+
+            txt.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
+            txt.setColor(secondaryText);
+            if (showDate && showWeather) {
+                txt.setTextAlign(Paint.Align.LEFT);
+                drawTextFit(c, dateStr, innerL, botY, innerW * 0.52f, ch * 0.20f, txt);
+                txt.setTextAlign(Paint.Align.RIGHT);
+                drawTextFit(c, wxSub, innerR, botY, innerW * 0.44f, ch * 0.20f, txt);
+            } else if (showDate) {
+                txt.setTextAlign(Paint.Align.CENTER);
+                drawTextFit(c, dateStr, card.centerX(), botY, innerW, ch * 0.22f, txt);
+            } else if (showWeather) {
+                txt.setTextAlign(Paint.Align.CENTER);
+                drawTextFit(c, wxSub, card.centerX(), botY, innerW, ch * 0.22f, txt);
+            }
+            return;
+        }
+
+        // Horizontal adaptive broadcast layout for Styles 0, 1, 3, 4, 5 (and single-element Style 2)
+        float innerL = card.left + (style == 1 ? Math.min(ch * 0.32f, cw * 0.12f) : Math.max(22f, cw * 0.035f));
+        float innerR = card.right - (style == 1 ? Math.min(ch * 0.32f, cw * 0.12f) : Math.max(18f, cw * 0.035f));
+        float innerW = Math.max(40f, innerR - innerL);
+
+        // Build ordered slots: [Time] [Date] [Weather]
+        float cursorX = innerL;
+        int drawn = 0;
+
+        float timeWeight = showTime ? ((showSec && !fmt24) ? 1.35f : ((showSec || !fmt24) ? 1.18f : 0.95f)) : 0f;
+        float dateWeight = showDate ? (dateFmt == 2 ? 1.70f : (dateFmt == 0 ? 1.30f : (dateFmt == 1 ? 1.05f : 0.85f))) : 0f;
+        float wxWeight = showWeather ? (showCity && !displayCity.isEmpty() ? 1.25f : 0.92f) : 0f;
+        float totalWeight = Math.max(0.1f, timeWeight + dateWeight + wxWeight);
+
+        if (showTime) {
+            float slotW = innerW * (timeWeight / totalWeight);
+            float centerX = cursorX + slotW * 0.5f;
+            if (style == 0 && sections > 1) {
+                // Highlight chip behind time in TV News bar
+                p.setColor((accent & 0x00FFFFFF) | (Math.round(220 * alpha) << 24));
+                c.drawRoundRect(new RectF(cursorX + 4f, card.top + ch * 0.14f, cursorX + slotW - 10f, card.bottom - ch * 0.14f), 8f, 8f, p);
+                txt.setColor(Color.argb(a255, 255, 255, 255));
+            } else if (style == 5) {
+                txt.setColor((accent & 0x00FFFFFF) | (a255 << 24));
+            } else {
+                txt.setColor(primaryText);
+            }
+            txt.setTextAlign(Paint.Align.CENTER);
+            drawTextFitCenteredY(c, timeStr, centerX - (style == 0 && sections > 1 ? 3f : 0f),
+                card.centerY(), Math.max(30f, slotW - 22f), ch * 0.48f, txt);
+            cursorX += slotW;
+            drawn++;
+        }
+
+        if (showDate) {
+            if (drawn > 0 && style != 0 && style != 3) {
+                p.setColor(dividerCol);
+                c.drawRect(cursorX - 1.5f, card.top + ch * 0.22f, cursorX + 1.5f, card.bottom - ch * 0.22f, p);
+            }
+            float slotW = innerW * (dateWeight / totalWeight);
+            float centerX = cursorX + slotW * 0.5f;
+            txt.setTextAlign(Paint.Align.CENTER);
+            txt.setColor(sections == 1 ? primaryText : secondaryText);
+            drawTextFitCenteredY(c, dateStr, centerX, card.centerY(),
+                Math.max(30f, slotW - 20f), ch * (sections == 1 ? 0.36f : 0.28f), txt);
+            cursorX += slotW;
+            drawn++;
+        }
+
+        if (showWeather) {
+            if (drawn > 0 && style != 3) {
+                p.setColor(dividerCol);
+                c.drawRect(cursorX - 1.5f, card.top + ch * 0.22f, cursorX + 1.5f, card.bottom - ch * 0.22f, p);
+            }
+            float slotW = innerW * (wxWeight / totalWeight);
+            boolean hasCityLine = showCity && !displayCity.isEmpty();
+            float iconR = Math.min(ch * 0.28f, slotW * 0.17f);
+            float gap = iconR * 0.65f;
+            float maxTextW = Math.max(30f, slotW - iconR * 2.1f - gap - 14f);
+
+            Paint tempP = new Paint(txt);
+            tempP.setColor(primaryText);
+            tempP.setTextAlign(Paint.Align.LEFT);
+            float tempSz = ch * (hasCityLine ? 0.36f : 0.46f);
+            tempP.setTextSize(tempSz);
+            float tempW = tempP.measureText(tempStr);
+            if (tempW > maxTextW && tempW > 1f) {
+                tempSz = Math.max(12f, tempSz * (maxTextW / tempW));
+                tempP.setTextSize(tempSz);
+                tempW = tempP.measureText(tempStr);
+            }
+
+            Paint subP = null;
+            float subW = 0f;
+            if (hasCityLine) {
+                subP = new Paint(txt);
+                subP.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
+                subP.setColor(secondaryText);
+                subP.setTextAlign(Paint.Align.LEFT);
+                float subSz = ch * 0.22f;
+                subP.setTextSize(subSz);
+                subW = subP.measureText(displayCity);
+                if (subW > maxTextW && subW > 1f) {
+                    subSz = Math.max(11f, subSz * (maxTextW / subW));
+                    subP.setTextSize(subSz);
+                    subW = subP.measureText(displayCity);
+                }
+            }
+
+            float groupW = iconR * 2f + gap + Math.max(tempW, subW);
+            float groupLeft = cursorX + Math.max(6f, (slotW - groupW) * 0.5f);
+            drawWeatherIcon(c, groupLeft + iconR, card.centerY(), iconR, cond, a255, !lightStyle);
+
+            float textL = groupLeft + iconR * 2f + gap;
+            if (hasCityLine) {
+                float tempBase = (card.centerY() - ch * 0.14f) - (tempP.ascent() + tempP.descent()) * 0.5f;
+                c.drawText(tempStr, textL, tempBase, tempP);
+                float subBase = (card.centerY() + ch * 0.22f) - (subP.ascent() + subP.descent()) * 0.5f;
+                c.drawText(displayCity, textL, subBase, subP);
+            } else {
+                float tempBase = card.centerY() - (tempP.ascent() + tempP.descent()) * 0.5f;
+                c.drawText(tempStr, textL, tempBase, tempP);
+            }
+        }
+    }
+
+    // ---- 6. Advanced Animated Title Generator (30 FPS Motion Engine + 8 Broadcast Templates) ----
+    private static float easeOutCubic(float t) {
+        float u = 1f - Math.max(0f, Math.min(1f, t));
+        return 1f - u * u * u;
+    }
+
+    private static float easeOutBack(float t) {
+        float c1 = 1.70158f;
+        float c3 = c1 + 1f;
+        float x = Math.max(0f, Math.min(1f, t)) - 1f;
+        return 1f + c3 * x * x * x + c1 * x * x;
+    }
+
+    private static String typewriterSlice(String text, float t) {
+        if (text == null || text.isEmpty()) return "";
+        int n = Math.round(text.length() * Math.max(0f, Math.min(1f, t)));
+        if (n <= 0) return "";
+        if (n >= text.length()) return text;
+        return text.substring(0, n) + "▌";
+    }
+
+    private static void drawShimmerOverlay(Canvas c, RectF rect, float radius, long elapsedMs, float alpha) {
+        float phase = ((elapsedMs % 3200L) / 3200f);
+        if (phase > 0.45f) return;
+        float norm = phase / 0.45f; // 0..1 sweep
+        float bandW = rect.width() * 0.28f;
+        float x = rect.left - bandW + (rect.width() + bandW * 2f) * norm;
+        Paint sp = new Paint(Paint.ANTI_ALIAS_FLAG);
+        int shineAlpha = Math.round(75 * alpha);
+        sp.setShader(new LinearGradient(x, rect.top, x + bandW, rect.bottom,
+            new int[]{Color.TRANSPARENT, Color.argb(shineAlpha, 255, 255, 255), Color.TRANSPARENT},
+            new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
+        c.save();
+        android.graphics.Path clip = new android.graphics.Path();
+        clip.addRoundRect(rect, radius, radius, android.graphics.Path.Direction.CW);
+        c.clipPath(clip);
+        c.drawRect(rect, sp);
+        c.restore();
+    }
+
+    private static void drawAdvancedTitle(Canvas c, int w, int h, float rawProgress, boolean exiting,
+                                          long elapsedOnAirMs, float tickerX, JSONObject localCfg) {
+        int template, animIn, animOut, align, scalePct;
+        boolean shimmer;
+        String badge, title, subtitle, ticker, logoPath;
+        int accentCol, bgCol, textCol;
+
+        synchronized (sStateLock) {
+            template = localCfg != null ? localCfg.optInt("template", 0) : sState.atTemplate;
+            animIn = localCfg != null ? localCfg.optInt("animIn", 0) : sState.atAnimIn;
+            animOut = localCfg != null ? localCfg.optInt("animOut", 0) : sState.atAnimOut;
+            shimmer = localCfg != null ? localCfg.optBoolean("shimmer", true) : sState.atShimmer;
+            badge = localCfg != null ? localCfg.optString("badge", "EN VIVO") : sState.atBadge;
+            title = localCfg != null ? localCfg.optString("title", "TÍTULO PRINCIPAL") : sState.atTitle;
+            subtitle = localCfg != null ? localCfg.optString("subtitle", "") : sState.atSubtitle;
+            ticker = localCfg != null ? localCfg.optString("ticker", "") : sState.atTicker;
+            accentCol = parseColorSafe(localCfg != null ? localCfg.optString("accentColor", "#2563EB") : sState.atAccent, Color.parseColor("#2563EB"));
+            bgCol = parseColorSafe(localCfg != null ? localCfg.optString("bgColor", "#0F172A") : sState.atBg, Color.parseColor("#0F172A"));
+            textCol = parseColorSafe(localCfg != null ? localCfg.optString("textColor", "#FFFFFF") : sState.atText, Color.WHITE);
+            align = localCfg != null ? localCfg.optInt("align", 0) : sState.atAlign;
+            scalePct = Math.max(60, Math.min(140, localCfg != null ? localCfg.optInt("scalePct", 100) : sState.atScale));
+            logoPath = localCfg != null ? localCfg.optString("logoPath", "") : sState.atLogo;
+        }
+
+        float p = Math.max(0f, Math.min(1f, rawProgress));
+        float eased = easeOutCubic(p);
+        float textScale = scalePct / 100f;
+        int effAnim = animIn;
+        if (exiting && animOut > 0) {
+            if (animOut == 1) effAnim = 5;      // Fade
+            else if (animOut == 2) effAnim = 3; // Rise/Drop
+            else if (animOut == 3) effAnim = 1; // Wipe
+        }
+
+        // Apply global transform / clip for the selected animation
+        float alpha = Math.min(1f, p * 1.4f);
+        int a255 = Math.round(alpha * 255);
+        c.save();
+        if (effAnim == 0) {
+            // Slide Left Broadcast
+            float dx = (1f - eased) * (align == 2 ? w * 0.28f : -w * 0.28f);
+            c.translate(dx, 0f);
+        } else if (effAnim == 1) {
+            // Curtain Wipe Reveal
+            if (align == 2) c.clipRect(w * (1f - eased), 0f, w, h);
+            else if (align == 1) {
+                float half = w * 0.5f * eased;
+                c.clipRect(w * 0.5f - half, 0f, w * 0.5f + half, h);
+            } else {
+                c.clipRect(0f, 0f, w * eased, h);
+            }
+        } else if (effAnim == 2) {
+            // Elastic Pop Zoom
+            float sc = exiting ? (0.82f + 0.18f * eased) : Math.max(0.05f, easeOutBack(p));
+            c.scale(sc, sc, w * 0.5f, h * 0.5f);
+        } else if (effAnim == 3) {
+            // Rise Up from Baseline
+            c.clipRect(0f, 0f, w, h);
+            c.translate(0f, (1f - eased) * h * 0.45f);
+        } else if (effAnim == 5) {
+            // Cinematic Fade
+            alpha = eased;
+            a255 = Math.round(alpha * 255);
+        }
+
+        // Typewriter text slicing when effAnim == 4
+        String shownTitle = (effAnim == 4 && !exiting) ? typewriterSlice(title, p) : (title != null ? title : "");
+        String shownSub = (effAnim == 4 && !exiting) ? typewriterSlice(subtitle, Math.max(0f, (p - 0.35f) / 0.65f)) : (subtitle != null ? subtitle : "");
+
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        Paint txt = new Paint(Paint.ANTI_ALIAS_FLAG);
+        txt.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
+        Bitmap logo = getCachedAtLogo(logoPath);
+
+        int bgWithA = (bgCol & 0x00FFFFFF) | (Math.round(238 * alpha) << 24);
+        int bgDarkWithA = Color.argb(Math.round(244 * alpha), Math.max(0, Color.red(bgCol) - 18), Math.max(0, Color.green(bgCol) - 18), Math.max(0, Color.blue(bgCol) - 18));
+        int accWithA = (accentCol & 0x00FFFFFF) | (a255 << 24);
+        int txtWithA = (textCol & 0x00FFFFFF) | (a255 << 24);
+        int subWithA = (textCol & 0x00FFFFFF) | (Math.round(205 * alpha) << 24);
+
+        // Template 4: Marquesina / Ticker Continuo (Scrolling News Ribbon)
+        if (template == 4) {
+            float barH = Math.min(h * 0.42f, 110f);
+            float top = (h - barH) * 0.5f;
+            float left = w * 0.02f;
+            float right = w * 0.98f;
+            RectF bar = new RectF(left, top, right, top + barH);
+            paint.setColor(bgWithA);
+            c.drawRoundRect(bar, 10f, 10f, paint);
+            paint.setColor(accWithA);
+            c.drawRect(left, top + barH - 5f, right, top + barH, paint);
+
+            float badgeW = 0f;
+            if (badge != null && !badge.trim().isEmpty()) {
+                txt.setTextSize(barH * 0.38f * textScale);
+                badgeW = Math.min((right - left) * 0.30f, txt.measureText(badge.toUpperCase(Locale.ROOT)) + 44f);
+                paint.setColor(accWithA);
+                c.drawRoundRect(new RectF(left, top, left + badgeW, top + barH), 10f, 10f, paint);
+                txt.setTextAlign(Paint.Align.CENTER);
+                txt.setColor(Color.argb(a255, 255, 255, 255));
+                drawTextFitCenteredY(c, badge.toUpperCase(Locale.ROOT), left + badgeW * 0.5f, top + barH * 0.5f, badgeW - 18f, barH * 0.38f * textScale, txt);
+            }
+
+            String scrollStr = (ticker != null && !ticker.trim().isEmpty()) ? ticker : (shownTitle + "   •   " + shownSub + "   •   ");
+            if (!scrollStr.endsWith("   ")) scrollStr = scrollStr + "   •   ";
+            txt.setTextAlign(Paint.Align.LEFT);
+            txt.setColor(txtWithA);
+            txt.setTextSize(barH * 0.44f * textScale);
+            float unitW = Math.max(80f, txt.measureText(scrollStr));
+            float scrollAreaL = left + badgeW + 18f;
+            float scrollAreaR = right - 18f;
+            float offset = tickerX % unitW;
+            c.save();
+            c.clipRect(scrollAreaL, top, scrollAreaR, top + barH);
+            float baseline = (top + barH * 0.5f) - (txt.ascent() + txt.descent()) * 0.5f;
+            for (float x = scrollAreaL - offset; x < scrollAreaR + unitW; x += unitW) {
+                c.drawText(scrollStr, x, baseline, txt);
+            }
+            c.restore();
+            if (shimmer && !exiting) drawShimmerOverlay(c, bar, 10f, elapsedOnAirMs, alpha);
+            c.restore();
+            return;
+        }
+
+        // Template 5: Intro Pantalla Completa (Centered Hero Title Card)
+        if (template == 5) {
+            float cw = w * 0.84f;
+            float ch = h * 0.78f;
+            RectF box = new RectF((w - cw) * 0.5f, (h - ch) * 0.5f, (w + cw) * 0.5f, (h + ch) * 0.5f);
+            paint.setShader(new LinearGradient(box.left, box.top, box.right, box.bottom, bgWithA, bgDarkWithA, Shader.TileMode.CLAMP));
+            c.drawRoundRect(box, 22f, 22f, paint);
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(4f);
+            paint.setColor(accWithA);
+            c.drawRoundRect(box, 22f, 22f, paint);
+            paint.setStyle(Paint.Style.FILL);
+
+            // Animated horizontal accent line expanding from center
+            float lineHalf = cw * 0.34f * eased;
+            paint.setColor(accWithA);
+            c.drawRoundRect(new RectF(box.centerX() - lineHalf, box.centerY() + ch * 0.08f, box.centerX() + lineHalf, box.centerY() + ch * 0.08f + 6f), 3f, 3f, paint);
+
+            if (logo != null) {
+                drawLogoFit(c, logo, box.centerX(), box.top + ch * 0.22f, ch * 0.26f, a255);
+            } else if (badge != null && !badge.trim().isEmpty()) {
+                txt.setTextAlign(Paint.Align.CENTER);
+                txt.setColor(accWithA);
+                drawTextFitCenteredY(c, badge.toUpperCase(Locale.ROOT), box.centerX(), box.top + ch * 0.22f, cw * 0.82f, ch * 0.11f * textScale, txt);
+            }
+
+            txt.setTextAlign(Paint.Align.CENTER);
+            txt.setColor(txtWithA);
+            float splitDy = (effAnim == 6) ? (1f - eased) * ch * 0.14f : 0f;
+            drawTextFitCenteredY(c, shownTitle, box.centerX(), box.centerY() - ch * 0.06f + splitDy, cw * 0.88f, ch * 0.24f * textScale, txt);
+
+            if (!shownSub.isEmpty()) {
+                txt.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
+                txt.setColor(subWithA);
+                drawTextFitCenteredY(c, shownSub, box.centerX(), box.centerY() + ch * 0.26f - splitDy, cw * 0.84f, ch * 0.13f * textScale, txt);
+            }
+            if (shimmer && !exiting) drawShimmerOverlay(c, box, 22f, elapsedOnAirMs, alpha);
+            c.restore();
+            return;
+        }
+
+        // Standard lower-third / card geometry for Templates 0, 1, 2, 3, 6, 7
+        float boxW = (template == 6) ? w * 0.62f : w * 0.84f;
+        float boxH = Math.min(h * 0.72f, 230f);
+        float left = (align == 1) ? (w - boxW) * 0.5f : (align == 2 ? (w - boxW - w * 0.04f) : w * 0.04f);
+        float top = (h - boxH) * 0.5f;
+        RectF card = new RectF(left, top, left + boxW, top + boxH);
+
+        if (template == 1) {
+            // Deportes / Impacto Diagonal (skewed plate)
+            c.save();
+            c.skew(-0.14f, 0f);
+            float adjL = left + top * 0.14f;
+            RectF skCard = new RectF(adjL, top, adjL + boxW, top + boxH);
+            paint.setColor(bgWithA);
+            c.drawRect(skCard, paint);
+            paint.setColor(accWithA);
+            c.drawRect(adjL, top, adjL + 22f, top + boxH, paint);
+            c.drawRect(adjL + 28f, top, adjL + 36f, top + boxH, paint);
+            c.drawRect(adjL, top + boxH - 8f, adjL + boxW, top + boxH, paint);
+            if (shimmer && !exiting) drawShimmerOverlay(c, skCard, 0f, elapsedOnAirMs, alpha);
+            c.restore();
+        } else if (template == 2) {
+            // Minimalista Cinematográfico (no card, expanding rule + shadow)
+            txt.setShadowLayer(8f, 0f, 3f, Color.argb(Math.round(220 * alpha), 0, 0, 0));
+            float ruleY = top + boxH * 0.56f;
+            paint.setColor(accWithA);
+            if (align == 1) {
+                float half = boxW * 0.42f * eased;
+                c.drawRoundRect(new RectF(card.centerX() - half, ruleY, card.centerX() + half, ruleY + 6f), 3f, 3f, paint);
+            } else if (align == 2) {
+                c.drawRoundRect(new RectF(card.right - boxW * 0.82f * eased, ruleY, card.right, ruleY + 6f), 3f, 3f, paint);
+            } else {
+                c.drawRoundRect(new RectF(card.left, ruleY, card.left + boxW * 0.82f * eased, ruleY + 6f), 3f, 3f, paint);
+            }
+        } else if (template == 3) {
+            // Glassmorphism / Podcast
+            paint.setShader(new LinearGradient(card.left, card.top, card.right, card.bottom,
+                (bgCol & 0x00FFFFFF) | (Math.round(196 * alpha) << 24),
+                (bgCol & 0x00FFFFFF) | (Math.round(165 * alpha) << 24), Shader.TileMode.CLAMP));
+            c.drawRoundRect(card, 24f, 24f, paint);
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(2.5f);
+            paint.setColor(Color.argb(Math.round(125 * alpha), 255, 255, 255));
+            c.drawRoundRect(card, 24f, 24f, paint);
+            paint.setStyle(Paint.Style.FILL);
+            if (shimmer && !exiting) drawShimmerOverlay(c, card, 24f, elapsedOnAirMs, alpha);
+        } else if (template == 6) {
+            // Tarjeta Redes Sociales (capsule card + accent circle badge)
+            float r = boxH * 0.48f;
+            paint.setColor(bgWithA);
+            c.drawRoundRect(card, r, r, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(3.5f);
+            paint.setColor(accWithA);
+            c.drawRoundRect(card, r, r, paint);
+            paint.setStyle(Paint.Style.FILL);
+            if (shimmer && !exiting) drawShimmerOverlay(c, card, r, elapsedOnAirMs, alpha);
+        } else if (template == 7) {
+            // Cita / Frase Destacada
+            paint.setColor(bgWithA);
+            c.drawRoundRect(card, 16f, 16f, paint);
+            paint.setColor(accWithA);
+            c.drawRoundRect(new RectF(card.left, card.top, card.left + 12f, card.bottom), 6f, 6f, paint);
+            Paint qP = new Paint(txt);
+            qP.setColor((accentCol & 0x00FFFFFF) | (Math.round(115 * alpha) << 24));
+            qP.setTextSize(boxH * 0.72f);
+            qP.setTextAlign(Paint.Align.LEFT);
+            c.drawText("“", card.left + 22f, card.top + boxH * 0.62f, qP);
+            if (shimmer && !exiting) drawShimmerOverlay(c, card, 16f, elapsedOnAirMs, alpha);
+        } else {
+            // Template 0: Noticiero Doble Barra (staggered dual tier)
+            float topH = boxH * 0.56f;
+            paint.setColor(Color.argb(Math.round(246 * alpha), 248, 250, 252));
+            c.drawRoundRect(new RectF(card.left, card.top, card.right, card.top + topH), 8f, 8f, paint);
+            paint.setColor(bgDarkWithA);
+            c.drawRoundRect(new RectF(card.left, card.top + topH - 4f, card.right * 0.96f, card.bottom), 8f, 8f, paint);
+            paint.setColor(accWithA);
+            c.drawRect(card.left, card.top, card.left + 16f, card.bottom, paint);
+            if (shimmer && !exiting) drawShimmerOverlay(c, card, 8f, elapsedOnAirMs, alpha);
+        }
+
+        // Content placement (Logo + Badge + Title + Subtitle)
+        float textLeft = card.left + (template == 1 ? 56f : (template == 7 ? 88f : 34f));
+        float textRight = card.right - 28f;
+        if (logo != null) {
+            float logoBox = boxH * 0.64f;
+            drawLogoFit(c, logo, card.left + 28f + logoBox * 0.5f, card.centerY(), logoBox, a255);
+            textLeft = card.left + 44f + logoBox;
+        } else if (template == 6) {
+            // Social icon circle on left
+            float cr = boxH * 0.34f;
+            float cx = card.left + boxH * 0.50f;
+            paint.setColor(accWithA);
+            c.drawCircle(cx, card.centerY(), cr, paint);
+            txt.setTextAlign(Paint.Align.CENTER);
+            txt.setColor(Color.argb(a255, 255, 255, 255));
+            String sym = (badge != null && !badge.trim().isEmpty()) ? badge.trim().substring(0, Math.min(2, badge.trim().length())).toUpperCase(Locale.ROOT) : "@";
+            drawTextFitCenteredY(c, sym, cx, card.centerY(), cr * 1.5f, cr * 0.92f, txt);
+            textLeft = cx + cr + 24f;
+        }
+
+        float availW = Math.max(80f, textRight - textLeft);
+        Paint.Align tAlign = (align == 1 && logo == null && template != 6) ? Paint.Align.CENTER
+            : (align == 2 && logo == null && template != 6 ? Paint.Align.RIGHT : Paint.Align.LEFT);
+        float anchorX = (tAlign == Paint.Align.CENTER) ? card.centerX() : (tAlign == Paint.Align.RIGHT ? textRight : textLeft);
+        float splitDy = (effAnim == 6) ? (1f - eased) * boxH * 0.16f : 0f;
+
+        if (template == 0) {
+            // Template 0: Dark headline on top white strip, light subtitle on bottom navy strip
+            float topH = boxH * 0.56f;
+            float botH = boxH - topH;
+            float titleStartX = textLeft;
+            if (badge != null && !badge.trim().isEmpty()) {
+                txt.setTextAlign(Paint.Align.LEFT);
+                txt.setTextSize(topH * 0.30f * textScale);
+                String bt = badge.toUpperCase(Locale.ROOT);
+                float chipW = Math.min(availW * 0.34f, txt.measureText(bt) + 28f);
+                paint.setColor(accWithA);
+                c.drawRoundRect(new RectF(titleStartX, card.top + topH * 0.22f, titleStartX + chipW, card.top + topH * 0.78f), 6f, 6f, paint);
+                txt.setColor(Color.argb(a255, 255, 255, 255));
+                txt.setTextAlign(Paint.Align.CENTER);
+                drawTextFitCenteredY(c, bt, titleStartX + chipW * 0.5f, card.top + topH * 0.5f, chipW - 12f, topH * 0.30f * textScale, txt);
+                titleStartX += chipW + 18f;
+            }
+            txt.setTextAlign(Paint.Align.LEFT);
+            txt.setColor(Color.argb(a255, 15, 23, 42));
+            drawTextFitCenteredY(c, shownTitle, titleStartX, card.top + topH * 0.50f + splitDy,
+                Math.max(60f, textRight - titleStartX), topH * 0.48f * textScale, txt);
+            if (!shownSub.isEmpty()) {
+                txt.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
+                txt.setColor(Color.argb(a255, 241, 245, 249));
+                drawTextFitCenteredY(c, shownSub, textLeft, card.top + topH + botH * 0.50f - splitDy,
+                    availW, botH * 0.46f * textScale, txt);
+            }
+        } else {
+            // Templates 1, 2, 3, 6, 7
+            boolean hasBadge = (template != 6 && badge != null && !badge.trim().isEmpty());
+            if (hasBadge) {
+                txt.setTextAlign(tAlign);
+                txt.setColor(accWithA);
+                drawTextFitCenteredY(c, badge.toUpperCase(Locale.ROOT), anchorX, card.top + boxH * 0.20f,
+                    availW, boxH * 0.14f * textScale, txt);
+            }
+            txt.setTextAlign(tAlign);
+            txt.setColor(txtWithA);
+            float titleY = hasBadge ? (card.top + boxH * 0.47f) : (card.top + boxH * 0.38f);
+            drawTextFitCenteredY(c, shownTitle, anchorX, titleY + splitDy, availW, boxH * 0.27f * textScale, txt);
+
+            if (!shownSub.isEmpty()) {
+                txt.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
+                txt.setColor(subWithA);
+                float subY = hasBadge ? (card.top + boxH * 0.77f) : (card.top + boxH * 0.72f);
+                drawTextFitCenteredY(c, shownSub, anchorX, subY - splitDy, availW, boxH * 0.18f * textScale, txt);
+            }
+        }
+
+        c.restore();
     }
 
     private LiveGraphicsManager() {}

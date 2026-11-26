@@ -1,0 +1,1496 @@
+diff --git a/frontend/utility/android-tools.cpp b/frontend/utility/android-tools.cpp
+index d31cb9160..198b1d2ab 100644
+--- a/frontend/utility/android-tools.cpp
++++ b/frontend/utility/android-tools.cpp
+@@ -71,6 +71,7 @@
+ #include <QToolBar>
+ #include <QToolButton>
+ #include <QTouchEvent>
++#include <QUrl>
+ #include <QUuid>
+ #include <QVBoxLayout>
+ 
+@@ -5642,6 +5643,76 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 	dlg.exec();
+ }
+ 
++static std::string IsoConfigFilePath()
++{
++	const char *files = obs_android_files_path();
++	if (!files || !*files)
++		files = getenv("OBS_ANDROID_FILES_PATH");
++	std::string dir = files ? (std::string(files) + "/obs-studio") : "/data/local/tmp";
++	QDir().mkpath(QString::fromStdString(dir));
++	return dir + "/android-iso.json";
++}
++
++static nlohmann::json LoadIsoConfig()
++{
++	nlohmann::json cfg = {{"sources", nlohmann::json::array()},
++			      {"width", 1280},
++			      {"height", 720},
++			      {"bitrate", 4000},
++			      {"includeAudio", true},
++			      {"syncMainRec", false}};
++	std::ifstream f(IsoConfigFilePath());
++	if (f.is_open()) {
++		try {
++			auto parsed = nlohmann::json::parse(f);
++			if (parsed.is_object())
++				cfg.update(parsed);
++		} catch (...) {
++		}
++	}
++	return cfg;
++}
++
++static void SaveIsoConfig(const nlohmann::json &cfg)
++{
++	WriteConfigAtomically(IsoConfigFilePath(), cfg);
++}
++
++static QString GetAndroidRecordingsRootDir()
++{
++	if (void *jni = FindAndroidJni()) {
++		using Fn = bool (*)(char *, size_t);
++		if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_get_default_recording_path"))) {
++			char buf[512] = {};
++			if (fn(buf, sizeof(buf)) && buf[0])
++				return QString::fromUtf8(buf);
++		}
++	}
++	return QStringLiteral("/storage/emulated/0/Movies/OBS Studio");
++}
++
++static bool StartIsoRecordingWithConfig(const nlohmann::json &cfg)
++{
++	void *jni = FindAndroidJni();
++	if (!jni)
++		return false;
++	using Fn = bool (*)(const char *);
++	auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_iso_start"));
++	if (!fn)
++		return false;
++	nlohmann::json req = cfg;
++	req["dir"] = (GetAndroidRecordingsRootDir() + QStringLiteral("/ISO")).toStdString();
++	return fn(req.dump().c_str());
++}
++
++static void StopIsoRecordingNow()
++{
++	if (void *jni = FindAndroidJni()) {
++		if (auto fn = reinterpret_cast<void (*)()>(dlsym(jni, "obs_android_iso_stop")))
++			fn();
++	}
++}
++
+ void OnFrontendEventAndroid(enum obs_frontend_event event, void *)
+ {
+     if (event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN || event == OBS_FRONTEND_EVENT_EXIT) {
+@@ -5660,6 +5731,17 @@ void OnFrontendEventAndroid(enum obs_frontend_event event, void *)
+ 		   event == OBS_FRONTEND_EVENT_RECORDING_STOPPED ||
+ 		   event == OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED ||
+ 		   event == OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED) {
++		if (event == OBS_FRONTEND_EVENT_RECORDING_STARTED) {
++			const auto isoCfg = LoadIsoConfig();
++			if (isoCfg.value("syncMainRec", false) && isoCfg.contains("sources") && !isoCfg["sources"].empty()) {
++				StartIsoRecordingWithConfig(isoCfg);
++			}
++		} else if (event == OBS_FRONTEND_EVENT_RECORDING_STOPPED) {
++			const auto isoCfg = LoadIsoConfig();
++			if (isoCfg.value("syncMainRec", false)) {
++				StopIsoRecordingNow();
++			}
++		}
+ 		SyncBroadcastKeepalive();
+ 	} else if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
+ 		SyncVerticalToCurrentMainScene();
+@@ -7023,6 +7105,1358 @@ static void OpenExternalDisplayDialog(QWidget *parent)
+ 	dlg.exec();
+ }
+ 
++// =========================================================================
++// 1. PTZ Camera Control UI (VISCA / ONVIF / Pelco-D + PlayStation Controller)
++// =========================================================================
++static nlohmann::json PtzGetState()
++{
++	if (void *jni = FindAndroidJni()) {
++		using Fn = bool (*)(char *, size_t);
++		if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_ptz_get_state"))) {
++			std::string buf(32768, '\0');
++			if (fn(buf.data(), buf.size()) && buf[0]) {
++				try { return nlohmann::json::parse(buf.c_str()); } catch (...) {}
++			}
++		}
++	}
++	return nlohmann::json::object();
++}
++
++static nlohmann::json PtzExec(const nlohmann::json &req)
++{
++	if (void *jni = FindAndroidJni()) {
++		using Fn = bool (*)(const char *, char *, size_t);
++		if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_ptz_execute"))) {
++			std::string s = req.dump();
++			std::string buf(32768, '\0');
++			if (fn(s.c_str(), buf.data(), buf.size()) && buf[0]) {
++				try { return nlohmann::json::parse(buf.c_str()); } catch (...) {}
++			}
++		}
++	}
++	return nlohmann::json::object();
++}
++
++class PtzTouchPadWidget : public QWidget {
++public:
++	std::function<void(float, float)> onMove;
++	explicit PtzTouchPadWidget(QWidget *parent = nullptr) : QWidget(parent)
++	{
++		setMinimumSize(148, 148);
++		setMaximumSize(180, 180);
++		setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
++	}
++
++protected:
++	void paintEvent(QPaintEvent *) override
++	{
++		QPainter p(this);
++		p.setRenderHint(QPainter::Antialiasing, true);
++		const int sz = std::min(width(), height()) - 8;
++		const QRectF ring((width() - sz) * 0.5, (height() - sz) * 0.5, sz, sz);
++		p.setBrush(QColor(22, 27, 38));
++		p.setPen(QPen(QColor(71, 85, 105), 2));
++		p.drawEllipse(ring);
++		p.setPen(QPen(QColor(51, 65, 85), 1, Qt::DashLine));
++		p.drawLine(QPointF(ring.center().x(), ring.top() + 8), QPointF(ring.center().x(), ring.bottom() - 8));
++		p.drawLine(QPointF(ring.left() + 8, ring.center().y()), QPointF(ring.right() - 8, ring.center().y()));
++
++		const double r = sz * 0.36;
++		const QPointF knob(ring.center().x() + m_pan * r, ring.center().y() - m_tilt * r);
++		p.setPen(QPen(QColor(59, 130, 246), 2));
++		p.drawLine(ring.center(), knob);
++		p.setBrush(m_dragging ? QColor(37, 99, 235) : QColor(59, 130, 246));
++		p.setPen(QPen(Qt::white, 2));
++		p.drawEllipse(knob, 18, 18);
++	}
++
++	void mousePressEvent(QMouseEvent *ev) override
++	{
++		m_dragging = true;
++		updateFromPos(ev->position(), true);
++	}
++	void mouseMoveEvent(QMouseEvent *ev) override
++	{
++		if (m_dragging)
++			updateFromPos(ev->position(), false);
++	}
++	void mouseReleaseEvent(QMouseEvent *) override
++	{
++		m_dragging = false;
++		m_pan = 0.0f;
++		m_tilt = 0.0f;
++		update();
++		if (onMove) onMove(0.0f, 0.0f);
++	}
++
++private:
++	void updateFromPos(const QPointF &pos, bool force)
++	{
++		const double r = std::max(20.0, (std::min(width(), height()) - 8) * 0.36);
++		double dx = (pos.x() - width() * 0.5) / r;
++		double dy = -(pos.y() - height() * 0.5) / r;
++		const double len = std::hypot(dx, dy);
++		if (len > 1.0) { dx /= len; dy /= len; }
++		m_pan = float(dx);
++		m_tilt = float(dy);
++		update();
++		auto now = std::chrono::steady_clock::now();
++		if (force || std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastSent).count() >= 55) {
++			m_lastSent = now;
++			if (onMove) onMove(m_pan, m_tilt);
++		}
++	}
++	bool m_dragging{false};
++	float m_pan{0.0f};
++	float m_tilt{0.0f};
++	std::chrono::steady_clock::time_point m_lastSent{};
++};
++
++static QWidget *CreatePtzControlWidget(QWidget *parent = nullptr)
++{
++	auto *scroll = new QScrollArea(parent);
++	scroll->setWidgetResizable(true);
++	scroll->setFrameShape(QFrame::NoFrame);
++	QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
++
++	auto *rootW = new QWidget(scroll);
++	auto *root = new QVBoxLayout(rootW);
++	root->setContentsMargins(8, 8, 8, 8);
++	root->setSpacing(6);
++
++	auto *padBanner = new QLabel(QStringLiteral("Mando PlayStation / Gamepad: buscando..."), rootW);
++	padBanner->setWordWrap(true);
++	padBanner->setStyleSheet(QStringLiteral("background:#1e293b; color:#cbd5e1; border-radius:6px; padding:6px; font-size:11px;"));
++	root->addWidget(padBanner);
++
++	auto *cbPad = new QCheckBox(QStringLiteral("Activar control por Mando PlayStation (DualShock 4 / DualSense / Gamepad)"), rootW);
++	cbPad->setChecked(true);
++	root->addWidget(cbPad);
++
++	auto *padLegend = new QLabel(QStringLiteral(
++		"Mando PS: Stick Izq = Pan/Tilt · Stick Der o L2/R2 = Zoom · L1/R1 = Cambiar cámara · "
++		"L3 = Home · R3 = Auto-Focus · ✕○□△/Cruceta = Presets 1-8 · OPTIONS + botón = Guardar Preset"), rootW);
++	padLegend->setWordWrap(true);
++	padLegend->setStyleSheet(QStringLiteral("color:#94a3b8; font-size:10px;"));
++	root->addWidget(padLegend);
++
++	auto *camRow = new QHBoxLayout();
++	auto *camCombo = new QComboBox(rootW);
++	auto *btnAdd = new QPushButton(QStringLiteral("+ Cámara"), rootW);
++	auto *btnEdit = new QPushButton(QStringLiteral("Editar"), rootW);
++	auto *btnDel = new QPushButton(QStringLiteral("Borrar"), rootW);
++	auto *btnScan = new QPushButton(QStringLiteral("ONVIF"), rootW);
++	camRow->addWidget(camCombo, 1);
++	camRow->addWidget(btnAdd);
++	camRow->addWidget(btnEdit);
++	camRow->addWidget(btnDel);
++	camRow->addWidget(btnScan);
++	root->addLayout(camRow);
++
++	auto *ctrlRow = new QHBoxLayout();
++	auto *pad = new PtzTouchPadWidget(rootW);
++	pad->onMove = [](float pan, float tilt) {
++		PtzExec({{"action", "move"}, {"pan", pan}, {"tilt", tilt}, {"zoom", 0.0}});
++	};
++	ctrlRow->addWidget(pad);
++
++	auto *sideCol = new QVBoxLayout();
++	auto *btnZoomIn = new QPushButton(QStringLiteral("Zoom +"), rootW);
++	auto *btnZoomOut = new QPushButton(QStringLiteral("Zoom −"), rootW);
++	auto *btnHome = new QPushButton(QStringLiteral("Home (Centro)"), rootW);
++	auto *btnAf = new QPushButton(QStringLiteral("Auto-Focus"), rootW);
++	auto *focusRow = new QHBoxLayout();
++	auto *btnFocNear = new QPushButton(QStringLiteral("Enfoque −"), rootW);
++	auto *btnFocFar = new QPushButton(QStringLiteral("Enfoque +"), rootW);
++	focusRow->addWidget(btnFocNear);
++	focusRow->addWidget(btnFocFar);
++	sideCol->addWidget(btnZoomIn);
++	sideCol->addWidget(btnZoomOut);
++	sideCol->addWidget(btnHome);
++	sideCol->addWidget(btnAf);
++	sideCol->addLayout(focusRow);
++	ctrlRow->addLayout(sideCol, 1);
++	root->addLayout(ctrlRow);
++
++	auto *spdRow = new QHBoxLayout();
++	auto *spdLbl = new QLabel(QStringLiteral("Velocidad: 65%"), rootW);
++	auto *spdSlider = new QSlider(Qt::Horizontal, rootW);
++	spdSlider->setRange(15, 100);
++	spdSlider->setValue(65);
++	spdRow->addWidget(spdLbl);
++	spdRow->addWidget(spdSlider, 1);
++	root->addLayout(spdRow);
++
++	auto *savePresetMode = new QPushButton(QStringLiteral("Modo: Ir a Preset (toca para cambiar a GUARDAR)"), rootW);
++	savePresetMode->setCheckable(true);
++	savePresetMode->setStyleSheet(QStringLiteral(
++		"QPushButton { background:#334155; color:#f8fafc; border-radius:5px; padding:5px; font-weight:600; }"
++		"QPushButton:checked { background:#dc2626; color:#ffffff; }"));
++	root->addWidget(savePresetMode);
++
++	auto *presetGrid = new QGridLayout();
++	presetGrid->setSpacing(4);
++	for (int i = 1; i <= 9; ++i) {
++		auto *pb = new QPushButton(QStringLiteral("P%1").arg(i), rootW);
++		pb->setMinimumHeight(34);
++		QObject::connect(pb, &QPushButton::clicked, rootW, [i, savePresetMode]() {
++			const bool save = savePresetMode->isChecked();
++			PtzExec({{"action", save ? "preset_save" : "preset_recall"}, {"preset", i}});
++			if (save) savePresetMode->setChecked(false);
++		});
++		presetGrid->addWidget(pb, (i - 1) / 3, (i - 1) % 3);
++	}
++	root->addLayout(presetGrid);
++
++	auto *statusLbl = new QLabel(QStringLiteral("Estado: listo"), rootW);
++	statusLbl->setWordWrap(true);
++	statusLbl->setStyleSheet(QStringLiteral("color:#94a3b8; font-size:11px;"));
++	root->addWidget(statusLbl);
++	root->addStretch(1);
++
++	scroll->setWidget(rootW);
++
++	auto refreshUi = std::make_shared<std::function<void()>>();
++	*refreshUi = [camCombo, padBanner, cbPad, spdSlider, spdLbl, statusLbl]() {
++		const auto st = PtzGetState();
++		if (st.empty()) return;
++		const std::string padName = st.value("gamepadName", "");
++		if (!padName.empty()) {
++			padBanner->setText(QStringLiteral("Mando conectado: %1").arg(QString::fromStdString(padName)));
++			padBanner->setStyleSheet(QStringLiteral("background:#14532d; color:#dcfce7; border-radius:6px; padding:6px; font-weight:bold; font-size:11px;"));
++		} else {
++			padBanner->setText(QStringLiteral("Mando PlayStation / Gamepad: no detectado (conecta DualShock 4 / DualSense por Bluetooth o USB)"));
++			padBanner->setStyleSheet(QStringLiteral("background:#1e293b; color:#cbd5e1; border-radius:6px; padding:6px; font-size:11px;"));
++		}
++		{
++			QSignalBlocker b1(cbPad);
++			cbPad->setChecked(st.value("gamepadEnabled", true));
++		}
++		const int spdPct = int(std::round(st.value("masterSpeed", 0.65) * 100.0));
++		{
++			QSignalBlocker b2(spdSlider);
++			spdSlider->setValue(spdPct);
++		}
++		spdLbl->setText(QStringLiteral("Velocidad: %1%").arg(spdPct));
++		statusLbl->setText(QString::fromStdString(st.value("status", "Listo")));
++
++		QSignalBlocker b3(camCombo);
++		camCombo->clear();
++		if (st.contains("cameras") && st["cameras"].is_array()) {
++			for (const auto &c : st["cameras"]) {
++				QString label = QStringLiteral("%1 (%2:%3 · %4)")
++					.arg(QString::fromStdString(c.value("name", "PTZ")))
++					.arg(QString::fromStdString(c.value("host", "")))
++					.arg(c.value("port", 52381))
++					.arg(QString::fromStdString(c.value("protocol", "visca_udp")));
++				camCombo->addItem(label);
++			}
++		}
++		int active = st.value("activeIndex", 0);
++		if (active >= 0 && active < camCombo->count()) camCombo->setCurrentIndex(active);
++	};
++
++	auto openCameraEditor = [rootW, refreshUi](bool isEdit) {
++		const auto st = PtzGetState();
++		nlohmann::json cur = nlohmann::json::object();
++		int editIdx = st.value("activeIndex", 0);
++		if (isEdit && st.contains("cameras") && editIdx >= 0 && editIdx < int(st["cameras"].size())) {
++			cur = st["cameras"][editIdx];
++		} else if (isEdit) {
++			return;
++		}
++		QDialog dlg(rootW);
++		dlg.setWindowTitle(isEdit ? QStringLiteral("Editar cámara PTZ") : QStringLiteral("Agregar cámara PTZ"));
++		auto *f = new QFormLayout(&dlg);
++		auto *edName = new QLineEdit(QString::fromStdString(cur.value("name", std::string("Cámara PTZ 1"))), &dlg);
++		auto *cbProto = new QComboBox(&dlg);
++		cbProto->addItem(QStringLiteral("VISCA sobre IP (UDP 52381)"), QStringLiteral("visca_udp"));
++		cbProto->addItem(QStringLiteral("VISCA sobre IP (TCP 5678)"), QStringLiteral("visca_tcp"));
++		cbProto->addItem(QStringLiteral("ONVIF Profile S (HTTP 80)"), QStringLiteral("onvif"));
++		cbProto->addItem(QStringLiteral("Pelco-D (TCP)"), QStringLiteral("pelco_d_tcp"));
++		cbProto->addItem(QStringLiteral("Pelco-D (UDP)"), QStringLiteral("pelco_d_udp"));
++		int pIdx = cbProto->findData(QString::fromStdString(cur.value("protocol", std::string("visca_udp"))));
++		if (pIdx >= 0) cbProto->setCurrentIndex(pIdx);
++		auto *edHost = new QLineEdit(QString::fromStdString(cur.value("host", std::string("192.168.1.100"))), &dlg);
++		auto *spPort = new QSpinBox(&dlg);
++		spPort->setRange(1, 65535);
++		spPort->setValue(cur.value("port", 52381));
++		QObject::connect(cbProto, qOverload<int>(&QComboBox::currentIndexChanged), &dlg, [cbProto, spPort](int) {
++			QString p = cbProto->currentData().toString();
++			if (p == "visca_udp") spPort->setValue(52381);
++			else if (p == "visca_tcp") spPort->setValue(5678);
++			else if (p == "onvif") spPort->setValue(80);
++			else spPort->setValue(4001);
++		});
++		auto *spAddr = new QSpinBox(&dlg);
++		spAddr->setRange(1, 255);
++		spAddr->setValue(cur.value("address", 1));
++		auto *edUser = new QLineEdit(QString::fromStdString(cur.value("username", std::string("admin"))), &dlg);
++		auto *edPass = new QLineEdit(QString::fromStdString(cur.value("password", std::string(""))), &dlg);
++		edPass->setEchoMode(QLineEdit::Password);
++		auto *cbInvP = new QCheckBox(QStringLiteral("Invertir Pan (Izq/Der)"), &dlg);
++		cbInvP->setChecked(cur.value("invertPan", false));
++		auto *cbInvT = new QCheckBox(QStringLiteral("Invertir Tilt (Arr/Aba)"), &dlg);
++		cbInvT->setChecked(cur.value("invertTilt", false));
++
++		f->addRow(QStringLiteral("Nombre:"), edName);
++		f->addRow(QStringLiteral("Protocolo:"), cbProto);
++		f->addRow(QStringLiteral("IP / Host:"), edHost);
++		f->addRow(QStringLiteral("Puerto:"), spPort);
++		f->addRow(QStringLiteral("Dirección (VISCA/Pelco):"), spAddr);
++		f->addRow(QStringLiteral("Usuario (ONVIF):"), edUser);
++		f->addRow(QStringLiteral("Contraseña (ONVIF):"), edPass);
++		f->addRow(cbInvP);
++		f->addRow(cbInvT);
++
++		auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
++		QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
++		QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
++		f->addRow(bb);
++		if (dlg.exec() == QDialog::Accepted) {
++			PtzExec({
++				{"action", isEdit ? "update_camera" : "add_camera"},
++				{"index", editIdx},
++				{"name", edName->text().trimmed().toStdString()},
++				{"protocol", cbProto->currentData().toString().toStdString()},
++				{"host", edHost->text().trimmed().toStdString()},
++				{"port", spPort->value()},
++				{"address", spAddr->value()},
++				{"username", edUser->text().toStdString()},
++				{"password", edPass->text().toStdString()},
++				{"invertPan", cbInvP->isChecked()},
++				{"invertTilt", cbInvT->isChecked()},
++				{"speedScale", 1.0}
++			});
++			(*refreshUi)();
++		}
++	};
++
++	QObject::connect(btnAdd, &QPushButton::clicked, rootW, [openCameraEditor]() { openCameraEditor(false); });
++	QObject::connect(btnEdit, &QPushButton::clicked, rootW, [openCameraEditor]() { openCameraEditor(true); });
++	QObject::connect(btnDel, &QPushButton::clicked, rootW, [camCombo, refreshUi]() {
++		if (camCombo->currentIndex() >= 0) {
++			PtzExec({{"action", "delete_camera"}, {"index", camCombo->currentIndex()}});
++			(*refreshUi)();
++		}
++	});
++	QObject::connect(btnScan, &QPushButton::clicked, rootW, [statusLbl, refreshUi]() {
++		PtzExec({{"action", "discover_onvif"}});
++		statusLbl->setText(QStringLiteral("Buscando cámaras ONVIF en la red Wi-Fi..."));
++		QTimer::singleShot(2300, [refreshUi]() { (*refreshUi)(); });
++	});
++	QObject::connect(camCombo, qOverload<int>(&QComboBox::activated), rootW, [refreshUi](int idx) {
++		PtzExec({{"action", "select_camera"}, {"index", idx}});
++		(*refreshUi)();
++	});
++	QObject::connect(cbPad, &QCheckBox::toggled, rootW, [refreshUi](bool en) {
++		PtzExec({{"action", "set_gamepad_enabled"}, {"enabled", en}});
++		(*refreshUi)();
++	});
++	QObject::connect(spdSlider, &QSlider::valueChanged, rootW, [spdLbl](int v) {
++		spdLbl->setText(QStringLiteral("Velocidad: %1%").arg(v));
++		PtzExec({{"action", "set_speed"}, {"speed", v / 100.0}});
++	});
++	QObject::connect(btnZoomIn, &QPushButton::pressed, rootW, []() { PtzExec({{"action", "move"}, {"pan", 0.0}, {"tilt", 0.0}, {"zoom", 1.0}}); });
++	QObject::connect(btnZoomIn, &QPushButton::released, rootW, []() { PtzExec({{"action", "stop"}}); });
++	QObject::connect(btnZoomOut, &QPushButton::pressed, rootW, []() { PtzExec({{"action", "move"}, {"pan", 0.0}, {"tilt", 0.0}, {"zoom", -1.0}}); });
++	QObject::connect(btnZoomOut, &QPushButton::released, rootW, []() { PtzExec({{"action", "stop"}}); });
++	QObject::connect(btnHome, &QPushButton::clicked, rootW, [refreshUi]() { PtzExec({{"action", "home"}}); (*refreshUi)(); });
++	QObject::connect(btnAf, &QPushButton::clicked, rootW, [refreshUi]() { PtzExec({{"action", "focus"}, {"mode", "auto"}}); (*refreshUi)(); });
++	QObject::connect(btnFocNear, &QPushButton::pressed, rootW, []() { PtzExec({{"action", "focus"}, {"mode", "near"}}); });
++	QObject::connect(btnFocNear, &QPushButton::released, rootW, []() { PtzExec({{"action", "focus"}, {"mode", "stop"}}); });
++	QObject::connect(btnFocFar, &QPushButton::pressed, rootW, []() { PtzExec({{"action", "focus"}, {"mode", "far"}}); });
++	QObject::connect(btnFocFar, &QPushButton::released, rootW, []() { PtzExec({{"action", "focus"}, {"mode", "stop"}}); });
++	QObject::connect(savePresetMode, &QPushButton::toggled, rootW, [savePresetMode](bool on) {
++		savePresetMode->setText(on ? QStringLiteral("GUARDANDO PRESET: toca un número (P1-P9)")
++					   : QStringLiteral("Modo: Ir a Preset (toca para cambiar a GUARDAR)"));
++	});
++
++	auto *poll = new QTimer(scroll);
++	poll->setInterval(2000);
++	QObject::connect(poll, &QTimer::timeout, scroll, [scroll, refreshUi]() {
++		if (scroll->isVisible()) (*refreshUi)();
++	});
++	poll->start();
++	(*refreshUi)();
++	return scroll;
++}
++
++static void OpenPtzControlDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Control PTZ (VISCA / ONVIF / Mando PlayStation)"));
++	auto *lay = new QVBoxLayout(&dlg);
++	lay->addWidget(CreatePtzControlWidget(&dlg), 1);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++	lay->addWidget(btnClose);
++	dlg.resize(560, 520);
++	dlg.exec();
++}
++
++// =========================================================================
++// 2. ISO Multi-Source Recording UI
++// =========================================================================
++static std::vector<std::string> EnumVideoSourceNames()
++{
++	std::vector<std::string> out;
++	obs_enum_sources(
++		[](void *param, obs_source_t *src) {
++			auto *vec = static_cast<std::vector<std::string> *>(param);
++			if (!src) return true;
++			const uint32_t flags = obs_source_get_output_flags(src);
++			if ((flags & OBS_SOURCE_VIDEO) == 0) return true;
++			const char *nm = obs_source_get_name(src);
++			if (nm && *nm) vec->emplace_back(nm);
++			return true;
++		},
++		&out);
++	return out;
++}
++
++static QWidget *CreateIsoRecordingWidget(QWidget *parent = nullptr)
++{
++	auto *scroll = new QScrollArea(parent);
++	scroll->setWidgetResizable(true);
++	scroll->setFrameShape(QFrame::NoFrame);
++	QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
++
++	auto *rootW = new QWidget(scroll);
++	auto *root = new QVBoxLayout(rootW);
++	root->setContentsMargins(8, 8, 8, 8);
++	root->setSpacing(6);
++
++	auto *hdr = new QLabel(QStringLiteral("Graba hasta 4 cámaras o fuentes por separado en archivos MP4 independientes (Movies/OBS Studio/ISO)."), rootW);
++	hdr->setWordWrap(true);
++	hdr->setStyleSheet(QStringLiteral("color:#cbd5e1; font-size:11px;"));
++	root->addWidget(hdr);
++
++	auto *srcList = new QListWidget(rootW);
++	srcList->setMinimumHeight(130);
++	root->addWidget(srcList);
++
++	auto *btnRefresh = new QPushButton(QStringLiteral("Actualizar lista de fuentes"), rootW);
++	root->addWidget(btnRefresh);
++
++	auto *optRow = new QHBoxLayout();
++	auto *cbRes = new QComboBox(rootW);
++	cbRes->addItem(QStringLiteral("1280×720 (Recomendado)"), QStringLiteral("1280x720"));
++	cbRes->addItem(QStringLiteral("1920×1080 (Full HD)"), QStringLiteral("1920x1080"));
++	cbRes->addItem(QStringLiteral("854×480 (Ligero)"), QStringLiteral("854x480"));
++	auto *cbBr = new QComboBox(rootW);
++	cbBr->addItem(QStringLiteral("2500 kbps"), 2500);
++	cbBr->addItem(QStringLiteral("4000 kbps"), 4000);
++	cbBr->addItem(QStringLiteral("6000 kbps"), 6000);
++	cbBr->addItem(QStringLiteral("8000 kbps"), 8000);
++	optRow->addWidget(cbRes, 1);
++	optRow->addWidget(cbBr, 1);
++	root->addLayout(optRow);
++
++	auto *cbAudio = new QCheckBox(QStringLiteral("Incluir mezcla de audio en cada archivo ISO"), rootW);
++	auto *cbSync = new QCheckBox(QStringLiteral("Iniciar/detener automáticamente con la Grabación principal"), rootW);
++	root->addWidget(cbAudio);
++	root->addWidget(cbSync);
++
++	auto *btnRow = new QHBoxLayout();
++	auto *btnStart = new QPushButton(QStringLiteral("Iniciar Grabación ISO"), rootW);
++	btnStart->setStyleSheet(QStringLiteral("background:#dc2626; color:white; font-weight:bold; padding:8px; border-radius:6px;"));
++	auto *btnStop = new QPushButton(QStringLiteral("Detener ISO"), rootW);
++	btnStop->setStyleSheet(QStringLiteral("background:#334155; color:white; font-weight:bold; padding:8px; border-radius:6px;"));
++	btnRow->addWidget(btnStart, 1);
++	btnRow->addWidget(btnStop, 1);
++	root->addLayout(btnRow);
++
++	auto *statusLbl = new QLabel(QStringLiteral("Estado ISO: detenido"), rootW);
++	statusLbl->setWordWrap(true);
++	statusLbl->setStyleSheet(QStringLiteral("background:#1e293b; color:#e2e8f0; border-radius:6px; padding:6px; font-size:11px;"));
++	root->addWidget(statusLbl);
++	root->addStretch(1);
++	scroll->setWidget(rootW);
++
++	auto collectCfg = [srcList, cbRes, cbBr, cbAudio, cbSync]() -> nlohmann::json {
++		nlohmann::json arr = nlohmann::json::array();
++		for (int i = 0; i < srcList->count(); ++i) {
++			auto *it = srcList->item(i);
++			if (it && it->checkState() == Qt::Checked)
++				arr.push_back(it->text().toStdString());
++		}
++		int w = 1280, h = 720;
++		const QString r = cbRes->currentData().toString();
++		if (r == "1920x1080") { w = 1920; h = 1080; }
++		else if (r == "854x480") { w = 854; h = 480; }
++		return {{"sources", arr},
++			{"width", w},
++			{"height", h},
++			{"bitrate", cbBr->currentData().toInt()},
++			{"includeAudio", cbAudio->isChecked()},
++			{"syncMainRec", cbSync->isChecked()}};
++	};
++
++	auto populateSources = [srcList, cbRes, cbBr, cbAudio, cbSync]() {
++		const auto cfg = LoadIsoConfig();
++		std::vector<std::string> saved;
++		if (cfg.contains("sources") && cfg["sources"].is_array()) {
++			for (const auto &s : cfg["sources"]) if (s.is_string()) saved.push_back(s.get<std::string>());
++		}
++		srcList->clear();
++		for (const auto &nm : EnumVideoSourceNames()) {
++			auto *it = new QListWidgetItem(QString::fromStdString(nm), srcList);
++			it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
++			bool checked = std::find(saved.begin(), saved.end(), nm) != saved.end();
++			it->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
++		}
++		for (const auto &sc : GetAllObsSceneNames(false, true)) {
++			auto *it = new QListWidgetItem(QString::fromStdString(sc), srcList);
++			it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
++			bool checked = std::find(saved.begin(), saved.end(), sc) != saved.end();
++			it->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
++		}
++		int w = cfg.value("width", 1280);
++		cbRes->setCurrentIndex(w >= 1920 ? 1 : (w <= 900 ? 2 : 0));
++		int brIdx = cbBr->findData(cfg.value("bitrate", 4000));
++		if (brIdx >= 0) cbBr->setCurrentIndex(brIdx);
++		cbAudio->setChecked(cfg.value("includeAudio", true));
++		cbSync->setChecked(cfg.value("syncMainRec", false));
++	};
++
++	auto pollStats = [statusLbl]() {
++		if (void *jni = FindAndroidJni()) {
++			using Fn = bool (*)(char *, size_t);
++			if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_iso_get_stats"))) {
++				char buf[4096] = {};
++				if (fn(buf, sizeof(buf)) && buf[0]) {
++					try {
++						auto j = nlohmann::json::parse(buf);
++						if (j.value("active", false)) {
++							int sec = j.value("elapsedSec", 0);
++							QString msg = QStringLiteral("GRABANDO ISO · %1:%2\n")
++								.arg(sec / 60, 2, 10, QChar('0')).arg(sec % 60, 2, 10, QChar('0'));
++							for (const auto &t : j["tracks"]) {
++								msg += QStringLiteral("• %1 (%2 frames)\n")
++									.arg(QString::fromStdString(t.value("source", "")))
++									.arg(t.value("frames", 0));
++							}
++							statusLbl->setText(msg.trimmed());
++							statusLbl->setStyleSheet(QStringLiteral("background:#7f1d1d; color:#fee2e2; border-radius:6px; padding:6px; font-weight:bold; font-size:11px;"));
++							return;
++						}
++					} catch (...) {}
++				}
++			}
++		}
++		statusLbl->setText(QStringLiteral("Estado ISO: detenido"));
++		statusLbl->setStyleSheet(QStringLiteral("background:#1e293b; color:#e2e8f0; border-radius:6px; padding:6px; font-size:11px;"));
++	};
++
++	QObject::connect(btnRefresh, &QPushButton::clicked, rootW, populateSources);
++	QObject::connect(cbSync, &QCheckBox::toggled, rootW, [collectCfg](bool) { SaveIsoConfig(collectCfg()); });
++	QObject::connect(btnStart, &QPushButton::clicked, rootW, [collectCfg, statusLbl, pollStats]() {
++		auto cfg = collectCfg();
++		SaveIsoConfig(cfg);
++		if (cfg["sources"].empty()) {
++			statusLbl->setText(QStringLiteral("Selecciona al menos una fuente o cámara para grabar en ISO."));
++			return;
++		}
++		if (!StartIsoRecordingWithConfig(cfg)) {
++			statusLbl->setText(QStringLiteral("No se pudo iniciar la grabación ISO. Verifica las fuentes seleccionadas."));
++		} else {
++			pollStats();
++		}
++	});
++	QObject::connect(btnStop, &QPushButton::clicked, rootW, [pollStats]() {
++		StopIsoRecordingNow();
++		pollStats();
++	});
++
++	auto *timer = new QTimer(scroll);
++	timer->setInterval(1000);
++	QObject::connect(timer, &QTimer::timeout, scroll, [scroll, pollStats]() {
++		if (scroll->isVisible()) pollStats();
++	});
++	timer->start();
++	populateSources();
++	pollStats();
++	return scroll;
++}
++
++static void OpenIsoRecordingDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Grabación ISO (Multi-fuente independiente)"));
++	auto *lay = new QVBoxLayout(&dlg);
++	lay->addWidget(CreateIsoRecordingWidget(&dlg), 1);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++	lay->addWidget(btnClose);
++	dlg.resize(520, 480);
++	dlg.exec();
++}
++
++// =========================================================================
++// 3. Instant Replay (Repetición Instantánea con Cámara Lenta)
++// =========================================================================
++static bool LaunchReplayFileOnAir(const QString &filePath, int speedPct, bool loop)
++{
++	if (filePath.isEmpty() || !QFile::exists(filePath)) return false;
++	const char *kReplayName = "Repetición Instantánea";
++	OBSSourceAutoRelease existing = obs_get_source_by_name(kReplayName);
++	obs_data_t *settings = obs_data_create();
++	obs_data_set_bool(settings, "is_local_file", true);
++	obs_data_set_string(settings, "local_file", filePath.toUtf8().constData());
++	obs_data_set_int(settings, "speed_percent", std::clamp(speedPct, 10, 200));
++	obs_data_set_bool(settings, "looping", loop);
++	obs_data_set_bool(settings, "restart_on_activate", true);
++	obs_data_set_bool(settings, "close_when_inactive", false);
++	obs_data_set_bool(settings, "hw_decode", true);
++
++	obs_source_t *src = existing.Get();
++	if (src) {
++		obs_source_update(src, settings);
++	} else {
++		src = obs_source_create("ffmpeg_source", kReplayName, settings, nullptr);
++	}
++	obs_data_release(settings);
++	if (!src) return false;
++
++	OBSSourceAutoRelease curSceneSrc = obs_frontend_get_current_scene();
++	obs_scene_t *scene = curSceneSrc ? obs_scene_from_source(curSceneSrc) : nullptr;
++	if (scene) {
++		obs_sceneitem_t *item = obs_scene_find_source(scene, kReplayName);
++		if (!item) {
++			item = obs_scene_add(scene, src);
++			if (item) {
++				obs_video_info ovi{};
++				if (obs_get_video_info(&ovi)) {
++					vec2 pos{0.0f, 0.0f};
++					vec2 bounds{float(ovi.base_width), float(ovi.base_height)};
++					obs_sceneitem_set_alignment(item, OBS_ALIGN_TOP | OBS_ALIGN_LEFT);
++					obs_sceneitem_set_pos(item, &pos);
++					obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_INNER);
++					obs_sceneitem_set_bounds_alignment(item, OBS_ALIGN_CENTER);
++					obs_sceneitem_set_bounds(item, &bounds);
++				}
++			}
++		}
++		if (item) {
++			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
++			obs_sceneitem_set_visible(item, true);
++		}
++	}
++	obs_source_media_restart(src);
++	if (!existing) obs_source_release(src);
++	return true;
++}
++
++static void HideReplayOnAir()
++{
++	OBSSourceAutoRelease curSceneSrc = obs_frontend_get_current_scene();
++	obs_scene_t *scene = curSceneSrc ? obs_scene_from_source(curSceneSrc) : nullptr;
++	if (!scene) return;
++	if (obs_sceneitem_t *item = obs_scene_find_source(scene, "Repetición Instantánea")) {
++		obs_sceneitem_set_visible(item, false);
++	}
++}
++
++static QWidget *CreateInstantReplayWidget(QWidget *parent = nullptr)
++{
++	auto *scroll = new QScrollArea(parent);
++	scroll->setWidgetResizable(true);
++	scroll->setFrameShape(QFrame::NoFrame);
++	QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
++
++	auto *rootW = new QWidget(scroll);
++	auto *root = new QVBoxLayout(rootW);
++	root->setContentsMargins(8, 8, 8, 8);
++	root->setSpacing(6);
++
++	auto *srcRow = new QHBoxLayout();
++	auto *cbSource = new QComboBox(rootW);
++	auto *btnRefSrc = new QPushButton(QStringLiteral("↻"), rootW);
++	btnRefSrc->setMaximumWidth(36);
++	srcRow->addWidget(new QLabel(QStringLiteral("Fuente:"), rootW));
++	srcRow->addWidget(cbSource, 1);
++	srcRow->addWidget(btnRefSrc);
++	root->addLayout(srcRow);
++
++	auto *bufOptRow = new QHBoxLayout();
++	auto *cbBufSec = new QComboBox(rootW);
++	for (int s : {15, 20, 30, 45, 60}) cbBufSec->addItem(QStringLiteral("Búfer %1 s").arg(s), s);
++	cbBufSec->setCurrentIndex(2);
++	auto *cbRes = new QComboBox(rootW);
++	cbRes->addItem(QStringLiteral("720p"), 720);
++	cbRes->addItem(QStringLiteral("1080p"), 1080);
++	bufOptRow->addWidget(cbBufSec, 1);
++	bufOptRow->addWidget(cbRes);
++	root->addLayout(bufOptRow);
++
++	auto *btnToggleBuf = new QPushButton(QStringLiteral("Activar Búfer de Repetición"), rootW);
++	btnToggleBuf->setStyleSheet(QStringLiteral("background:#2563eb; color:white; font-weight:bold; padding:8px; border-radius:6px;"));
++	root->addWidget(btnToggleBuf);
++
++	auto *bufStatus = new QLabel(QStringLiteral("Búfer detenido"), rootW);
++	bufStatus->setStyleSheet(QStringLiteral("background:#1e293b; color:#cbd5e1; border-radius:6px; padding:6px; font-size:11px;"));
++	root->addWidget(bufStatus);
++
++	auto *playOptRow = new QHBoxLayout();
++	auto *cbClipSec = new QComboBox(rootW);
++	for (int s : {5, 8, 10, 15, 20, 30}) cbClipSec->addItem(QStringLiteral("Últimos %1 s").arg(s), s);
++	cbClipSec->setCurrentIndex(2);
++	auto *cbSpeed = new QComboBox(rootW);
++	cbSpeed->addItem(QStringLiteral("1.0x Normal"), 100);
++	cbSpeed->addItem(QStringLiteral("0.75x Suave"), 75);
++	cbSpeed->addItem(QStringLiteral("0.50x Cámara Lenta"), 50);
++	cbSpeed->addItem(QStringLiteral("0.25x Súper Lenta"), 25);
++	cbSpeed->setCurrentIndex(2); // Default 0.50x broadcast slow-mo!
++	playOptRow->addWidget(cbClipSec, 1);
++	playOptRow->addWidget(cbSpeed, 1);
++	root->addLayout(playOptRow);
++
++	auto *cbLoop = new QCheckBox(QStringLiteral("Repetir en bucle hasta ocultar"), rootW);
++	root->addWidget(cbLoop);
++
++	auto *btnLaunch = new QPushButton(QStringLiteral("MARCAR Y LANZAR REPETICIÓN AL AIRE"), rootW);
++	btnLaunch->setStyleSheet(QStringLiteral("background:#dc2626; color:white; font-weight:bold; padding:10px; border-radius:6px;"));
++	root->addWidget(btnLaunch);
++
++	auto *subBtnRow = new QHBoxLayout();
++	auto *btnSaveOnly = new QPushButton(QStringLiteral("Solo Guardar Clip"), rootW);
++	auto *btnHide = new QPushButton(QStringLiteral("Quitar del Aire"), rootW);
++	subBtnRow->addWidget(btnSaveOnly, 1);
++	subBtnRow->addWidget(btnHide, 1);
++	root->addLayout(subBtnRow);
++
++	auto *clipsList = new QListWidget(rootW);
++	clipsList->setMinimumHeight(100);
++	root->addWidget(clipsList);
++
++	auto *btnPlaySel = new QPushButton(QStringLiteral("Reproducir Clip Seleccionado"), rootW);
++	root->addWidget(btnPlaySel);
++	root->addStretch(1);
++	scroll->setWidget(rootW);
++
++	auto populateSrcs = [cbSource]() {
++		QString prev = cbSource->currentData().toString();
++		cbSource->clear();
++		cbSource->addItem(QStringLiteral("Programa (Salida principal)"), QStringLiteral("__PROGRAM__"));
++		for (const auto &nm : EnumVideoSourceNames()) {
++			if (nm == "Repetición Instantánea") continue;
++			cbSource->addItem(QString::fromStdString(nm), QString::fromStdString(nm));
++		}
++		int idx = cbSource->findData(prev);
++		if (idx >= 0) cbSource->setCurrentIndex(idx);
++	};
++
++	auto refreshClips = [clipsList]() {
++		QDir dir(GetAndroidRecordingsRootDir() + QStringLiteral("/Replays"));
++		clipsList->clear();
++		if (!dir.exists()) return;
++		const auto files = dir.entryInfoList(QStringList{QStringLiteral("*.mp4")}, QDir::Files, QDir::Time);
++		for (int i = 0; i < files.size() && i < 20; ++i) {
++			auto *it = new QListWidgetItem(files[i].fileName(), clipsList);
++			it->setData(Qt::UserRole, files[i].absoluteFilePath());
++		}
++	};
++
++	auto isReplayActive = std::make_shared<bool>(false);
++	auto pollStats = [bufStatus, btnToggleBuf, isReplayActive]() {
++		bool active = false;
++		double bufSec = 0.0;
++		int maxSec = 30;
++		std::string srcName = "__PROGRAM__";
++		if (void *jni = FindAndroidJni()) {
++			using Fn = bool (*)(char *, size_t);
++			if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_replay_get_stats"))) {
++				char buf[1024] = {};
++				if (fn(buf, sizeof(buf)) && buf[0]) {
++					try {
++						auto j = nlohmann::json::parse(buf);
++						active = j.value("active", false);
++						bufSec = j.value("bufferedSec", 0.0);
++						maxSec = j.value("maxSec", 30);
++						srcName = j.value("source", std::string("__PROGRAM__"));
++					} catch (...) {}
++				}
++			}
++		}
++		*isReplayActive = active;
++		if (active) {
++			QString srcLabel = (srcName == "__PROGRAM__") ? QStringLiteral("Programa") : QString::fromStdString(srcName);
++			bufStatus->setText(QStringLiteral("BÚFER ACTIVO (%1) · %2 s / %3 s listos")
++				.arg(srcLabel).arg(bufSec, 0, 'f', 1).arg(maxSec));
++			bufStatus->setStyleSheet(QStringLiteral("background:#14532d; color:#dcfce7; border-radius:6px; padding:6px; font-weight:bold; font-size:11px;"));
++			btnToggleBuf->setText(QStringLiteral("Detener Búfer de Repetición"));
++			btnToggleBuf->setStyleSheet(QStringLiteral("background:#475569; color:white; font-weight:bold; padding:8px; border-radius:6px;"));
++		} else {
++			bufStatus->setText(QStringLiteral("Búfer detenido (actívalo antes de marcar jugadas)"));
++			bufStatus->setStyleSheet(QStringLiteral("background:#1e293b; color:#cbd5e1; border-radius:6px; padding:6px; font-size:11px;"));
++			btnToggleBuf->setText(QStringLiteral("Activar Búfer de Repetición"));
++			btnToggleBuf->setStyleSheet(QStringLiteral("background:#2563eb; color:white; font-weight:bold; padding:8px; border-radius:6px;"));
++		}
++	};
++
++	auto saveClipNow = [cbClipSec, bufStatus, refreshClips]() -> QString {
++		void *jni = FindAndroidJni();
++		if (!jni) return {};
++		using SaveFn = bool (*)(int, const char *);
++		auto fn = reinterpret_cast<SaveFn>(dlsym(jni, "obs_android_replay_save_clip"));
++		if (!fn) return {};
++		QString dirPath = GetAndroidRecordingsRootDir() + QStringLiteral("/Replays");
++		QDir().mkpath(dirPath);
++		QString outFile = dirPath + QStringLiteral("/Replay_") +
++			QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")) + QStringLiteral(".mp4");
++		if (!fn(cbClipSec->currentData().toInt(), outFile.toUtf8().constData())) {
++			bufStatus->setText(QStringLiteral("No hay suficientes fotogramas en el búfer aún. Activa el búfer y espera 2 segundos."));
++			return {};
++		}
++		refreshClips();
++		return outFile;
++	};
++
++	QObject::connect(btnRefSrc, &QPushButton::clicked, rootW, populateSrcs);
++	QObject::connect(btnToggleBuf, &QPushButton::clicked, rootW, [isReplayActive, cbSource, cbBufSec, cbRes, pollStats, bufStatus]() {
++		void *jni = FindAndroidJni();
++		if (!jni) return;
++		if (*isReplayActive) {
++			if (auto fn = reinterpret_cast<void (*)()>(dlsym(jni, "obs_android_replay_stop"))) fn();
++		} else {
++			using StartFn = bool (*)(const char *, int, int, int, int);
++			if (auto fn = reinterpret_cast<StartFn>(dlsym(jni, "obs_android_replay_start"))) {
++				const int h = cbRes->currentData().toInt();
++				const int w = (h == 1080) ? 1920 : 1280;
++				const int br = (h == 1080) ? 6000 : 4000;
++				if (!fn(cbSource->currentData().toString().toUtf8().constData(),
++					cbBufSec->currentData().toInt(), w, h, br)) {
++					bufStatus->setText(QStringLiteral("Error al iniciar el búfer de repetición."));
++				}
++			}
++		}
++		pollStats();
++	});
++	QObject::connect(btnLaunch, &QPushButton::clicked, rootW, [saveClipNow, cbSpeed, cbLoop, bufStatus]() {
++		QString clip = saveClipNow();
++		if (!clip.isEmpty()) {
++			LaunchReplayFileOnAir(clip, cbSpeed->currentData().toInt(), cbLoop->isChecked());
++			bufStatus->setText(QStringLiteral("REPETICIÓN AL AIRE (%1%)").arg(cbSpeed->currentData().toInt()));
++		}
++	});
++	QObject::connect(btnSaveOnly, &QPushButton::clicked, rootW, [saveClipNow, bufStatus]() {
++		QString clip = saveClipNow();
++		if (!clip.isEmpty()) bufStatus->setText(QStringLiteral("Clip guardado: ") + QFileInfo(clip).fileName());
++	});
++	QObject::connect(btnHide, &QPushButton::clicked, rootW, [bufStatus]() {
++		HideReplayOnAir();
++		bufStatus->setText(QStringLiteral("Repetición retirada del aire"));
++	});
++	QObject::connect(btnPlaySel, &QPushButton::clicked, rootW, [clipsList, cbSpeed, cbLoop, bufStatus]() {
++		auto *it = clipsList->currentItem();
++		if (!it) return;
++		QString path = it->data(Qt::UserRole).toString();
++		if (LaunchReplayFileOnAir(path, cbSpeed->currentData().toInt(), cbLoop->isChecked())) {
++			bufStatus->setText(QStringLiteral("Reproduciendo: %1 (%2%)").arg(it->text()).arg(cbSpeed->currentData().toInt()));
++		}
++	});
++
++	auto *timer = new QTimer(scroll);
++	timer->setInterval(1000);
++	QObject::connect(timer, &QTimer::timeout, scroll, [scroll, pollStats]() {
++		if (scroll->isVisible()) pollStats();
++	});
++	timer->start();
++	populateSrcs();
++	refreshClips();
++	pollStats();
++	return scroll;
++}
++
++static void OpenInstantReplayDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Repetición Instantánea (Instant Replay)"));
++	auto *lay = new QVBoxLayout(&dlg);
++	lay->addWidget(CreateInstantReplayWidget(&dlg), 1);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++	lay->addWidget(btnClose);
++	dlg.resize(520, 520);
++	dlg.exec();
++}
++
++// =========================================================================
++// 4. WebRTC Guests Manager (VDO.Ninja / Custom WebRTC + QR + 1-Tap Source)
++// =========================================================================
++static std::string WebRtcConfigFilePath()
++{
++	const char *files = obs_android_files_path();
++	if (!files || !*files) files = getenv("OBS_ANDROID_FILES_PATH");
++	std::string dir = files ? (std::string(files) + "/obs-studio") : "/data/local/tmp";
++	QDir().mkpath(QString::fromStdString(dir));
++	return dir + "/android-webrtc-guests.json";
++}
++
++static std::string GenerateShortRoomToken(int len)
++{
++	QString u = QUuid::createUuid().toString(QUuid::Id128);
++	return u.left(len).toLower().toStdString();
++}
++
++static nlohmann::json LoadWebRtcConfig()
++{
++	nlohmann::json cfg;
++	std::ifstream f(WebRtcConfigFilePath());
++	if (f.is_open()) {
++		try { cfg = nlohmann::json::parse(f); } catch (...) {}
++	}
++	bool dirty = false;
++	if (!cfg.is_object()) { cfg = nlohmann::json::object(); dirty = true; }
++	if (!cfg.contains("baseUrl") || !cfg["baseUrl"].is_string() || cfg["baseUrl"].get<std::string>().empty()) {
++		cfg["baseUrl"] = "https://vdo.ninja";
++		dirty = true;
++	}
++	if (!cfg.contains("room") || !cfg["room"].is_string() || cfg["room"].get<std::string>().empty()) {
++		cfg["room"] = "obs" + GenerateShortRoomToken(8);
++		dirty = true;
++	}
++	if (!cfg.contains("guests") || !cfg["guests"].is_array() || cfg["guests"].size() < 6) {
++		nlohmann::json arr = nlohmann::json::array();
++		for (int i = 1; i <= 6; ++i) {
++			arr.push_back({{"name", "Invitado " + std::to_string(i)},
++				       {"streamId", "inv" + std::to_string(i) + "_" + GenerateShortRoomToken(5)}});
++		}
++		cfg["guests"] = arr;
++		dirty = true;
++	}
++	if (dirty) WriteConfigAtomically(WebRtcConfigFilePath(), cfg);
++	return cfg;
++}
++
++static void AddWebRtcGuestBrowserSource(const QString &sourceName, const QString &viewUrl)
++{
++	obs_data_t *s = obs_data_create();
++	obs_data_set_string(s, "url", viewUrl.toUtf8().constData());
++	obs_data_set_int(s, "width", 1280);
++	obs_data_set_int(s, "height", 720);
++	obs_data_set_int(s, "fps", 30);
++	obs_data_set_bool(s, "transparent", true);
++	obs_data_set_bool(s, "capture_audio", true);
++	obs_data_set_bool(s, "pause_when_hidden", false);
++
++	OBSSourceAutoRelease existing = obs_get_source_by_name(sourceName.toUtf8().constData());
++	obs_source_t *src = existing.Get();
++	if (src) {
++		obs_source_update(src, s);
++	} else {
++		src = obs_source_create("android_browser_source", sourceName.toUtf8().constData(), s, nullptr);
++	}
++	obs_data_release(s);
++	if (!src) return;
++
++	OBSSourceAutoRelease curSceneSrc = obs_frontend_get_current_scene();
++	obs_scene_t *scene = curSceneSrc ? obs_scene_from_source(curSceneSrc) : nullptr;
++	if (scene && !obs_scene_find_source(scene, sourceName.toUtf8().constData())) {
++		obs_scene_add(scene, src);
++	}
++	if (!existing) obs_source_release(src);
++}
++
++static QWidget *CreateWebRtcGuestsWidget(QWidget *parent = nullptr)
++{
++	auto *scroll = new QScrollArea(parent);
++	scroll->setWidgetResizable(true);
++	scroll->setFrameShape(QFrame::NoFrame);
++	QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
++
++	auto *rootW = new QWidget(scroll);
++	auto *root = new QVBoxLayout(rootW);
++	root->setContentsMargins(8, 8, 8, 8);
++	root->setSpacing(6);
++
++	auto cfg = std::make_shared<nlohmann::json>(LoadWebRtcConfig());
++
++	auto *info = new QLabel(QStringLiteral(
++		"Invita cámaras remotas por WebRTC (iPhone, Android o PC desde el navegador, sin instalar apps). "
++		"Al tocar '+ Escena' el video y el audio del invitado entran directo a OBS."), rootW);
++	info->setWordWrap(true);
++	info->setStyleSheet(QStringLiteral("color:#cbd5e1; font-size:11px;"));
++	root->addWidget(info);
++
++	auto *roomRow = new QHBoxLayout();
++	auto *edRoom = new QLineEdit(QString::fromStdString((*cfg)["room"].get<std::string>()), rootW);
++	auto *btnNewRoom = new QPushButton(QStringLiteral("Nueva Sala"), rootW);
++	roomRow->addWidget(new QLabel(QStringLiteral("Sala:"), rootW));
++	roomRow->addWidget(edRoom, 1);
++	roomRow->addWidget(btnNewRoom);
++	root->addLayout(roomRow);
++
++	auto *srvRow = new QHBoxLayout();
++	auto *edBase = new QLineEdit(QString::fromStdString((*cfg)["baseUrl"].get<std::string>()), rootW);
++	srvRow->addWidget(new QLabel(QStringLiteral("Servidor:"), rootW));
++	srvRow->addWidget(edBase, 1);
++	root->addLayout(srvRow);
++
++	auto showQr = [](const QString &title, const QString &sub, const QString &url) {
++		if (void *jni = FindAndroidJni()) {
++			using Fn = void (*)(const char *, const char *, const char *);
++			if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_show_qr_dialog")))
++				fn(title.toUtf8().constData(), sub.toUtf8().constData(), url.toUtf8().constData());
++		}
++	};
++	auto shareUrl = [](const QString &title, const QString &text) {
++		if (void *jni = FindAndroidJni()) {
++			using Fn = void (*)(const char *, const char *);
++			if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_share_text")))
++				fn(title.toUtf8().constData(), text.toUtf8().constData());
++		}
++	};
++
++	auto *dirRow = new QHBoxLayout();
++	auto *btnDirQr = new QPushButton(QStringLiteral("QR Director"), rootW);
++	auto *btnDirCopy = new QPushButton(QStringLiteral("Copiar Director"), rootW);
++	dirRow->addWidget(btnDirQr, 1);
++	dirRow->addWidget(btnDirCopy, 1);
++	root->addLayout(dirRow);
++
++	auto *statusLbl = new QLabel(QStringLiteral("Listo"), rootW);
++	statusLbl->setWordWrap(true);
++	statusLbl->setStyleSheet(QStringLiteral("color:#93c5fd; font-size:11px;"));
++
++	auto saveCfg = [cfg, edRoom, edBase]() {
++		(*cfg)["room"] = edRoom->text().trimmed().toStdString();
++		QString base = edBase->text().trimmed();
++		while (base.endsWith('/')) base.chop(1);
++		if (base.isEmpty()) base = QStringLiteral("https://vdo.ninja");
++		(*cfg)["baseUrl"] = base.toStdString();
++		WriteConfigAtomically(WebRtcConfigFilePath(), *cfg);
++	};
++
++	QObject::connect(edRoom, &QLineEdit::editingFinished, rootW, saveCfg);
++	QObject::connect(edBase, &QLineEdit::editingFinished, rootW, saveCfg);
++	QObject::connect(btnNewRoom, &QPushButton::clicked, rootW, [edRoom, saveCfg, statusLbl]() {
++		edRoom->setText(QString::fromStdString("obs" + GenerateShortRoomToken(8)));
++		saveCfg();
++		statusLbl->setText(QStringLiteral("Nueva sala privada generada."));
++	});
++	QObject::connect(btnDirQr, &QPushButton::clicked, rootW, [cfg, saveCfg, showQr]() {
++		saveCfg();
++		QString url = QStringLiteral("%1/?director=%2")
++			.arg(QString::fromStdString((*cfg)["baseUrl"].get<std::string>()))
++			.arg(QString::fromStdString((*cfg)["room"].get<std::string>()));
++		showQr(QStringLiteral("Sala de Director WebRTC"), QStringLiteral("Abre desde tablet o PC para controlar a los invitados"), url);
++	});
++	QObject::connect(btnDirCopy, &QPushButton::clicked, rootW, [cfg, saveCfg, statusLbl]() {
++		saveCfg();
++		QString url = QStringLiteral("%1/?director=%2")
++			.arg(QString::fromStdString((*cfg)["baseUrl"].get<std::string>()))
++			.arg(QString::fromStdString((*cfg)["room"].get<std::string>()));
++		if (auto *cb = QApplication::clipboard()) cb->setText(url);
++		statusLbl->setText(QStringLiteral("Enlace de Director copiado."));
++	});
++
++	for (int i = 0; i < 6; ++i) {
++		auto *frame = new QFrame(rootW);
++		frame->setStyleSheet(QStringLiteral("QFrame { background:#1e293b; border-radius:6px; padding:4px; }"));
++		auto *fl = new QVBoxLayout(frame);
++		fl->setContentsMargins(6, 5, 6, 5);
++		fl->setSpacing(4);
++
++		auto *edName = new QLineEdit(QString::fromStdString((*cfg)["guests"][i].value("name", "Invitado")), frame);
++		fl->addWidget(edName);
++
++		auto *brow = new QHBoxLayout();
++		auto *bQr = new QPushButton(QStringLiteral("QR"), frame);
++		auto *bCopy = new QPushButton(QStringLiteral("Copiar"), frame);
++		auto *bShare = new QPushButton(QStringLiteral("Enviar"), frame);
++		auto *bAdd = new QPushButton(QStringLiteral("+ Escena"), frame);
++		bAdd->setStyleSheet(QStringLiteral("background:#2563eb; color:white; font-weight:bold; border-radius:4px; padding:4px 8px;"));
++		brow->addWidget(bQr);
++		brow->addWidget(bCopy);
++		brow->addWidget(bShare);
++		brow->addWidget(bAdd);
++		fl->addLayout(brow);
++		root->addWidget(frame);
++
++		auto getInviteUrl = [cfg, saveCfg, edName, i]() -> QString {
++			(*cfg)["guests"][i]["name"] = edName->text().trimmed().toStdString();
++			saveCfg();
++			return QStringLiteral("%1/?push=%2&room=%3&autostart&bitrate=2500&label=%4")
++				.arg(QString::fromStdString((*cfg)["baseUrl"].get<std::string>()))
++				.arg(QString::fromStdString((*cfg)["guests"][i]["streamId"].get<std::string>()))
++				.arg(QString::fromStdString((*cfg)["room"].get<std::string>()))
++				.arg(QString::fromUtf8(QUrl::toPercentEncoding(edName->text().trimmed())));
++		};
++		auto getViewUrl = [cfg, saveCfg, edName, i]() -> QString {
++			(*cfg)["guests"][i]["name"] = edName->text().trimmed().toStdString();
++			saveCfg();
++			return QStringLiteral("%1/?view=%2&room=%3&solo&cleanoutput&autostart&transparent")
++				.arg(QString::fromStdString((*cfg)["baseUrl"].get<std::string>()))
++				.arg(QString::fromStdString((*cfg)["guests"][i]["streamId"].get<std::string>()))
++				.arg(QString::fromStdString((*cfg)["room"].get<std::string>()));
++		};
++
++		QObject::connect(bQr, &QPushButton::clicked, frame, [edName, getInviteUrl, showQr]() {
++			showQr(QStringLiteral("Invitar: ") + edName->text(),
++			       QStringLiteral("El invitado escanea este QR y entra con cámara y micrófono en vivo"),
++			       getInviteUrl());
++		});
++		QObject::connect(bCopy, &QPushButton::clicked, frame, [edName, getInviteUrl, statusLbl]() {
++			if (auto *cb = QApplication::clipboard()) cb->setText(getInviteUrl());
++			statusLbl->setText(QStringLiteral("Enlace copiado para ") + edName->text());
++		});
++		QObject::connect(bShare, &QPushButton::clicked, frame, [edName, getInviteUrl, shareUrl]() {
++			shareUrl(QStringLiteral("Invitación en vivo: ") + edName->text(), getInviteUrl());
++		});
++		QObject::connect(bAdd, &QPushButton::clicked, frame, [edName, getViewUrl, statusLbl]() {
++			QString srcName = QStringLiteral("WebRTC: ") + (edName->text().trimmed().isEmpty() ? QStringLiteral("Invitado") : edName->text().trimmed());
++			AddWebRtcGuestBrowserSource(srcName, getViewUrl());
++			statusLbl->setText(QStringLiteral("Fuente '%1' agregada a la escena actual (video + audio).").arg(srcName));
++		});
++	}
++
++	root->addWidget(statusLbl);
++	root->addStretch(1);
++	scroll->setWidget(rootW);
++	return scroll;
++}
++
++static void OpenWebRtcGuestsDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Invitados mediante WebRTC"));
++	auto *lay = new QVBoxLayout(&dlg);
++	lay->addWidget(CreateWebRtcGuestsWidget(&dlg), 1);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++	lay->addWidget(btnClose);
++	dlg.resize(540, 560);
++	dlg.exec();
++}
++
++// =========================================================================
++// 5. Advanced Animated Title Generator Live Panel & Editor
++// =========================================================================
++static QWidget *CreateAdvancedTitlesWidget(QWidget *parent = nullptr)
++{
++	auto *scroll = new QScrollArea(parent);
++	scroll->setWidgetResizable(true);
++	scroll->setFrameShape(QFrame::NoFrame);
++	QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
++
++	auto *rootW = new QWidget(scroll);
++	auto *root = new QVBoxLayout(rootW);
++	root->setContentsMargins(8, 8, 8, 8);
++	root->setSpacing(6);
++
++	auto *topRow = new QHBoxLayout();
++	auto *btnAir = new QPushButton(QStringLiteral("LANZAR AL AIRE (Animar Entrada)"), rootW);
++	btnAir->setStyleSheet(QStringLiteral("background:#16a34a; color:white; font-weight:bold; padding:9px; border-radius:6px;"));
++	auto *btnAddSrc = new QPushButton(QStringLiteral("+ Fuente"), rootW);
++	btnAddSrc->setStyleSheet(QStringLiteral("background:#2563eb; color:white; font-weight:bold; padding:9px; border-radius:6px;"));
++	topRow->addWidget(btnAir, 1);
++	topRow->addWidget(btnAddSrc);
++	root->addLayout(topRow);
++
++	auto *form = new QFormLayout();
++	form->setSpacing(5);
++
++	auto *cbTpl = new QComboBox(rootW);
++	cbTpl->addItems({QStringLiteral("Noticiero Doble Barra"),
++			 QStringLiteral("Deportes / Impacto Diagonal"),
++			 QStringLiteral("Minimalista Cinematográfico"),
++			 QStringLiteral("Glassmorphism / Podcast"),
++			 QStringLiteral("Marquesina / Ticker Continuo"),
++			 QStringLiteral("Intro Pantalla Completa"),
++			 QStringLiteral("Tarjeta Redes Sociales"),
++			 QStringLiteral("Cita / Frase Destacada")});
++	auto *cbAnimIn = new QComboBox(rootW);
++	cbAnimIn->addItems({QStringLiteral("Deslizar Izquierda (Broadcast)"),
++			    QStringLiteral("Revelado Cortina (Wipe)"),
++			    QStringLiteral("Zoom / Pop Elástico"),
++			    QStringLiteral("Subir Desde Abajo (Rise)"),
++			    QStringLiteral("Máquina de Escribir (Typewriter)"),
++			    QStringLiteral("Desvanecer Cinematográfico"),
++			    QStringLiteral("Separación Central (Split)")});
++	auto *cbAnimOut = new QComboBox(rootW);
++	cbAnimOut->addItems({QStringLiteral("Inversa de la entrada"),
++			     QStringLiteral("Desvanecer suave"),
++			     QStringLiteral("Bajar y ocultar"),
++			     QStringLiteral("Cortina rápida")});
++	auto *cbAlign = new QComboBox(rootW);
++	cbAlign->addItems({QStringLiteral("Izquierda"), QStringLiteral("Centro"), QStringLiteral("Derecha")});
++
++	auto *edBadge = new QLineEdit(rootW);
++	auto *edTitle = new QLineEdit(rootW);
++	auto *edSub = new QLineEdit(rootW);
++	auto *edTicker = new QLineEdit(rootW);
++	auto *edAccent = new QLineEdit(QStringLiteral("#2563EB"), rootW);
++	auto *edBg = new QLineEdit(QStringLiteral("#0F172A"), rootW);
++
++	auto *timingRow = new QHBoxLayout();
++	auto *spInMs = new QSpinBox(rootW); spInMs->setRange(200, 2500); spInMs->setSingleStep(50); spInMs->setSuffix(QStringLiteral(" ms"));
++	auto *spOutMs = new QSpinBox(rootW); spOutMs->setRange(150, 2000); spOutMs->setSingleStep(50); spOutMs->setSuffix(QStringLiteral(" ms"));
++	auto *spAuto = new QSpinBox(rootW); spAuto->setRange(0, 120); spAuto->setSuffix(QStringLiteral(" s"));
++	timingRow->addWidget(spInMs);
++	timingRow->addWidget(spOutMs);
++	timingRow->addWidget(spAuto);
++
++	auto *cbShimmer = new QCheckBox(QStringLiteral("Brillo metálico animado (Shimmer)"), rootW);
++	cbShimmer->setChecked(true);
++
++	form->addRow(QStringLiteral("Plantilla:"), cbTpl);
++	form->addRow(QStringLiteral("Entrada:"), cbAnimIn);
++	form->addRow(QStringLiteral("Salida:"), cbAnimOut);
++	form->addRow(QStringLiteral("In / Out / Auto:"), timingRow);
++	form->addRow(QStringLiteral("Posición:"), cbAlign);
++	form->addRow(QStringLiteral("Etiqueta:"), edBadge);
++	form->addRow(QStringLiteral("Título:"), edTitle);
++	form->addRow(QStringLiteral("Subtítulo:"), edSub);
++	form->addRow(QStringLiteral("Marquesina:"), edTicker);
++	form->addRow(QStringLiteral("Acento (Hex):"), edAccent);
++	form->addRow(QStringLiteral("Fondo (Hex):"), edBg);
++	form->addRow(cbShimmer);
++	root->addLayout(form);
++
++	auto *actRow = new QHBoxLayout();
++	auto *btnApply = new QPushButton(QStringLiteral("Aplicar"), rootW);
++	auto *btnSavePr = new QPushButton(QStringLiteral("Guardar Preset"), rootW);
++	actRow->addWidget(btnApply, 1);
++	actRow->addWidget(btnSavePr, 1);
++	root->addLayout(actRow);
++
++	auto *presetList = new QListWidget(rootW);
++	presetList->setMinimumHeight(95);
++	root->addWidget(presetList);
++
++	auto *prRow = new QHBoxLayout();
++	auto *btnLaunchPr = new QPushButton(QStringLiteral("Lanzar Preset"), rootW);
++	auto *btnDelPr = new QPushButton(QStringLiteral("Borrar"), rootW);
++	prRow->addWidget(btnLaunchPr, 1);
++	prRow->addWidget(btnDelPr);
++	root->addLayout(prRow);
++	root->addStretch(1);
++	scroll->setWidget(rootW);
++
++	auto isOnAir = std::make_shared<bool>(false);
++	auto syncFromState = [btnAir, cbTpl, cbAnimIn, cbAnimOut, cbAlign, edBadge, edTitle, edSub, edTicker,
++			      edAccent, edBg, spInMs, spOutMs, spAuto, cbShimmer, presetList, isOnAir](const nlohmann::json &full) {
++		if (!full.contains("advancedTitle") || !full["advancedTitle"].is_object()) return;
++		const auto &at = full["advancedTitle"];
++		*isOnAir = at.value("onAir", false);
++		btnAir->setText(*isOnAir ? QStringLiteral("SACAR DEL AIRE (Animar Salida)")
++					 : QStringLiteral("LANZAR AL AIRE (Animar Entrada)"));
++		btnAir->setStyleSheet(*isOnAir
++			? QStringLiteral("background:#dc2626; color:white; font-weight:bold; padding:9px; border-radius:6px;")
++			: QStringLiteral("background:#16a34a; color:white; font-weight:bold; padding:9px; border-radius:6px;"));
++		cbTpl->setCurrentIndex(std::clamp(at.value("template", 0), 0, cbTpl->count() - 1));
++		cbAnimIn->setCurrentIndex(std::clamp(at.value("animIn", 0), 0, cbAnimIn->count() - 1));
++		cbAnimOut->setCurrentIndex(std::clamp(at.value("animOut", 0), 0, cbAnimOut->count() - 1));
++		cbAlign->setCurrentIndex(std::clamp(at.value("align", 0), 0, cbAlign->count() - 1));
++		edBadge->setText(QString::fromStdString(at.value("badge", "")));
++		edTitle->setText(QString::fromStdString(at.value("title", "")));
++		edSub->setText(QString::fromStdString(at.value("subtitle", "")));
++		edTicker->setText(QString::fromStdString(at.value("ticker", "")));
++		edAccent->setText(QString::fromStdString(at.value("accentColor", "#2563EB")));
++		edBg->setText(QString::fromStdString(at.value("bgColor", "#0F172A")));
++		spInMs->setValue(at.value("inMs", 650));
++		spOutMs->setValue(at.value("outMs", 450));
++		spAuto->setValue(at.value("autoHideSec", 0));
++		cbShimmer->setChecked(at.value("shimmer", true));
++
++		presetList->clear();
++		if (at.contains("presets") && at["presets"].is_array()) {
++			for (const auto &p : at["presets"]) {
++				QString t = QString::fromStdString(p.value("title", p.value("name", "Preset")));
++				QString s = QString::fromStdString(p.value("subtitle", ""));
++				presetList->addItem(s.isEmpty() ? t : (t + QStringLiteral(" — ") + s));
++			}
++		}
++	};
++
++	auto pushCurrent = [cbTpl, cbAnimIn, cbAnimOut, cbAlign, edBadge, edTitle, edSub, edTicker,
++			    edAccent, edBg, spInMs, spOutMs, spAuto, cbShimmer](bool setOnAir, bool onAirVal) -> nlohmann::json {
++		nlohmann::json req = {
++			{"action", "at_update"},
++			{"template", cbTpl->currentIndex()},
++			{"animIn", cbAnimIn->currentIndex()},
++			{"animOut", cbAnimOut->currentIndex()},
++			{"align", cbAlign->currentIndex()},
++			{"badge", edBadge->text().toStdString()},
++			{"title", edTitle->text().toStdString()},
++			{"subtitle", edSub->text().toStdString()},
++			{"ticker", edTicker->text().toStdString()},
++			{"accentColor", edAccent->text().trimmed().toStdString()},
++			{"bgColor", edBg->text().trimmed().toStdString()},
++			{"inMs", spInMs->value()},
++			{"outMs", spOutMs->value()},
++			{"autoHideSec", spAuto->value()},
++			{"shimmer", cbShimmer->isChecked()}
++		};
++		if (setOnAir) req["onAir"] = onAirVal;
++		return GfxExecute(req);
++	};
++
++	QObject::connect(btnAddSrc, &QPushButton::clicked, rootW, []() {
++		const char *kName = "Títulos Avanzados (Animados)";
++		OBSSourceAutoRelease existing = obs_get_source_by_name(kName);
++		obs_source_t *src = existing.Get();
++		if (!src) {
++			obs_data_t *s = obs_data_create();
++			obs_data_set_bool(s, "at_local_mode", false);
++			obs_data_set_int(s, "width", 1280);
++			obs_data_set_int(s, "height", 360);
++			src = obs_source_create("android_advanced_title_source", kName, s, nullptr);
++			obs_data_release(s);
++		}
++		if (!src) return;
++		OBSSourceAutoRelease curSceneSrc = obs_frontend_get_current_scene();
++		obs_scene_t *scene = curSceneSrc ? obs_scene_from_source(curSceneSrc) : nullptr;
++		if (scene && !obs_scene_find_source(scene, kName)) {
++			obs_scene_add(scene, src);
++		}
++		if (!existing) obs_source_release(src);
++	});
++	QObject::connect(btnAir, &QPushButton::clicked, rootW, [isOnAir, pushCurrent, syncFromState]() {
++		auto resp = pushCurrent(true, !(*isOnAir));
++		if (resp.contains("graphics")) syncFromState(resp["graphics"]);
++	});
++	QObject::connect(btnApply, &QPushButton::clicked, rootW, [pushCurrent, syncFromState]() {
++		auto resp = pushCurrent(false, false);
++		if (resp.contains("graphics")) syncFromState(resp["graphics"]);
++	});
++	QObject::connect(btnSavePr, &QPushButton::clicked, rootW, [pushCurrent, syncFromState]() {
++		pushCurrent(false, false);
++		auto resp = GfxExecute({{"action", "at_save_preset"}});
++		if (resp.contains("graphics")) syncFromState(resp["graphics"]);
++	});
++	QObject::connect(btnLaunchPr, &QPushButton::clicked, rootW, [presetList, syncFromState]() {
++		int row = presetList->currentRow();
++		if (row < 0) return;
++		auto resp = GfxExecute({{"action", "at_apply_preset"}, {"index", row}, {"launch", true}});
++		if (resp.contains("graphics")) syncFromState(resp["graphics"]);
++	});
++	QObject::connect(btnDelPr, &QPushButton::clicked, rootW, [presetList, syncFromState]() {
++		int row = presetList->currentRow();
++		if (row < 0) return;
++		auto resp = GfxExecute({{"action", "at_delete_preset"}, {"index", row}});
++		if (resp.contains("graphics")) syncFromState(resp["graphics"]);
++	});
++
++	syncFromState(GfxGetState());
++	return scroll;
++}
++
++static void OpenAdvancedTitlesDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Generador Avanzado de Títulos y Animaciones"));
++	auto *lay = new QVBoxLayout(&dlg);
++	lay->addWidget(CreateAdvancedTitlesWidget(&dlg), 1);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++	lay->addWidget(btnClose);
++	dlg.resize(560, 560);
++	dlg.exec();
++}
++
+ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ {
+     if (toolsMenu) {
+@@ -7078,6 +8512,17 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+         QObject::connect(safeLive, &QAction::triggered, mainWindow, [mainWindow] { OpenSafeLiveModeDialog(mainWindow); });
+         auto *vmixColor = toolsMenu->addAction(QStringLiteral("Ruedas de color (LGG)..."));
+         QObject::connect(vmixColor, &QAction::triggered, mainWindow, [mainWindow] { OpenVmixColorCorrectionDialog(mainWindow); });
++        toolsMenu->addSeparator();
++        auto *ptzAct = toolsMenu->addAction(QStringLiteral("Control PTZ (VISCA / ONVIF / Mando PS)..."));
++        QObject::connect(ptzAct, &QAction::triggered, mainWindow, [mainWindow] { OpenPtzControlDialog(mainWindow); });
++        auto *isoAct = toolsMenu->addAction(QStringLiteral("Grabación ISO (Multi-fuente)..."));
++        QObject::connect(isoAct, &QAction::triggered, mainWindow, [mainWindow] { OpenIsoRecordingDialog(mainWindow); });
++        auto *replayAct = toolsMenu->addAction(QStringLiteral("Repetición Instantánea (Instant Replay)..."));
++        QObject::connect(replayAct, &QAction::triggered, mainWindow, [mainWindow] { OpenInstantReplayDialog(mainWindow); });
++        auto *webrtcAct = toolsMenu->addAction(QStringLiteral("Invitados WebRTC (QR y Sala)..."));
++        QObject::connect(webrtcAct, &QAction::triggered, mainWindow, [mainWindow] { OpenWebRtcGuestsDialog(mainWindow); });
++        auto *advTitlesAct = toolsMenu->addAction(QStringLiteral("Generador Avanzado de Títulos Animados..."));
++        QObject::connect(advTitlesAct, &QAction::triggered, mainWindow, [mainWindow] { OpenAdvancedTitlesDialog(mainWindow); });
+     }
+ 
+ 	SyncVerticalRuntimeFromConfig(LoadMultiConfig());
+@@ -7205,6 +8650,11 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 		obs_frontend_add_dock_by_id("obs_android_dock_lowerthird", "Control: Lower Third", CreateLowerThirdDockWidget());
+ 		obs_frontend_add_dock_by_id("obs_android_dock_timer", "Control: Cronometro", CreateTimerDockWidget());
+ 		obs_frontend_add_dock_by_id("obs_android_dock_bible", "Control: Biblia", CreateBibleDockWidget());
++		obs_frontend_add_dock_by_id("obs_android_dock_ptz", "Control: PTZ (Mando PS)", CreatePtzControlWidget(mainWindow));
++		obs_frontend_add_dock_by_id("obs_android_dock_iso", "Control: Grabación ISO", CreateIsoRecordingWidget(mainWindow));
++		obs_frontend_add_dock_by_id("obs_android_dock_replay", "Control: Repetición", CreateInstantReplayWidget(mainWindow));
++		obs_frontend_add_dock_by_id("obs_android_dock_webrtc", "Control: Invitados WebRTC", CreateWebRtcGuestsWidget(mainWindow));
++		obs_frontend_add_dock_by_id("obs_android_dock_advtitles", "Control: Títulos Animados", CreateAdvancedTitlesWidget(mainWindow));
+ 
+ 		// Install Undo button below Settings + compact touch resize handles + ensure visible Movies/OBS Studio recording folder
+ 		InstallUndoButtonAndTouchDocks(mainWindow);

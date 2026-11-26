@@ -362,6 +362,7 @@ public final class QtObsActivity extends QtActivity {
             VtuberSourceManager.destroyAll();
             BrowserSourceManager.destroyAll();
             LiveGraphicsManager.destroyAll();
+        PtzControlManager.shutdown();
             CustomBrowserDockManager.destroyAll();
             FaceTrackerManager.stopBackgroundFrontCamera();
             FaceTrackerManager.stopVmcReceiver();
@@ -1121,6 +1122,7 @@ public final class QtObsActivity extends QtActivity {
         NativeBridge.registerBgSegmenterHost(BgSegmenterManager.class);
         sAppCtx = getApplicationContext();
         LiveGraphicsManager.init(this);
+        PtzControlManager.init(this);
         if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             PluginInstaller.syncExternalDropInPlugins(this);
             NdiDiscoveryManager.syncExternalDropInNdiLib(this);
@@ -1207,6 +1209,7 @@ public final class QtObsActivity extends QtActivity {
         FaceTrackerManager.stopVmcReceiver();
         VtuberSourceManager.destroyAll();
         LiveGraphicsManager.destroyAll();
+        PtzControlManager.shutdown();
         NdiDiscoveryManager.stopDiscovery();
         BrowserSourceManager.destroyAll();
         CustomBrowserDockManager.destroyAll();
@@ -1222,6 +1225,100 @@ public final class QtObsActivity extends QtActivity {
         if (finishing) {
             stopService(new Intent(this, CaptureService.class));
         }
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(android.view.MotionEvent ev) {
+        if (PtzControlManager.handleGenericMotionEvent(ev)) {
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(ev);
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent ev) {
+        if (PtzControlManager.handleKeyEvent(ev)) {
+            return true;
+        }
+        return super.dispatchKeyEvent(ev);
+    }
+
+    public static String ptzGetStateJson() {
+        return PtzControlManager.getStateJson();
+    }
+
+    public static String ptzExecuteJson(String json) {
+        return PtzControlManager.executeActionJson(json);
+    }
+
+    public static void showQrDialog(String title, String subtitle, String url) {
+        QtObsActivity act = sInstance;
+        if (act == null || act.isFinishing() || url == null || url.isEmpty()) return;
+        act.runOnUiThread(() -> {
+            try {
+                LinearLayout box = new LinearLayout(act);
+                box.setOrientation(LinearLayout.VERTICAL);
+                box.setGravity(Gravity.CENTER_HORIZONTAL);
+                int pad = Math.round(18 * act.getResources().getDisplayMetrics().density);
+                box.setPadding(pad, pad, pad, pad);
+
+                if (subtitle != null && !subtitle.isEmpty()) {
+                    android.widget.TextView sub = new android.widget.TextView(act);
+                    sub.setText(subtitle);
+                    sub.setGravity(Gravity.CENTER);
+                    sub.setPadding(0, 0, 0, pad / 2);
+                    box.addView(sub);
+                }
+
+                android.graphics.Bitmap qr = QrCodeGenerator.generateBitmap(url, 560);
+                if (qr != null) {
+                    android.widget.ImageView iv = new android.widget.ImageView(act);
+                    iv.setImageBitmap(qr);
+                    int sz = Math.round(240 * act.getResources().getDisplayMetrics().density);
+                    box.addView(iv, new LinearLayout.LayoutParams(sz, sz));
+                }
+
+                android.widget.TextView urlTv = new android.widget.TextView(act);
+                urlTv.setText(url);
+                urlTv.setTextSize(12f);
+                urlTv.setGravity(Gravity.CENTER);
+                urlTv.setTextIsSelectable(true);
+                urlTv.setPadding(0, pad / 2, 0, 0);
+                box.addView(urlTv);
+
+                new AlertDialog.Builder(act)
+                    .setTitle(title != null && !title.isEmpty() ? title : "Código QR")
+                    .setView(box)
+                    .setPositiveButton("Copiar enlace", (d, w) -> {
+                        ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
+                        if (cm != null) {
+                            cm.setPrimaryClip(ClipData.newPlainText("WebRTC", url));
+                            Toast.makeText(act, "Enlace copiado", Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .setNeutralButton("Compartir...", (d, w) -> shareText(title, url))
+                    .setNegativeButton("Cerrar", null)
+                    .show();
+            } catch (Throwable t) {
+                Log.w("QtObsActivity", "showQrDialog failed: " + t.getMessage());
+            }
+        });
+    }
+
+    public static void shareText(String title, String text) {
+        QtObsActivity act = sInstance;
+        if (act == null || act.isFinishing() || text == null || text.isEmpty()) return;
+        act.runOnUiThread(() -> {
+            try {
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("text/plain");
+                if (title != null && !title.isEmpty()) send.putExtra(Intent.EXTRA_SUBJECT, title);
+                send.putExtra(Intent.EXTRA_TEXT, text);
+                act.startActivity(Intent.createChooser(send, title != null && !title.isEmpty() ? title : "Compartir enlace"));
+            } catch (Throwable t) {
+                Log.w("QtObsActivity", "shareText failed: " + t.getMessage());
+            }
+        });
     }
 
     public static String listExternalDisplaysJson() {
