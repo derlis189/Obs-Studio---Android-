@@ -7,6 +7,7 @@
 #include <android/log.h>
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -42,7 +43,7 @@ struct BrowserSourceInstance {
     bool showing{true};
 };
 
-std::unordered_map<int64_t, BrowserSourceInstance *> g_instances;
+std::unordered_map<int64_t, std::shared_ptr<BrowserSourceInstance>> g_instances;
 
 struct JniAttachGuard {
     JavaVM *jvm{};
@@ -183,17 +184,17 @@ bool on_is_local_file_modified(obs_properties_t *props, obs_property_t *, obs_da
 
 bool on_interact_clicked(obs_properties_t *, obs_property_t *, void *data)
 {
-    auto *inst = static_cast<BrowserSourceInstance *>(data);
-    if (!inst) return false;
-    call_java_id_only(g_mid_interact, inst->id);
+    auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+    if (!holder || !*holder) return false;
+    call_java_id_only(g_mid_interact, (*holder)->id);
     return false;
 }
 
 bool on_refresh_clicked(obs_properties_t *, obs_property_t *, void *data)
 {
-    auto *inst = static_cast<BrowserSourceInstance *>(data);
-    if (!inst) return false;
-    call_java_id_bool(g_mid_reload, inst->id, true);
+    auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+    if (!holder || !*holder) return false;
+    call_java_id_bool(g_mid_reload, (*holder)->id, true);
     return false;
 }
 
@@ -263,46 +264,49 @@ void browser_update(void *data, obs_data_t *settings)
 
 void *browser_create(obs_data_t *settings, obs_source_t *source)
 {
-    auto *inst = new BrowserSourceInstance{};
+    auto inst = std::make_shared<BrowserSourceInstance>();
     inst->id = ++g_browser_id_seq;
     inst->source = source;
     inst->showing = obs_source_showing(source);
-    apply_settings(inst, settings);
+    apply_settings(inst.get(), settings);
     {
         std::lock_guard<std::mutex> lock(g_browser_mutex);
         g_instances[inst->id] = inst;
     }
-    push_config_to_java(inst);
-    return inst;
+    push_config_to_java(inst.get());
+    return new std::shared_ptr<BrowserSourceInstance>(std::move(inst));
 }
 
 void browser_destroy(void *data)
 {
-    auto *inst = static_cast<BrowserSourceInstance *>(data);
-    if (!inst) return;
-    int64_t id = inst->id;
+    auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+    if (!holder || !*holder) {
+        delete holder;
+        return;
+    }
+    int64_t id = (*holder)->id;
     {
         std::lock_guard<std::mutex> lock(g_browser_mutex);
         g_instances.erase(id);
     }
     call_java_id_only(g_mid_destroy, id);
-    delete inst;
+    delete holder;
 }
 
 void browser_show(void *data)
 {
-    auto *inst = static_cast<BrowserSourceInstance *>(data);
-    if (!inst) return;
-    inst->showing = true;
-    call_java_id_bool(g_mid_set_visible, inst->id, true);
+    auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+    if (!holder || !*holder) return;
+    (*holder)->showing = true;
+    call_java_id_bool(g_mid_set_visible, (*holder)->id, true);
 }
 
 void browser_hide(void *data)
 {
-    auto *inst = static_cast<BrowserSourceInstance *>(data);
-    if (!inst) return;
-    inst->showing = false;
-    call_java_id_bool(g_mid_set_visible, inst->id, false);
+    auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+    if (!holder || !*holder) return;
+    (*holder)->showing = false;
+    call_java_id_bool(g_mid_set_visible, (*holder)->id, false);
 }
 } // namespace
 
@@ -318,14 +322,33 @@ void android_browser_register()
     info.get_name = browser_get_name;
     info.create = browser_create;
     info.destroy = browser_destroy;
-    info.update = browser_update;
+    info.update = [](void *data, obs_data_t *settings) {
+        auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+        if (holder && *holder) browser_update(holder->get(), settings);
+    };
     info.get_defaults = browser_get_defaults;
-    info.get_properties = browser_get_properties;
+    info.get_properties = [](void *data) {
+        auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+        return browser_get_properties((holder && *holder) ? holder->get() : nullptr);
+    };
     info.show = browser_show;
     info.hide = browser_hide;
-    info.get_width = [](void *data) -> uint32_t { auto *inst = static_cast<BrowserSourceInstance *>(data); return inst->frame.width() ? inst->frame.width() : uint32_t(inst->width); };
-    info.get_height = [](void *data) -> uint32_t { auto *inst = static_cast<BrowserSourceInstance *>(data); return inst->frame.height() ? inst->frame.height() : uint32_t(inst->height); };
-    info.video_render = [](void *data, gs_effect_t *) { static_cast<BrowserSourceInstance *>(data)->frame.render(); };
+    info.get_width = [](void *data) -> uint32_t {
+        auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+        if (!holder || !*holder) return 1280;
+        auto *inst = holder->get();
+        return inst->frame.width() ? inst->frame.width() : uint32_t(inst->width);
+    };
+    info.get_height = [](void *data) -> uint32_t {
+        auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+        if (!holder || !*holder) return 720;
+        auto *inst = holder->get();
+        return inst->frame.height() ? inst->frame.height() : uint32_t(inst->height);
+    };
+    info.video_render = [](void *data, gs_effect_t *) {
+        auto *holder = static_cast<std::shared_ptr<BrowserSourceInstance> *>(data);
+        if (holder && *holder) (*holder)->frame.render();
+    };
     info.icon_type = OBS_ICON_TYPE_BROWSER;
     obs_register_source(&info);
     g_browser_registered = true;
@@ -382,9 +405,13 @@ Java_org_obsandroid_port_NativeBridge_pushBrowserFrame(
     jlong cap = env->GetDirectBufferCapacity(rgbaBuf);
     if (!ptr || cap < jlong(width) * jlong(height) * 4) return;
 
-    std::lock_guard<std::mutex> lock(g_browser_mutex);
-    auto it = g_instances.find(int64_t(instanceId));
-    if (it != g_instances.end()) it->second->frame.submit(ptr, uint32_t(width), uint32_t(height), uint32_t(width) * 4, true);
+    std::shared_ptr<BrowserSourceInstance> inst;
+    {
+        std::lock_guard<std::mutex> lock(g_browser_mutex);
+        auto it = g_instances.find(int64_t(instanceId));
+        if (it != g_instances.end()) inst = it->second;
+    }
+    if (inst) inst->frame.submit(ptr, uint32_t(width), uint32_t(height), uint32_t(width) * 4, true);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -392,9 +419,13 @@ Java_org_obsandroid_port_NativeBridge_pushBrowserBitmap(JNIEnv *env, jclass, jlo
 {
     AndroidCallbackScope callback;
     if (!callback) return false;
-    std::lock_guard<std::mutex> lock(g_browser_mutex);
-    auto it = g_instances.find(int64_t(id));
-    return it != g_instances.end() && it->second->frame.submitBitmap(env, bitmap);
+    std::shared_ptr<BrowserSourceInstance> inst;
+    {
+        std::lock_guard<std::mutex> lock(g_browser_mutex);
+        auto it = g_instances.find(int64_t(id));
+        if (it != g_instances.end()) inst = it->second;
+    }
+    return inst && inst->frame.submitBitmap(env, bitmap);
 }
 
 extern "C" JNIEXPORT void JNICALL

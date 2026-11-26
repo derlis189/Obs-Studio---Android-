@@ -1289,14 +1289,15 @@ public final class QtObsActivity extends QtActivity {
                 new AlertDialog.Builder(act)
                     .setTitle(title != null && !title.isEmpty() ? title : "Código QR")
                     .setView(box)
-                    .setPositiveButton("Copiar enlace", (d, w) -> {
+                    .setPositiveButton("WhatsApp / Enviar", (d, w) ->
+                        shareText(title, "¡Hola! Entra a la transmisión en vivo tocando este enlace (no necesitas instalar nada):\n" + url))
+                    .setNeutralButton("Copiar enlace", (d, w) -> {
                         ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
                         if (cm != null) {
-                            cm.setPrimaryClip(ClipData.newPlainText("WebRTC", url));
+                            cm.setPrimaryClip(ClipData.newPlainText("Llamada", url));
                             Toast.makeText(act, "Enlace copiado", Toast.LENGTH_SHORT).show();
                         }
                     })
-                    .setNeutralButton("Compartir...", (d, w) -> shareText(title, url))
                     .setNegativeButton("Cerrar", null)
                     .show();
             } catch (Throwable t) {

@@ -58,11 +58,28 @@ public final class BrowserSourceManager {
     private static final Map<Long, BrowserInstance> sInstances = new HashMap<>();
     private static volatile int sThermalFpsCap = 60;
     private static String audioScript;
-    private static final HandlerThread sCaptureThread = new HandlerThread("OBS-BrowserCapture");
-    private static final Handler sCapture;
+    private static final HandlerThread sCaptureThread0 = new HandlerThread("OBS-BrowserCap0");
+    private static final HandlerThread sCaptureThread1 = new HandlerThread("OBS-BrowserCap1");
+    private static final Handler[] sCapturePool;
     static {
-        sCaptureThread.start();
-        sCapture = new Handler(sCaptureThread.getLooper());
+        sCaptureThread0.start();
+        sCaptureThread1.start();
+        sCapturePool = new Handler[]{
+            new Handler(sCaptureThread0.getLooper()),
+            new Handler(sCaptureThread1.getLooper())
+        };
+    }
+
+    private static Handler captureHandlerFor(long id) {
+        return sCapturePool[(int) (Math.abs(id) & 1L)];
+    }
+
+    private static int activeVisibleBrowserCount() {
+        int n = 0;
+        for (BrowserInstance bi : sInstances.values()) {
+            if (bi != null && !bi.destroyed && bi.captureActive()) n++;
+        }
+        return Math.max(1, n);
     }
 
     private static final class BrowserInstance {
@@ -200,7 +217,7 @@ public final class BrowserSourceManager {
                     } catch (IllegalStateException ignored) {
                         // The display can be released while a callback is queued.
                     }
-                }, sCapture);
+                }, captureHandlerFor(id));
                 DisplayManager manager = (DisplayManager) activity.getSystemService(Context.DISPLAY_SERVICE);
                 virtualDisplay = manager.createVirtualDisplay("OBS Browser " + id, width, height,
                     activity.getResources().getDisplayMetrics().densityDpi, displayReader.getSurface(),
@@ -285,7 +302,13 @@ public final class BrowserSourceManager {
                 Rect rect = new Rect(location[0], location[1], location[0] + webView.getWidth(),
                     location[1] + webView.getHeight());
                 final long copiedRevision = frameGate.revision();
-                nextCaptureAtMs = SystemClock.uptimeMillis() + ThermalBudget.captureIntervalMs(fps, sThermalFpsCap);
+                int activeCount = activeVisibleBrowserCount();
+                int effFps = fps;
+                if (activeCount >= 3) effFps = Math.min(effFps, 24);
+                long baseInterval = ThermalBudget.captureIntervalMs(effFps, sThermalFpsCap);
+                // Stagger multi-guest captures slightly so multiple PixelCopy calls don't collide on the same vsync
+                long stagger = activeCount > 1 ? ((Math.abs(id) % activeCount) * Math.max(4L, baseInterval / (activeCount * 2L))) : 0L;
+                nextCaptureAtMs = SystemClock.uptimeMillis() + baseInterval + (capturedFrames == 0 ? stagger : 0L);
                 capturePending = true;
                 // Copy the window surface, before the virtual display compositor flattens
                 // alpha against black. This preserves transparent HTML and captures video/WebGL.
@@ -314,7 +337,7 @@ public final class BrowserSourceManager {
                         capturePending = false;
                         scheduleTick();
                     }
-                }, sCapture);
+                }, captureHandlerFor(id));
             } catch (Throwable t) {
                 capturePending = false;
                 nextCaptureAtMs = SystemClock.uptimeMillis() + 250;
@@ -356,6 +379,7 @@ public final class BrowserSourceManager {
         wv.setVerticalScrollBarEnabled(false);
         wv.setHorizontalScrollBarEnabled(false);
         wv.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        wv.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         wv.setBackgroundColor(inst.transparent ? Color.TRANSPARENT : Color.WHITE);
         wv.getViewTreeObserver().addOnDrawListener(() -> {
             // The private display supplies frame notifications normally. During
