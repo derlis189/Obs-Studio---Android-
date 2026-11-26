@@ -36,6 +36,8 @@ final class NativeBridge {
     static native String start(String files, String data, String libraries);
     static native boolean attach(android.view.Surface surface, int view, int width, int height);
     static native void detach(int view);
+    static native boolean attachExternalDisplay(android.view.Surface surface, int width, int height);
+    static native void detachExternalDisplay();
     static native String transition(boolean fade);
     static native void movePreviewImage(float x, float y);
     static native void scalePreviewImage(float factor);

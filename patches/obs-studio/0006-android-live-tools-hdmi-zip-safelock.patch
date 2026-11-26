@@ -1,0 +1,1172 @@
+diff --git a/frontend/utility/android-tools.cpp b/frontend/utility/android-tools.cpp
+index 5bd9c702a..d31cb9160 100644
+--- a/frontend/utility/android-tools.cpp
++++ b/frontend/utility/android-tools.cpp
+@@ -5492,13 +5492,17 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 	root->addWidget(statusLbl);
+ 
+ 	auto *btnRow = new QHBoxLayout();
+-	auto *btnCreate = new QPushButton(QStringLiteral("Crear respaldo ahora"), &dlg);
++	auto *btnCreate = new QPushButton(QStringLiteral("Crear respaldo"), &dlg);
+ 	btnCreate->setMinimumHeight(38);
+-	btnCreate->setStyleSheet(QStringLiteral("QPushButton { background: #1d4ed8; color: white; font-weight: bold; border-radius: 6px; }"));
+-	auto *btnRestore = new QPushButton(QStringLiteral("Restaurar seleccionado"), &dlg);
++	btnCreate->setStyleSheet(QStringLiteral("QPushButton { background: #1d4ed8; color: white; font-weight: bold; border-radius: 6px; padding: 0 10px; }"));
++	auto *btnExportZip = new QPushButton(QStringLiteral("Exportar .zip"), &dlg);
++	btnExportZip->setMinimumHeight(38);
++	btnExportZip->setStyleSheet(QStringLiteral("QPushButton { background: #0f766e; color: white; font-weight: bold; border-radius: 6px; padding: 0 10px; }"));
++	auto *btnRestore = new QPushButton(QStringLiteral("Restaurar"), &dlg);
+ 	btnRestore->setMinimumHeight(38);
+ 	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
+ 	btnRow->addWidget(btnCreate, 1);
++	btnRow->addWidget(btnExportZip, 1);
+ 	btnRow->addWidget(btnRestore, 1);
+ 	btnRow->addWidget(btnClose);
+ 	root->addLayout(btnRow);
+@@ -5506,6 +5510,9 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 	auto refreshBackups = [&]() {
+ 		list->clear();
+ 		QDir d(backupRoot);
++		const auto zips = d.entryList(QStringList{"*.zip"}, QDir::Files, QDir::Name | QDir::Reversed);
++		for (const QString &nm : zips)
++			list->addItem(nm);
+ 		const auto dirs = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name | QDir::Reversed);
+ 		for (const QString &nm : dirs)
+ 			list->addItem(nm);
+@@ -5514,14 +5521,7 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 		btnRestore->setEnabled(list->count() > 0);
+ 	};
+ 
+-	QObject::connect(btnCreate, &QPushButton::clicked, &dlg, [&]() {
+-		if (obsCfgRoot.isEmpty())
+-			return;
+-		SaveAllObsStateOnGuiThread();
+-		const QString folderName =
+-			QStringLiteral("OBS_Backup_%1")
+-				.arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")));
+-		const QString dst = backupRoot + "/" + folderName;
++	auto copyConfigToDir = [&](const QString &dst) -> bool {
+ 		QDir().mkpath(dst);
+ 		bool ok = true;
+ 		if (QDir(obsCfgRoot + "/basic").exists())
+@@ -5535,6 +5535,18 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 		for (const QFileInfo &fi : files) {
+ 			QFile::copy(fi.absoluteFilePath(), dst + "/" + fi.fileName());
+ 		}
++		return ok;
++	};
++
++	QObject::connect(btnCreate, &QPushButton::clicked, &dlg, [&]() {
++		if (obsCfgRoot.isEmpty())
++			return;
++		SaveAllObsStateOnGuiThread();
++		const QString folderName =
++			QStringLiteral("OBS_Backup_%1")
++				.arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")));
++		const QString dst = backupRoot + "/" + folderName;
++		bool ok = copyConfigToDir(dst);
+ 		refreshBackups();
+ 		statusLbl->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
+ 					    : QStringLiteral("color: #f59e0b; font-weight: bold;"));
+@@ -5542,16 +5554,63 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 				      : QStringLiteral("Respaldo creado con avisos en: %1").arg(folderName));
+ 	});
+ 
++	QObject::connect(btnExportZip, &QPushButton::clicked, &dlg, [&]() {
++		if (obsCfgRoot.isEmpty())
++			return;
++		SaveAllObsStateOnGuiThread();
++		const QString baseName =
++			QStringLiteral("OBS_Backup_%1")
++				.arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")));
++		const QString stageDir = obsCfgRoot + "/.zip_stage_" + baseName;
++		const QString zipPath = backupRoot + "/" + baseName + ".zip";
++		QDir(stageDir).removeRecursively();
++		copyConfigToDir(stageDir);
++		bool ok = false;
++		if (void *jni = FindAndroidJni()) {
++			using ZipFn = bool (*)(const char *, const char *);
++			if (auto fn = reinterpret_cast<ZipFn>(dlsym(jni, "obs_android_zip_directory"))) {
++				ok = fn(stageDir.toUtf8().constData(), zipPath.toUtf8().constData());
++			}
++		}
++		QDir(stageDir).removeRecursively();
++		refreshBackups();
++		statusLbl->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
++					    : QStringLiteral("color: #ef4444; font-weight: bold;"));
++		statusLbl->setText(ok ? QStringLiteral("Archivo portátil creado: %1.zip").arg(baseName)
++				      : QStringLiteral("No se pudo generar el archivo .zip."));
++	});
++
+ 	QObject::connect(btnRestore, &QPushButton::clicked, &dlg, [&]() {
+ 		auto *it = list->currentItem();
+ 		if (!it || obsCfgRoot.isEmpty())
+ 			return;
+-		const QString src = backupRoot + "/" + it->text();
++		const QString itemName = it->text();
++		const QString srcPath = backupRoot + "/" + itemName;
+ 		if (QMessageBox::question(
+ 			    &dlg, QStringLiteral("Restaurar respaldo"),
+-			    QStringLiteral("¿Restaurar '%1'? Reemplazará tus escenas y ajustes actuales.").arg(it->text()),
++			    QStringLiteral("¿Restaurar '%1'? Reemplazará tus escenas y ajustes actuales.").arg(itemName),
+ 			    QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+ 			return;
++		QString src = srcPath;
++		QString tempUnzipDir;
++		if (itemName.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)) {
++			tempUnzipDir = obsCfgRoot + "/.unzip_stage";
++			QDir(tempUnzipDir).removeRecursively();
++			bool unzipped = false;
++			if (void *jni = FindAndroidJni()) {
++				using UnzipFn = bool (*)(const char *, const char *);
++				if (auto fn = reinterpret_cast<UnzipFn>(dlsym(jni, "obs_android_unzip_to_directory"))) {
++					unzipped = fn(srcPath.toUtf8().constData(), tempUnzipDir.toUtf8().constData());
++				}
++			}
++			if (!unzipped) {
++				QDir(tempUnzipDir).removeRecursively();
++				statusLbl->setStyleSheet(QStringLiteral("color: #ef4444; font-weight: bold;"));
++				statusLbl->setText(QStringLiteral("No se pudo descomprimir %1.").arg(itemName));
++				return;
++			}
++			src = tempUnzipDir;
++		}
+ 		bool ok = true;
+ 		if (QDir(src + "/basic").exists())
+ 			ok = CopyDirRecursive(src + "/basic", obsCfgRoot + "/basic") && ok;
+@@ -5567,6 +5626,8 @@ void OpenBackupRestoreDialog(QWidget *parent)
+ 				QFile::remove(dstFile);
+ 			QFile::copy(fi.absoluteFilePath(), dstFile);
+ 		}
++		if (!tempUnzipDir.isEmpty())
++			QDir(tempUnzipDir).removeRecursively();
+ 		SyncVerticalRuntimeFromConfig(LoadMultiConfig());
+ 		SyncVerticalToCurrentMainScene();
+ 		statusLbl->setStyleSheet(ok ? QStringLiteral("color: #22c55e; font-weight: bold;")
+@@ -5971,6 +6032,997 @@ void OpenPerformanceDiagnostics(QWidget *parent)
+     dialog.exec();
+ }
+ 
++class VmixColorWheelWidget : public QWidget {
++public:
++	std::function<void(double, double)> onChanged;
++
++	explicit VmixColorWheelWidget(const QString &title, QWidget *parent = nullptr)
++		: QWidget(parent), m_title(title)
++	{
++		setMinimumSize(136, 136);
++		setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
++	}
++
++	void setPos(double nx, double ny)
++	{
++		double len = std::hypot(nx, ny);
++		if (len > 1.0) {
++			nx /= len;
++			ny /= len;
++		}
++		m_nx = nx;
++		m_ny = ny;
++		update();
++	}
++
++	double normX() const { return m_nx; }
++	double normY() const { return m_ny; }
++
++protected:
++	void paintEvent(QPaintEvent *) override
++	{
++		QPainter p(this);
++		p.setRenderHint(QPainter::Antialiasing, true);
++		const int side = std::max(40, std::min(width(), height()) - 8);
++		const int cx = width() / 2;
++		const int cy = height() / 2;
++		const int r = side / 2;
++
++		if (m_cache.width() != side || m_cache.height() != side) {
++			m_cache = QImage(side, side, QImage::Format_ARGB32_Premultiplied);
++			m_cache.fill(Qt::transparent);
++			const double half = side * 0.5;
++			for (int y = 0; y < side; ++y) {
++				auto *scan = reinterpret_cast<QRgb *>(m_cache.scanLine(y));
++				const double dy = (y + 0.5 - half) / half;
++				for (int x = 0; x < side; ++x) {
++					const double dx = (x + 0.5 - half) / half;
++					const double dist = std::hypot(dx, dy);
++					if (dist <= 1.0) {
++						double deg = std::atan2(-dy, dx) * 180.0 / 3.14159265358979323846;
++						if (deg < 0.0)
++							deg += 360.0;
++						// Soft dark center ring like vMix color wheels
++						QColor col = QColor::fromHsvF(deg / 360.0, std::pow(dist, 0.85), 0.25 + 0.72 * dist);
++						double edgeAlpha = dist > 0.96 ? std::clamp((1.0 - dist) / 0.04, 0.0, 1.0) : 1.0;
++						col.setAlphaF(edgeAlpha);
++						scan[x] = qPremultiply(col.rgba());
++					} else {
++						scan[x] = 0;
++					}
++				}
++			}
++		}
++
++		p.drawImage(cx - r, cy - r, m_cache);
++
++		// Subtle ring & crosshairs
++		p.setPen(QPen(QColor(255, 255, 255, 70), 1.2));
++		p.drawEllipse(QPointF(cx, cy), r - 1.0, r - 1.0);
++		p.setPen(QPen(QColor(255, 255, 255, 40), 1.0));
++		p.drawLine(cx - r + 6, cy, cx + r - 6, cy);
++		p.drawLine(cx, cy - r + 6, cx, cy + r - 6);
++
++		// Draggable dot
++		const double px = cx + m_nx * (r - 6);
++		const double py = cy + m_ny * (r - 6);
++		p.setPen(QPen(QColor(15, 23, 42, 230), 2.5));
++		p.setBrush(Qt::white);
++		p.drawEllipse(QPointF(px, py), 7.0, 7.0);
++	}
++
++	void mousePressEvent(QMouseEvent *e) override
++	{
++		if (e->button() == Qt::LeftButton) {
++			updateFromPoint(e->position());
++			e->accept();
++		}
++	}
++
++	void mouseMoveEvent(QMouseEvent *e) override
++	{
++		if (e->buttons() & Qt::LeftButton) {
++			updateFromPoint(e->position());
++			e->accept();
++		}
++	}
++
++	void mouseDoubleClickEvent(QMouseEvent *e) override
++	{
++		if (e->button() == Qt::LeftButton) {
++			setPos(0.0, 0.0);
++			if (onChanged)
++				onChanged(0.0, 0.0);
++			e->accept();
++		}
++	}
++
++private:
++	void updateFromPoint(const QPointF &pt)
++	{
++		const int side = std::max(40, std::min(width(), height()) - 8);
++		const double r = std::max(10.0, side * 0.5 - 6.0);
++		double nx = (pt.x() - width() * 0.5) / r;
++		double ny = (pt.y() - height() * 0.5) / r;
++		double len = std::hypot(nx, ny);
++		if (len > 1.0) {
++			nx /= len;
++			ny /= len;
++		}
++		m_nx = nx;
++		m_ny = ny;
++		update();
++		if (onChanged)
++			onChanged(m_nx, m_ny);
++	}
++
++	QString m_title;
++	QImage m_cache;
++	double m_nx = 0.0;
++	double m_ny = 0.0;
++};
++
++static void OpenVmixColorCorrectionDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Ruedas de color (Lift / Gamma / Gain)"));
++	if (parent && parent->screen()) {
++		dlg.resize(QSize(860, 620).boundedTo(parent->screen()->availableGeometry().size()));
++	} else {
++		dlg.resize(820, 560);
++	}
++
++	auto *root = new QVBoxLayout(&dlg);
++	root->setContentsMargins(10, 8, 10, 8);
++	root->setSpacing(6);
++
++	// Top bar: source selector + Active + Split compare + View toggle (Wheels / RGB Bars)
++	auto *topRow = new QHBoxLayout();
++	auto *srcLabel = new QLabel(QStringLiteral("Fuente:"), &dlg);
++	auto *srcCombo = new QComboBox(&dlg);
++	srcCombo->setMinimumWidth(180);
++	auto *chkEnabled = new QCheckBox(QStringLiteral("Activo"), &dlg);
++	chkEnabled->setChecked(true);
++	auto *chkSplit = new QCheckBox(QStringLiteral("Comparar 50%"), &dlg);
++	auto *btnMode = new QPushButton(QStringLiteral("Vista: Ruedas"), &dlg);
++	btnMode->setCheckable(true);
++	btnMode->setStyleSheet(QStringLiteral("QPushButton { background: #1e293b; color: white; border: 1px solid #475569; border-radius: 5px; padding: 4px 10px; font-weight: bold; }"));
++	auto *presetCombo = new QComboBox(&dlg);
++	presetCombo->addItems({
++		QStringLiteral("Presets..."),
++		QStringLiteral("Neutral (Restablecer)"),
++		QStringLiteral("Cálido / Iglesia"),
++		QStringLiteral("Cine / Contraste"),
++		QStringLiteral("Broadcast Vivo"),
++		QStringLiteral("Corregir luz fría"),
++		QStringLiteral("Blanco y Negro"),
++	});
++	topRow->addWidget(srcLabel);
++	topRow->addWidget(srcCombo, 1);
++	topRow->addWidget(chkEnabled);
++	topRow->addWidget(chkSplit);
++	topRow->addWidget(btnMode);
++	topRow->addWidget(presetCombo);
++	root->addLayout(topRow);
++
++	// Collect all video sources (preferring selected item in current scene)
++	std::string preferredName;
++	if (obs_source_t *curSceneSrc = obs_frontend_get_current_scene()) {
++		if (obs_scene_t *scene = obs_scene_from_source(curSceneSrc)) {
++			obs_scene_enum_items(
++				scene,
++				[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
++					auto *outName = static_cast<std::string *>(param);
++					if (!outName->empty())
++						return false;
++					if (obs_sceneitem_selected(item)) {
++						if (obs_source_t *s = obs_sceneitem_get_source(item)) {
++							if ((obs_source_get_output_flags(s) & OBS_SOURCE_VIDEO) != 0 &&
++							    obs_source_get_name(s)) {
++								*outName = obs_source_get_name(s);
++								return false;
++							}
++						}
++					}
++					return true;
++				},
++				&preferredName);
++		}
++		obs_source_release(curSceneSrc);
++	}
++
++	struct SrcListCtx {
++		QComboBox *combo;
++		int preferredIdx = -1;
++		std::string preferredName;
++	} listCtx{srcCombo, -1, preferredName};
++
++	obs_enum_sources(
++		[](void *param, obs_source_t *src) {
++			auto *ctx = static_cast<SrcListCtx *>(param);
++			if (!src || (obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) == 0)
++				return true;
++			const char *nm = obs_source_get_name(src);
++			if (!nm || !*nm)
++				return true;
++			if (!ctx->preferredName.empty() && ctx->preferredName == nm)
++				ctx->preferredIdx = ctx->combo->count();
++			ctx->combo->addItem(QString::fromUtf8(nm));
++			return true;
++		},
++		&listCtx);
++
++	if (srcCombo->count() == 0) {
++		QMessageBox::information(parent, QStringLiteral("Ruedas de color (LGG)"),
++					 QStringLiteral("Agrega primero una fuente de video (cámara, multimedia, navegador o captura) para corregir su color."));
++		return;
++	}
++	if (listCtx.preferredIdx >= 0)
++		srcCombo->setCurrentIndex(listCtx.preferredIdx);
++
++	// Live preview of the selected source
++	struct PreviewState {
++		std::mutex mutex;
++		OBSWeakSource weakSrc;
++	};
++	auto previewState = std::make_shared<PreviewState>();
++	auto *previewDisplay = new OBSQTDisplay(&dlg);
++	previewDisplay->setMinimumHeight(130);
++	previewDisplay->setMaximumHeight(200);
++	previewDisplay->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
++	root->addWidget(previewDisplay);
++
++	auto drawPreview = [](void *data, uint32_t cx, uint32_t cy) {
++		auto *st = static_cast<PreviewState *>(data);
++		OBSSource src;
++		{
++			std::lock_guard<std::mutex> lock(st->mutex);
++			src = OBSGetStrongRef(st->weakSrc);
++		}
++		if (!src || !cx || !cy)
++			return;
++		const uint32_t sw = std::max(1u, obs_source_get_width(src));
++		const uint32_t sh = std::max(1u, obs_source_get_height(src));
++		const float srcAspect = float(sw) / float(sh);
++		const float dstAspect = float(cx) / float(cy);
++		int vx = 0, vy = 0, vw = int(cx), vh = int(cy);
++		if (srcAspect > dstAspect) {
++			vh = int(float(cx) / srcAspect);
++			vy = (int(cy) - vh) / 2;
++		} else {
++			vw = int(float(cy) * srcAspect);
++			vx = (int(cx) - vw) / 2;
++		}
++		gs_viewport_push();
++		gs_projection_push();
++		gs_set_viewport(vx, vy, std::max(1, vw), std::max(1, vh));
++		gs_ortho(0.0f, float(sw), 0.0f, float(sh), -100.0f, 100.0f);
++		obs_source_video_render(src);
++		gs_projection_pop();
++		gs_viewport_pop();
++	};
++	QObject::connect(previewDisplay, &OBSQTDisplay::DisplayCreated, &dlg, [previewDisplay, previewState, drawPreview]() {
++		if (obs_display_t *d = previewDisplay->GetDisplay()) {
++			obs_display_add_draw_callback(d, drawPreview, previewState.get());
++			obs_display_set_background_color(d, 0x0B1120);
++		}
++	});
++
++	// Scrollable controls container (wheels/bars + Hue/Sat/Temp/Tint)
++	auto *scroll = new QScrollArea(&dlg);
++	scroll->setWidgetResizable(true);
++	scroll->setFrameShape(QFrame::NoFrame);
++	auto *controlsHost = new QWidget(scroll);
++	auto *controlsLayout = new QVBoxLayout(controlsHost);
++	controlsLayout->setContentsMargins(2, 2, 2, 2);
++	controlsLayout->setSpacing(8);
++	scroll->setWidget(controlsHost);
++	root->addWidget(scroll, 1);
++
++	struct ColorParams {
++		double liftR = 0.0, liftG = 0.0, liftB = 0.0, liftY = 0.0;
++		double gammaR = 0.0, gammaG = 0.0, gammaB = 0.0, gammaY = 0.0;
++		double gainR = 1.0, gainG = 1.0, gainB = 1.0, gainY = 1.0;
++		double hue = 0.0, sat = 0.0, temp = 0.0, tint = 0.0;
++		bool split = false;
++	};
++	auto state = std::make_shared<ColorParams>();
++	auto currentSource = std::make_shared<OBSSource>();
++	auto currentFilter = std::make_shared<OBSSource>();
++	auto syncingUi = std::make_shared<bool>(false);
++
++	// Mode 1: 3 vMix Color Wheels (Lift, Gamma, Gain)
++	auto *wheelsPage = new QWidget(controlsHost);
++	auto *wheelsRow = new QHBoxLayout(wheelsPage);
++	wheelsRow->setContentsMargins(0, 0, 0, 0);
++	wheelsRow->setSpacing(10);
++
++	auto makeWheelColumn = [&](const QString &title, int yMin, int yMax, int yDef,
++				   VmixColorWheelWidget **outWheel, QSlider **outYSlider, QLabel **outYVal,
++				   QPushButton **outReset) {
++		auto *box = new QGroupBox(title, wheelsPage);
++		auto *v = new QVBoxLayout(box);
++		v->setContentsMargins(6, 6, 6, 6);
++		v->setSpacing(4);
++		auto *wheel = new VmixColorWheelWidget(title, box);
++		v->addWidget(wheel, 1);
++
++		auto *yRow = new QHBoxLayout();
++		auto *yLbl = new QLabel(QStringLiteral("Y:"), box);
++		auto *ySlider = new QSlider(Qt::Horizontal, box);
++		ySlider->setRange(yMin, yMax);
++		ySlider->setValue(yDef);
++		auto *yVal = new QLabel(QStringLiteral("0.00"), box);
++		yVal->setMinimumWidth(38);
++		yVal->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
++		yRow->addWidget(yLbl);
++		yRow->addWidget(ySlider, 1);
++		yRow->addWidget(yVal);
++		v->addLayout(yRow);
++
++		auto *rst = new QPushButton(QStringLiteral("Reset"), box);
++		rst->setMaximumHeight(26);
++		v->addWidget(rst);
++
++		*outWheel = wheel;
++		*outYSlider = ySlider;
++		*outYVal = yVal;
++		*outReset = rst;
++		wheelsRow->addWidget(box, 1);
++	};
++
++	VmixColorWheelWidget *wLift = nullptr, *wGamma = nullptr, *wGain = nullptr;
++	QSlider *slLiftY = nullptr, *slGammaY = nullptr, *slGainY = nullptr;
++	QLabel *lbLiftY = nullptr, *lbGammaY = nullptr, *lbGainY = nullptr;
++	QPushButton *btLiftRst = nullptr, *btGammaRst = nullptr, *btGainRst = nullptr;
++
++	makeWheelColumn(QStringLiteral("Lift (Sombras)"), -50, 50, 0, &wLift, &slLiftY, &lbLiftY, &btLiftRst);
++	makeWheelColumn(QStringLiteral("Gamma (Medios)"), -80, 80, 0, &wGamma, &slGammaY, &lbGammaY, &btGammaRst);
++	makeWheelColumn(QStringLiteral("Gain (Altas luces)"), 0, 200, 100, &wGain, &slGainY, &lbGainY, &btGainRst);
++	controlsLayout->addWidget(wheelsPage);
++
++	// Mode 2: vMix RGB Colour Bars
++	auto *barsPage = new QWidget(controlsHost);
++	barsPage->setVisible(false);
++	auto *barsRow = new QHBoxLayout(barsPage);
++	barsRow->setContentsMargins(0, 0, 0, 0);
++	barsRow->setSpacing(10);
++
++	struct BarGroup {
++		QSlider *r = nullptr, *g = nullptr, *b = nullptr, *y = nullptr;
++		QLabel *lr = nullptr, *lg = nullptr, *lb = nullptr, *ly = nullptr;
++	};
++	auto makeBarsColumn = [&](const QString &title, int minV, int maxV, int defV) -> BarGroup {
++		BarGroup bg{};
++		auto *box = new QGroupBox(title, barsPage);
++		auto *form = new QGridLayout(box);
++		form->setContentsMargins(6, 6, 6, 6);
++		form->setSpacing(4);
++		auto addCh = [&](int row, const char *ch, const char *colorHex, QSlider **outS, QLabel **outL) {
++			auto *lbl = new QLabel(QString::fromLatin1(ch), box);
++			lbl->setStyleSheet(QStringLiteral("color: %1; font-weight: bold;").arg(QString::fromLatin1(colorHex)));
++			auto *s = new QSlider(Qt::Horizontal, box);
++			s->setRange(minV, maxV);
++			s->setValue(defV);
++			auto *v = new QLabel(QString::number(defV / 100.0, 'f', 2), box);
++			v->setMinimumWidth(38);
++			v->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
++			form->addWidget(lbl, row, 0);
++			form->addWidget(s, row, 1);
++			form->addWidget(v, row, 2);
++			*outS = s;
++			*outL = v;
++		};
++		addCh(0, "R", "#f87171", &bg.r, &bg.lr);
++		addCh(1, "G", "#4ade80", &bg.g, &bg.lg);
++		addCh(2, "B", "#60a5fa", &bg.b, &bg.lb);
++		addCh(3, "Y", "#f8fafc", &bg.y, &bg.ly);
++		barsRow->addWidget(box, 1);
++		return bg;
++	};
++
++	BarGroup bgLift = makeBarsColumn(QStringLiteral("Lift (Sombras)"), -50, 50, 0);
++	BarGroup bgGamma = makeBarsColumn(QStringLiteral("Gamma (Medios)"), -80, 80, 0);
++	BarGroup bgGain = makeBarsColumn(QStringLiteral("Gain (Altas luces)"), 0, 200, 100);
++	controlsLayout->addWidget(barsPage);
++
++	// Global sliders: Hue, Saturation, Temperature, Tint
++	auto *globalBox = new QGroupBox(QStringLiteral("Matiz, Saturación y Balance de Blancos"), controlsHost);
++	auto *globalGrid = new QGridLayout(globalBox);
++	globalGrid->setContentsMargins(8, 6, 8, 6);
++	globalGrid->setHorizontalSpacing(10);
++	globalGrid->setVerticalSpacing(4);
++
++	auto makeGlobalSlider = [&](int row, int colBase, const QString &lblText, int minV, int maxV, int defV,
++				    QSlider **outS, QLabel **outVal) {
++		auto *l = new QLabel(lblText, globalBox);
++		auto *s = new QSlider(Qt::Horizontal, globalBox);
++		s->setRange(minV, maxV);
++		s->setValue(defV);
++		auto *v = new QLabel(QStringLiteral("0"), globalBox);
++		v->setMinimumWidth(44);
++		v->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
++		globalGrid->addWidget(l, row, colBase);
++		globalGrid->addWidget(s, row, colBase + 1);
++		globalGrid->addWidget(v, row, colBase + 2);
++		*outS = s;
++		*outVal = v;
++	};
++
++	QSlider *slHue = nullptr, *slSat = nullptr, *slTemp = nullptr, *slTint = nullptr;
++	QLabel *lbHue = nullptr, *lbSat = nullptr, *lbTemp = nullptr, *lbTint = nullptr;
++	makeGlobalSlider(0, 0, QStringLiteral("Matiz (Hue)"), -180, 180, 0, &slHue, &lbHue);
++	makeGlobalSlider(0, 3, QStringLiteral("Saturación"), -100, 100, 0, &slSat, &lbSat);
++	makeGlobalSlider(1, 0, QStringLiteral("Temperatura"), -100, 100, 0, &slTemp, &lbTemp);
++	makeGlobalSlider(1, 3, QStringLiteral("Tinte"), -100, 100, 0, &slTint, &lbTint);
++	controlsLayout->addWidget(globalBox);
++
++	// Bottom bar: Reset All + Close
++	auto *bottomRow = new QHBoxLayout();
++	auto *btnResetAll = new QPushButton(QStringLiteral("Restablecer todo"), &dlg);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	btnClose->setStyleSheet(QStringLiteral("QPushButton { background: #1d4ed8; color: white; font-weight: bold; border-radius: 6px; padding: 6px 18px; }"));
++	bottomRow->addWidget(btnResetAll);
++	bottomRow->addStretch(1);
++	bottomRow->addWidget(btnClose);
++	root->addLayout(bottomRow);
++
++	// Projection helpers between 2D color wheel and (R,G,B) offsets
++	auto wheelToRgb = [](double nx, double ny, double scale, double base, double &r, double &g, double &b) {
++		const double uy = -ny;
++		r = base + scale * nx;
++		g = base + scale * (-0.5 * nx + 0.8660254 * uy);
++		b = base + scale * (-0.5 * nx - 0.8660254 * uy);
++	};
++	auto rgbToWheel = [](double r, double g, double b, double scale, double &nx, double &ny) {
++		const double mean = (r + g + b) / 3.0;
++		const double cr = r - mean;
++		const double cg = g - mean;
++		const double cb = b - mean;
++		nx = cr / std::max(0.001, scale);
++		ny = -(cg - cb) / (1.7320508 * std::max(0.001, scale));
++	};
++
++	auto pushToFilter = [&]() {
++		if (!(*currentFilter))
++			return;
++		OBSDataAutoRelease s = obs_data_create();
++		obs_data_set_double(s, "lift_r", state->liftR);
++		obs_data_set_double(s, "lift_g", state->liftG);
++		obs_data_set_double(s, "lift_b", state->liftB);
++		obs_data_set_double(s, "lift_y", state->liftY);
++		obs_data_set_double(s, "gamma_r", state->gammaR);
++		obs_data_set_double(s, "gamma_g", state->gammaG);
++		obs_data_set_double(s, "gamma_b", state->gammaB);
++		obs_data_set_double(s, "gamma_y", state->gammaY);
++		obs_data_set_double(s, "gain_r", state->gainR);
++		obs_data_set_double(s, "gain_g", state->gainG);
++		obs_data_set_double(s, "gain_b", state->gainB);
++		obs_data_set_double(s, "gain_y", state->gainY);
++		obs_data_set_double(s, "hue", state->hue);
++		obs_data_set_double(s, "saturation", state->sat);
++		obs_data_set_double(s, "temperature", state->temp);
++		obs_data_set_double(s, "tint", state->tint);
++		obs_data_set_bool(s, "split_compare", state->split);
++		obs_source_update(*currentFilter, s);
++	};
++
++	auto refreshUiFromState = [&]() {
++		*syncingUi = true;
++		double nx = 0.0, ny = 0.0;
++		rgbToWheel(state->liftR, state->liftG, state->liftB, 0.35, nx, ny);
++		wLift->setPos(nx, ny);
++		rgbToWheel(state->gammaR, state->gammaG, state->gammaB, 0.55, nx, ny);
++		wGamma->setPos(nx, ny);
++		rgbToWheel(state->gainR, state->gainG, state->gainB, 0.65, nx, ny);
++		wGain->setPos(nx, ny);
++
++		slLiftY->setValue(int(std::lround(state->liftY * 100.0)));
++		lbLiftY->setText(QString::number(state->liftY, 'f', 2));
++		slGammaY->setValue(int(std::lround(state->gammaY * 100.0)));
++		lbGammaY->setText(QString::number(state->gammaY, 'f', 2));
++		slGainY->setValue(int(std::lround(state->gainY * 100.0)));
++		lbGainY->setText(QString::number(state->gainY, 'f', 2));
++
++		auto syncBar = [](BarGroup &bg, double r, double g, double b, double y) {
++			bg.r->setValue(int(std::lround(r * 100.0))); bg.lr->setText(QString::number(r, 'f', 2));
++			bg.g->setValue(int(std::lround(g * 100.0))); bg.lg->setText(QString::number(g, 'f', 2));
++			bg.b->setValue(int(std::lround(b * 100.0))); bg.lb->setText(QString::number(b, 'f', 2));
++			bg.y->setValue(int(std::lround(y * 100.0))); bg.ly->setText(QString::number(y, 'f', 2));
++		};
++		syncBar(bgLift, state->liftR, state->liftG, state->liftB, state->liftY);
++		syncBar(bgGamma, state->gammaR, state->gammaG, state->gammaB, state->gammaY);
++		syncBar(bgGain, state->gainR, state->gainG, state->gainB, state->gainY);
++
++		slHue->setValue(int(std::lround(state->hue)));
++		lbHue->setText(QStringLiteral("%1°").arg(int(std::lround(state->hue))));
++		slSat->setValue(int(std::lround(state->sat * 100.0)));
++		lbSat->setText(QStringLiteral("%1%").arg(int(std::lround((1.0 + state->sat) * 100.0))));
++		slTemp->setValue(int(std::lround(state->temp * 100.0)));
++		lbTemp->setText(QString::number(state->temp, 'f', 2));
++		slTint->setValue(int(std::lround(state->tint * 100.0)));
++		lbTint->setText(QString::number(state->tint, 'f', 2));
++		chkSplit->setChecked(state->split);
++		*syncingUi = false;
++	};
++
++	auto bindSourceByName = [&](const QString &name) {
++		if (*currentSource) {
++			obs_source_dec_showing(*currentSource);
++		}
++		*currentFilter = nullptr;
++		*currentSource = nullptr;
++		OBSSourceAutoRelease src = obs_get_source_by_name(name.toUtf8().constData());
++		if (!src)
++			return;
++		*currentSource = src.Get();
++		obs_source_inc_showing(*currentSource);
++		{
++			std::lock_guard<std::mutex> lock(previewState->mutex);
++			previewState->weakSrc = OBSGetWeakRef(*currentSource);
++		}
++
++		// Find existing android_vmix_color_filter or attach a new one
++		OBSSource found;
++		obs_source_enum_filters(
++			*currentSource,
++			[](obs_source_t *, obs_source_t *filter, void *param) {
++				auto *out = static_cast<OBSSource *>(param);
++				if (!(*out) && filter && obs_source_get_id(filter) &&
++				    std::strcmp(obs_source_get_id(filter), "android_vmix_color_filter") == 0) {
++					*out = filter;
++				}
++			},
++			&found);
++		if (!found) {
++			OBSSourceAutoRelease created =
++				obs_source_create("android_vmix_color_filter", "Corrección de color (Ruedas LGG)", nullptr, nullptr);
++			if (created) {
++				obs_source_filter_add(*currentSource, created);
++				found = created.Get();
++			}
++		}
++		*currentFilter = found;
++		if (*currentFilter) {
++			OBSDataAutoRelease s = obs_source_get_settings(*currentFilter);
++			state->liftR = obs_data_get_double(s, "lift_r");
++			state->liftG = obs_data_get_double(s, "lift_g");
++			state->liftB = obs_data_get_double(s, "lift_b");
++			state->liftY = obs_data_get_double(s, "lift_y");
++			state->gammaR = obs_data_get_double(s, "gamma_r");
++			state->gammaG = obs_data_get_double(s, "gamma_g");
++			state->gammaB = obs_data_get_double(s, "gamma_b");
++			state->gammaY = obs_data_get_double(s, "gamma_y");
++			state->gainR = obs_data_get_double(s, "gain_r");
++			state->gainG = obs_data_get_double(s, "gain_g");
++			state->gainB = obs_data_get_double(s, "gain_b");
++			state->gainY = obs_data_get_double(s, "gain_y");
++			state->hue = obs_data_get_double(s, "hue");
++			state->sat = obs_data_get_double(s, "saturation");
++			state->temp = obs_data_get_double(s, "temperature");
++			state->tint = obs_data_get_double(s, "tint");
++			state->split = obs_data_get_bool(s, "split_compare");
++			*syncingUi = true;
++			chkEnabled->setChecked(obs_source_enabled(*currentFilter));
++			*syncingUi = false;
++			refreshUiFromState();
++		}
++	};
++
++	// Wire color wheels
++	wLift->onChanged = [&](double nx, double ny) {
++		if (*syncingUi) return;
++		wheelToRgb(nx, ny, 0.35, 0.0, state->liftR, state->liftG, state->liftB);
++		refreshUiFromState();
++		pushToFilter();
++	};
++	wGamma->onChanged = [&](double nx, double ny) {
++		if (*syncingUi) return;
++		wheelToRgb(nx, ny, 0.55, 0.0, state->gammaR, state->gammaG, state->gammaB);
++		refreshUiFromState();
++		pushToFilter();
++	};
++	wGain->onChanged = [&](double nx, double ny) {
++		if (*syncingUi) return;
++		wheelToRgb(nx, ny, 0.65, 1.0, state->gainR, state->gainG, state->gainB);
++		refreshUiFromState();
++		pushToFilter();
++	};
++
++	// Wire wheel Y sliders & per-wheel Reset buttons
++	QObject::connect(slLiftY, &QSlider::valueChanged, &dlg, [&](int v) {
++		if (*syncingUi) return;
++		state->liftY = v / 100.0;
++		refreshUiFromState();
++		pushToFilter();
++	});
++	QObject::connect(slGammaY, &QSlider::valueChanged, &dlg, [&](int v) {
++		if (*syncingUi) return;
++		state->gammaY = v / 100.0;
++		refreshUiFromState();
++		pushToFilter();
++	});
++	QObject::connect(slGainY, &QSlider::valueChanged, &dlg, [&](int v) {
++		if (*syncingUi) return;
++		state->gainY = v / 100.0;
++		refreshUiFromState();
++		pushToFilter();
++	});
++	QObject::connect(btLiftRst, &QPushButton::clicked, &dlg, [&]() {
++		state->liftR = state->liftG = state->liftB = state->liftY = 0.0;
++		refreshUiFromState();
++		pushToFilter();
++	});
++	QObject::connect(btGammaRst, &QPushButton::clicked, &dlg, [&]() {
++		state->gammaR = state->gammaG = state->gammaB = state->gammaY = 0.0;
++		refreshUiFromState();
++		pushToFilter();
++	});
++	QObject::connect(btGainRst, &QPushButton::clicked, &dlg, [&]() {
++		state->gainR = state->gainG = state->gainB = state->gainY = 1.0;
++		refreshUiFromState();
++		pushToFilter();
++	});
++
++	// Wire RGB Bars
++	auto wireBar = [&](BarGroup &bg, double *r, double *g, double *b, double *y) {
++		QObject::connect(bg.r, &QSlider::valueChanged, &dlg, [&, r](int v) {
++			if (*syncingUi) return;
++			*r = v / 100.0; refreshUiFromState(); pushToFilter();
++		});
++		QObject::connect(bg.g, &QSlider::valueChanged, &dlg, [&, g](int v) {
++			if (*syncingUi) return;
++			*g = v / 100.0; refreshUiFromState(); pushToFilter();
++		});
++		QObject::connect(bg.b, &QSlider::valueChanged, &dlg, [&, b](int v) {
++			if (*syncingUi) return;
++			*b = v / 100.0; refreshUiFromState(); pushToFilter();
++		});
++		QObject::connect(bg.y, &QSlider::valueChanged, &dlg, [&, y](int v) {
++			if (*syncingUi) return;
++			*y = v / 100.0; refreshUiFromState(); pushToFilter();
++		});
++	};
++	wireBar(bgLift, &state->liftR, &state->liftG, &state->liftB, &state->liftY);
++	wireBar(bgGamma, &state->gammaR, &state->gammaG, &state->gammaB, &state->gammaY);
++	wireBar(bgGain, &state->gainR, &state->gainG, &state->gainB, &state->gainY);
++
++	// Wire global sliders & toggles
++	QObject::connect(slHue, &QSlider::valueChanged, &dlg, [&](int v) {
++		if (*syncingUi) return;
++		state->hue = double(v); refreshUiFromState(); pushToFilter();
++	});
++	QObject::connect(slSat, &QSlider::valueChanged, &dlg, [&](int v) {
++		if (*syncingUi) return;
++		state->sat = v / 100.0; refreshUiFromState(); pushToFilter();
++	});
++	QObject::connect(slTemp, &QSlider::valueChanged, &dlg, [&](int v) {
++		if (*syncingUi) return;
++		state->temp = v / 100.0; refreshUiFromState(); pushToFilter();
++	});
++	QObject::connect(slTint, &QSlider::valueChanged, &dlg, [&](int v) {
++		if (*syncingUi) return;
++		state->tint = v / 100.0; refreshUiFromState(); pushToFilter();
++	});
++	QObject::connect(chkSplit, &QCheckBox::toggled, &dlg, [&](bool on) {
++		if (*syncingUi) return;
++		state->split = on; pushToFilter();
++	});
++	QObject::connect(chkEnabled, &QCheckBox::toggled, &dlg, [&](bool on) {
++		if (*syncingUi || !(*currentFilter)) return;
++		obs_source_set_enabled(*currentFilter, on);
++	});
++	QObject::connect(btnMode, &QPushButton::toggled, &dlg, [&](bool showBars) {
++		wheelsPage->setVisible(!showBars);
++		barsPage->setVisible(showBars);
++		btnMode->setText(showBars ? QStringLiteral("Vista: Barras RGB") : QStringLiteral("Vista: Ruedas"));
++	});
++	QObject::connect(presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dlg, [&](int idx) {
++		if (idx <= 0) return;
++		*state = ColorParams{};
++		state->split = chkSplit->isChecked();
++		if (idx == 2) { // Cálido / Iglesia
++			state->liftY = -0.02; state->gammaY = 0.06; state->gainY = 1.04;
++			state->temp = 0.22; state->sat = 0.12;
++		} else if (idx == 3) { // Cine / Contraste
++			state->liftY = -0.06; state->liftB = 0.03; state->gammaY = -0.04;
++			state->gainY = 1.08; state->gainR = 1.04; state->sat = -0.08;
++		} else if (idx == 4) { // Broadcast Vivo
++			state->liftY = -0.03; state->gammaY = 0.05; state->gainY = 1.06;
++			state->sat = 0.22;
++		} else if (idx == 5) { // Corregir luz fría
++			state->temp = 0.35; state->tint = 0.08; state->gammaY = 0.04;
++		} else if (idx == 6) { // Blanco y Negro
++			state->sat = -1.0; state->liftY = -0.04; state->gainY = 1.06;
++		}
++		refreshUiFromState();
++		pushToFilter();
++		presetCombo->setCurrentIndex(0);
++	});
++	QObject::connect(btnResetAll, &QPushButton::clicked, &dlg, [&]() {
++		*state = ColorParams{};
++		refreshUiFromState();
++		pushToFilter();
++	});
++	QObject::connect(srcCombo, &QComboBox::currentTextChanged, &dlg, bindSourceByName);
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++
++	bindSourceByName(srcCombo->currentText());
++	dlg.exec();
++
++	// Clean up preview callback and showing reference safely
++	if (obs_display_t *d = previewDisplay->GetDisplay()) {
++		obs_display_remove_draw_callback(d, drawPreview, previewState.get());
++	}
++	{
++		std::lock_guard<std::mutex> lock(previewState->mutex);
++		previewState->weakSrc = nullptr;
++	}
++	if (*currentSource) {
++		obs_source_dec_showing(*currentSource);
++	}
++}
++
++static void OpenSafeLiveModeDialog(QWidget *mainWindow)
++{
++	QDialog dlg(mainWindow, Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
++	dlg.setProperty("androidFullScreenLock", true);
++	dlg.setModal(true);
++	dlg.setStyleSheet(QStringLiteral(
++		"QDialog { background-color: #020617; border: none; }"
++		"QLabel { color: #e2e8f0; background: transparent; }"
++		"QCheckBox { color: #cbd5e1; font-size: 13px; background: transparent; }"));
++	QScreen *scr = (mainWindow && mainWindow->screen()) ? mainWindow->screen() : QGuiApplication::primaryScreen();
++	if (scr) {
++		const QRect full = scr->geometry();
++		dlg.setMinimumSize(full.size());
++		dlg.setMaximumSize(full.size());
++		dlg.setGeometry(full);
++	} else if (mainWindow) {
++		dlg.setGeometry(mainWindow->geometry());
++	}
++
++	const bool previewWasEnabled = obs_frontend_preview_enabled();
++	bool previewPausedByLock = false;
++
++	auto *root = new QVBoxLayout(&dlg);
++	root->setContentsMargins(28, 28, 28, 28);
++	root->setSpacing(14);
++	root->addStretch(1);
++
++	auto *badge = new QLabel(&dlg);
++	badge->setAlignment(Qt::AlignCenter);
++	root->addWidget(badge);
++
++	auto *clockLbl = new QLabel(&dlg);
++	clockLbl->setAlignment(Qt::AlignCenter);
++	clockLbl->setStyleSheet(QStringLiteral("font-size: 38px; font-weight: bold; color: #f8fafc;"));
++	root->addWidget(clockLbl);
++
++	auto *sceneLbl = new QLabel(&dlg);
++	sceneLbl->setAlignment(Qt::AlignCenter);
++	sceneLbl->setStyleSheet(QStringLiteral("font-size: 16px; color: #94a3b8;"));
++	root->addWidget(sceneLbl);
++
++	auto *healthLbl = new QLabel(&dlg);
++	healthLbl->setAlignment(Qt::AlignCenter);
++	healthLbl->setStyleSheet(QStringLiteral("font-size: 13px; color: #cbd5e1;"));
++	root->addWidget(healthLbl);
++
++	auto *pausePreviewChk = new QCheckBox(
++		QStringLiteral("Pausar vista previa principal para ahorrar batería y temperatura (la emisión y grabación siguen activas)"),
++		&dlg);
++	pausePreviewChk->setChecked(previewWasEnabled);
++	root->addWidget(pausePreviewChk, 0, Qt::AlignCenter);
++
++	auto applyPreviewPause = [&](bool pause) {
++		if (pause && previewWasEnabled) {
++			obs_frontend_set_preview_enabled(false);
++			previewPausedByLock = true;
++		} else if (!pause && previewPausedByLock) {
++			obs_frontend_set_preview_enabled(true);
++			previewPausedByLock = false;
++		}
++	};
++	applyPreviewPause(pausePreviewChk->isChecked());
++	QObject::connect(pausePreviewChk, &QCheckBox::toggled, &dlg, applyPreviewPause);
++
++	auto *unlockBtn = new QPushButton(QStringLiteral("Mantener pulsado 1.2 s para desbloquear"), &dlg);
++	unlockBtn->setMinimumSize(300, 56);
++	unlockBtn->setStyleSheet(QStringLiteral(
++		"QPushButton { background: rgba(30, 41, 59, 230); color: white; font-size: 15px; font-weight: bold; "
++		"border: 1px solid rgba(148, 163, 184, 120); border-radius: 28px; padding: 0 24px; }"
++		"QPushButton:pressed { background: rgba(29, 78, 216, 240); border-color: #60a5fa; }"));
++	root->addWidget(unlockBtn, 0, Qt::AlignCenter);
++	root->addStretch(1);
++
++	auto *holdTimer = new QTimer(&dlg);
++	holdTimer->setSingleShot(true);
++	holdTimer->setInterval(1200);
++	QObject::connect(holdTimer, &QTimer::timeout, &dlg, [&]() { dlg.accept(); });
++	QObject::connect(unlockBtn, &QPushButton::pressed, &dlg, [&]() {
++		unlockBtn->setText(QStringLiteral("Manteniendo... suelta para cancelar"));
++		holdTimer->start();
++	});
++	QObject::connect(unlockBtn, &QPushButton::released, &dlg, [&]() {
++		if (holdTimer->isActive()) {
++			holdTimer->stop();
++			unlockBtn->setText(QStringLiteral("Mantener pulsado 1.2 s para desbloquear"));
++		}
++	});
++
++	auto refresh = [&]() {
++		const bool live = obs_frontend_streaming_active();
++		const bool rec = obs_frontend_recording_active();
++		if (live && rec) {
++			badge->setText(QStringLiteral("● EN VIVO  ·  ● GRABANDO  ·  PANTALLA BLOQUEADA"));
++			badge->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: bold; color: #f87171;"));
++		} else if (live) {
++			badge->setText(QStringLiteral("● EN VIVO  ·  PANTALLA BLOQUEADA"));
++			badge->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: bold; color: #f87171;"));
++		} else if (rec) {
++			badge->setText(QStringLiteral("● GRABANDO  ·  PANTALLA BLOQUEADA"));
++			badge->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: bold; color: #fbbf24;"));
++		} else {
++			badge->setText(QStringLiteral("MODO DIRECTO SEGURO  ·  TOQUES BLOQUEADOS"));
++			badge->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: bold; color: #60a5fa;"));
++		}
++		clockLbl->setText(QTime::currentTime().toString(QStringLiteral("HH:mm:ss")));
++		if (obs_source_t *cur = obs_frontend_get_current_scene()) {
++			sceneLbl->setText(QStringLiteral("Escena activa: %1").arg(QString::fromUtf8(obs_source_get_name(cur))));
++			obs_source_release(cur);
++		}
++		if (void *h = FindAndroidJni()) {
++			using HealthFn = bool (*)(char *, size_t);
++			if (auto fn = reinterpret_cast<HealthFn>(dlsym(h, "obs_android_get_device_health"))) {
++				char buf[1024] = {};
++				if (fn(buf, sizeof(buf)) && buf[0]) {
++					auto j = nlohmann::json::parse(buf, nullptr, false);
++					if (!j.is_discarded()) {
++						healthLbl->setText(QStringLiteral("Batería: %1%%2  ·  Temperatura: %3 °C")
++									   .arg(j.value("battery", -1))
++									   .arg(j.value("charging", false) ? "+" : "")
++									   .arg(j.value("temp_c", 0.0), 0, 'f', 1));
++					}
++				}
++			}
++		}
++	};
++	auto *tick = new QTimer(&dlg);
++	tick->setInterval(1000);
++	QObject::connect(tick, &QTimer::timeout, &dlg, refresh);
++	tick->start();
++	refresh();
++
++	dlg.showFullScreen();
++	dlg.exec();
++	if (previewPausedByLock) {
++		obs_frontend_set_preview_enabled(true);
++	}
++}
++
++static void OpenExternalDisplayDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Salida HDMI / Pantalla Wi-Fi (Miracast / Smart View)"));
++	dlg.resize(560, 360);
++
++	auto *root = new QVBoxLayout(&dlg);
++	auto *desc = new QLabel(
++		QStringLiteral("Envía el Programa limpio (sin controles) a un monitor/proyector por cable USB-C/HDMI o por pantalla inalámbrica Wi-Fi (Miracast, Smart View, Cast). Conecta primero tu TV/proyector Wi-Fi y aparecerá automáticamente abajo."),
++		&dlg);
++	desc->setWordWrap(true);
++	root->addWidget(desc);
++
++	auto *list = new QListWidget(&dlg);
++	root->addWidget(list, 1);
++
++	auto *status = new QLabel(QStringLiteral("Buscando pantallas HDMI / Wi-Fi conectadas..."), &dlg);
++	status->setWordWrap(true);
++	root->addWidget(status);
++
++	auto *wifiBtn = new QPushButton(QStringLiteral("Conectar pantalla Wi-Fi (Miracast / Smart View)"), &dlg);
++	wifiBtn->setMinimumHeight(36);
++	wifiBtn->setStyleSheet(QStringLiteral("QPushButton { background: #0f766e; color: white; font-weight: bold; border-radius: 6px; padding: 6px 12px; }"));
++	root->addWidget(wifiBtn);
++
++	auto *btns = new QHBoxLayout();
++	auto *btnRefresh = new QPushButton(QStringLiteral("Actualizar"), &dlg);
++	auto *btnStart = new QPushButton(QStringLiteral("Iniciar salida"), &dlg);
++	btnStart->setStyleSheet(QStringLiteral("QPushButton { background: #1d4ed8; color: white; font-weight: bold; border-radius: 6px; padding: 6px 12px; }"));
++	auto *btnStop = new QPushButton(QStringLiteral("Detener"), &dlg);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	btns->addWidget(btnRefresh);
++	btns->addWidget(btnStart);
++	btns->addWidget(btnStop);
++	btns->addWidget(btnClose);
++	root->addLayout(btns);
++
++	auto refreshDisplays = [&]() {
++		const int prevId = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toInt() : -1;
++		list->clear();
++		void *jni = FindAndroidJni();
++		if (!jni) {
++			status->setText(QStringLiteral("Puente JNI no disponible."));
++			btnStart->setEnabled(false);
++			return;
++		}
++		using ListFn = bool (*)(char *, size_t);
++		auto fn = reinterpret_cast<ListFn>(dlsym(jni, "obs_android_list_external_displays"));
++		char buf[4096] = {};
++		if (!fn || !fn(buf, sizeof(buf))) {
++			status->setText(QStringLiteral("No se pudieron consultar las pantallas externas."));
++			btnStart->setEnabled(false);
++			return;
++		}
++		auto arr = nlohmann::json::parse(buf, nullptr, false);
++		if (arr.is_discarded() || !arr.is_array() || arr.empty()) {
++			status->setText(QStringLiteral("No hay pantallas HDMI ni Wi-Fi (Miracast/Smart View) conectadas todavía."));
++			btnStart->setEnabled(false);
++			return;
++		}
++		int selRow = 0;
++		for (const auto &d : arr) {
++			const int id = d.value("id", -1);
++			const QString name = QString::fromStdString(d.value("name", std::string("Pantalla externa")));
++			const int w = d.value("width", 0);
++			const int h = d.value("height", 0);
++			const bool active = d.value("active", false);
++			auto *item = new QListWidgetItem(
++				QStringLiteral("%1 (%2×%3)%4").arg(name).arg(w).arg(h).arg(active ? " [ACTIVA]" : ""),
++				list);
++			item->setData(Qt::UserRole, id);
++			if (id == prevId)
++				selRow = list->count() - 1;
++		}
++		list->setCurrentRow(selRow);
++		btnStart->setEnabled(true);
++		status->setText(QStringLiteral("Se detectó %1 pantalla(s) externa(s) HDMI / Wi-Fi.").arg(list->count()));
++	};
++
++	QObject::connect(wifiBtn, &QPushButton::clicked, &dlg, [&]() {
++		if (void *jni = FindAndroidJni()) {
++			if (auto fn = reinterpret_cast<void (*)()>(dlsym(jni, "obs_android_open_wireless_display_settings"))) {
++				fn();
++			}
++		}
++	});
++	QObject::connect(btnRefresh, &QPushButton::clicked, &dlg, refreshDisplays);
++	QObject::connect(btnStart, &QPushButton::clicked, &dlg, [&]() {
++		auto *it = list->currentItem();
++		if (!it) return;
++		const int id = it->data(Qt::UserRole).toInt();
++		bool ok = false;
++		if (void *jni = FindAndroidJni()) {
++			using StartFn = bool (*)(int);
++			if (auto fn = reinterpret_cast<StartFn>(dlsym(jni, "obs_android_start_external_display"))) {
++				ok = fn(id);
++			}
++		}
++		refreshDisplays();
++		status->setText(ok ? QStringLiteral("Salida limpia de Programa activa en la pantalla externa.")
++				   : QStringLiteral("No se pudo iniciar la salida en esa pantalla externa."));
++	});
++	QObject::connect(btnStop, &QPushButton::clicked, &dlg, [&]() {
++		if (void *jni = FindAndroidJni()) {
++			if (auto fn = reinterpret_cast<void (*)()>(dlsym(jni, "obs_android_stop_external_display"))) {
++				fn();
++			}
++		}
++		refreshDisplays();
++		status->setText(QStringLiteral("Salida externa detenida."));
++	});
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++
++	auto *pollTimer = new QTimer(&dlg);
++	pollTimer->setInterval(2000);
++	QObject::connect(pollTimer, &QTimer::timeout, &dlg, refreshDisplays);
++	pollTimer->start();
++
++	refreshDisplays();
++	dlg.exec();
++}
++
+ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ {
+     if (toolsMenu) {
+@@ -6020,6 +7072,12 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+         });
+         auto *diagnostics = toolsMenu->addAction(QStringLiteral("Diagnóstico de rendimiento..."));
+         QObject::connect(diagnostics, &QAction::triggered, mainWindow, [mainWindow] { OpenPerformanceDiagnostics(mainWindow); });
++        auto *hdmiOut = toolsMenu->addAction(QStringLiteral("Salida HDMI / Pantalla Wi-Fi (Miracast)..."));
++        QObject::connect(hdmiOut, &QAction::triggered, mainWindow, [mainWindow] { OpenExternalDisplayDialog(mainWindow); });
++        auto *safeLive = toolsMenu->addAction(QStringLiteral("Modo Directo Seguro (Bloquear toques)"));
++        QObject::connect(safeLive, &QAction::triggered, mainWindow, [mainWindow] { OpenSafeLiveModeDialog(mainWindow); });
++        auto *vmixColor = toolsMenu->addAction(QStringLiteral("Ruedas de color (LGG)..."));
++        QObject::connect(vmixColor, &QAction::triggered, mainWindow, [mainWindow] { OpenVmixColorCorrectionDialog(mainWindow); });
+     }
+ 
+ 	SyncVerticalRuntimeFromConfig(LoadMultiConfig());
+@@ -6059,6 +7117,15 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 		// Live Android thermal + battery monitor in status bar + keepalive watchdog
+ 		if (auto *win = qobject_cast<QMainWindow *>(mainWindow)) {
+ 			if (auto *sb = win->statusBar()) {
++				auto *lockBtn = new QPushButton(QStringLiteral("Bloquear"), win);
++				lockBtn->setToolTip(QStringLiteral("Modo Directo Seguro (bloquea toques y atenúa pantalla)"));
++				lockBtn->setFixedHeight(22);
++				lockBtn->setStyleSheet(QStringLiteral(
++					"QPushButton { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; "
++					"border-radius: 4px; padding: 0 8px; font-size: 11px; }"
++					"QPushButton:pressed { background: #1d4ed8; }"));
++				QObject::connect(lockBtn, &QPushButton::clicked, win, [win]() { OpenSafeLiveModeDialog(win); });
++				sb->addPermanentWidget(lockBtn);
+ 				auto *healthLabel = new QLabel(win);
+ 				healthLabel->setStyleSheet(QStringLiteral("padding: 0 6px; color: #cbd5e1; font-size: 11px;"));
+ 				sb->addPermanentWidget(healthLabel);

@@ -1,0 +1,88 @@
+diff --git a/frontend/dialogs/OBSBasicProperties.cpp b/frontend/dialogs/OBSBasicProperties.cpp
+index 592e338e5..0e2c2f876 100644
+--- a/frontend/dialogs/OBSBasicProperties.cpp
++++ b/frontend/dialogs/OBSBasicProperties.cpp
+@@ -148,13 +148,28 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
+ 			status->setWordWrap(true);
+ 			status->setTextFormat(Qt::PlainText);
+ 			ui->propertiesLayout->insertWidget(0, status);
+-			auto updateStatus = [this, status]() {
++			struct StingerDiagState {
++				QString lastPath;
++				uint32_t seenW = 0;
++				uint32_t seenH = 0;
++				bool autoPreviewed = false;
++			};
++			auto diag = std::make_shared<StingerDiagState>();
++			auto updateStatus = [this, status, diag]() {
+ 				const QString path = QT_UTF8(obs_data_get_string(view->GetSettings(), "path"));
++				const bool preload = obs_data_get_bool(view->GetSettings(), "preload");
++				if (path != diag->lastPath) {
++					diag->lastPath = path;
++					diag->seenW = 0;
++					diag->seenH = 0;
++					diag->autoPreviewed = false;
++				}
+ 				if (path.isEmpty()) {
+ 					status->setText(QStringLiteral("Selecciona un video y pulsa Vista previa de transición."));
+ 					return;
+ 				}
+-				if (!QFileInfo(path).isReadable()) {
++				QFileInfo fi(path);
++				if (!fi.isReadable()) {
+ 					status->setText(QStringLiteral("El archivo no está disponible. Vuelve a seleccionarlo."));
+ 					return;
+ 				}
+@@ -164,13 +179,47 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
+ 					if (!*media && strcmp(obs_source_get_id(child), "ffmpeg_source") == 0)
+ 						*media = child;
+ 				}, &media);
++				if (media) {
++					const uint32_t mw = obs_source_get_width(media);
++					const uint32_t mh = obs_source_get_height(media);
++					if (mw && mh) {
++						diag->seenW = mw;
++						diag->seenH = mh;
++					}
++				}
++				int64_t durNs = 0;
++				int64_t nbFrames = 0;
++				if (media) {
++					proc_handler_t *ph = obs_source_get_proc_handler(media);
++					calldata_t cd{};
++					proc_handler_call(ph, "get_duration", &cd);
++					proc_handler_call(ph, "get_nb_frames", &cd);
++					durNs = calldata_int(&cd, "duration");
++					nbFrames = calldata_int(&cd, "num_frames");
++					calldata_free(&cd);
++				}
++				const double sizeMb = double(fi.size()) / (1024.0 * 1024.0);
++				QString ramWarn;
++				if (preload && sizeMb >= 25.0) {
++					ramWarn = QStringLiteral(" Aviso: archivo de %1 MB; desactiva 'Precargar video en RAM' para evitar demoras o falta de memoria en Android.")
++							  .arg(sizeMb, 0, 'f', 1);
++				}
+ 				if (media && obs_source_media_get_state(media) == OBS_MEDIA_STATE_ERROR) {
+-					status->setText(QStringLiteral("No se pudo decodificar el video. Comprueba el códec o prueba MOV con ProRes/Animation, o MP4 con H.264."));
+-				} else if (media && obs_source_get_width(media) && obs_source_get_height(media)) {
+-					status->setText(QStringLiteral("Video decodificado: %1 × %2. Revisa la transparencia y el punto de cambio en la vista previa.")
+-						.arg(obs_source_get_width(media)).arg(obs_source_get_height(media)));
++					status->setText(QStringLiteral("No se pudo decodificar el video. Comprueba el códec o prueba MOV (ProRes/Animation) o MP4 (H.264).") + ramWarn);
++				} else if (diag->seenW && diag->seenH) {
++					QString durTxt = durNs > 0 ? QStringLiteral(" · %1 s").arg(double(durNs) / 1e9, 0, 'f', 2) : QString();
++					status->setText(QStringLiteral("Video decodificado: %1 × %2%3. Listo para usar (revisa transparencia y punto de transición).")
++								.arg(diag->seenW).arg(diag->seenH).arg(durTxt) + ramWarn);
++				} else if (durNs > 0 || nbFrames > 0) {
++					if (!diag->autoPreviewed) {
++						diag->autoPreviewed = true;
++						QTimer::singleShot(150, this, &OBSBasicProperties::previewTransitionClicked);
++					}
++					status->setText(QStringLiteral("Archivo cargado (%1 s). Ejecutando vista previa de transición...")
++								.arg(double(durNs) / 1e9, 0, 'f', 2) + ramWarn);
+ 				} else {
+-					status->setText(QStringLiteral("Todavía no hay fotogramas decodificados. Usa Vista previa de transición; si no aparece el video, prueba otro códec."));
++					status->setText(QStringLiteral("Cargando archivo (%1 MB)... Pulsa Vista previa de transición; si no aparece el video, desactiva 'Precargar video en RAM' o prueba otro códec.")
++								.arg(sizeMb, 0, 'f', 1) + ramWarn);
+ 				}
+ 			};
+ 			auto *timer = new QTimer(this);

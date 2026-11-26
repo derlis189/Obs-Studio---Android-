@@ -738,12 +738,28 @@ public final class QtObsActivity extends QtActivity {
         container.setOrientation(LinearLayout.VERTICAL);
         container.setPadding(pad, Math.round(8 * density), pad, Math.round(4 * density));
 
+        boolean multiline = false;
+        String displayTitle = title;
+        if (displayTitle != null && displayTitle.startsWith("__ML__")) {
+            multiline = true;
+            displayTitle = displayTitle.substring(6);
+        }
+
         EditText edit = new EditText(this);
-        edit.setSingleLine(true);
-        edit.setInputType(isPassword
-            ? (InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
-            : (InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS));
-        edit.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        if (multiline) {
+            edit.setSingleLine(false);
+            edit.setMinLines(3);
+            edit.setMaxLines(8);
+            edit.setGravity(Gravity.TOP | Gravity.START);
+            edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+            edit.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        } else {
+            edit.setSingleLine(true);
+            edit.setInputType(isPassword
+                ? (InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
+                : (InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS));
+            edit.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        }
         String safeInit = initialText != null ? initialText : "";
         edit.setText(safeInit);
         edit.setSelection(safeInit.length());
@@ -793,7 +809,7 @@ public final class QtObsActivity extends QtActivity {
         container.addView(actions, actionsParams);
 
         AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle((title != null && !title.isEmpty()) ? title : "Editar texto")
+            .setTitle((displayTitle != null && !displayTitle.isEmpty()) ? displayTitle : "Editar texto")
             .setView(container)
             .setPositiveButton("Aceptar", (d, w) -> {
                 if (!completed[0]) {
@@ -816,20 +832,26 @@ public final class QtObsActivity extends QtActivity {
             }
         });
         dialog.setOnDismissListener(d -> {
+            if (!completed[0]) {
+                completed[0] = true;
+                NativeBridge.onNativeTextInputResult(requestId, false, "");
+            }
             if (mActiveTextDialog == dialog) mActiveTextDialog = null;
             applyImmersiveMode();
         });
-        edit.setOnEditorActionListener((v, actionId, event) -> {
-            if (actionId == EditorInfo.IME_ACTION_DONE) {
-                if (!completed[0]) {
-                    completed[0] = true;
-                    NativeBridge.onNativeTextInputResult(requestId, true, edit.getText().toString());
+        if (!multiline) {
+            edit.setOnEditorActionListener((v, actionId, event) -> {
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    if (!completed[0]) {
+                        completed[0] = true;
+                        NativeBridge.onNativeTextInputResult(requestId, true, edit.getText().toString());
+                    }
+                    dialog.dismiss();
+                    return true;
                 }
-                dialog.dismiss();
-                return true;
-            }
-            return false;
-        });
+                return false;
+            });
+        }
 
         if (dialog.getWindow() != null) {
             dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
@@ -1188,6 +1210,7 @@ public final class QtObsActivity extends QtActivity {
         NdiDiscoveryManager.stopDiscovery();
         BrowserSourceManager.destroyAll();
         CustomBrowserDockManager.destroyAll();
+        ExternalDisplayManager.stop(this);
         ThermalController.stop();
         if (mActiveTextDialog != null && mActiveTextDialog.isShowing()) {
             mActiveTextDialog.dismiss();
@@ -1198,6 +1221,97 @@ public final class QtObsActivity extends QtActivity {
         super.onDestroy();
         if (finishing) {
             stopService(new Intent(this, CaptureService.class));
+        }
+    }
+
+    public static String listExternalDisplaysJson() {
+        QtObsActivity act = sInstance;
+        return ExternalDisplayManager.listExternalDisplaysJson(act);
+    }
+
+    public static boolean startExternalDisplay(int displayId) {
+        QtObsActivity act = sInstance;
+        return act != null && ExternalDisplayManager.start(act, displayId);
+    }
+
+    public static void stopExternalDisplay() {
+        ExternalDisplayManager.stop(sInstance);
+    }
+
+    public static void openWirelessDisplaySettings() {
+        ExternalDisplayManager.openWirelessDisplaySettings(sInstance);
+    }
+
+    public static boolean zipDirectory(String srcDirPath, String zipFilePath) {
+        if (srcDirPath == null || zipFilePath == null) return false;
+        java.io.File srcDir = new java.io.File(srcDirPath);
+        if (!srcDir.isDirectory()) return false;
+        java.io.File zipFile = new java.io.File(zipFilePath);
+        if (zipFile.getParentFile() != null) zipFile.getParentFile().mkdirs();
+        try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(
+                new java.io.BufferedOutputStream(new java.io.FileOutputStream(zipFile)))) {
+            zipRecursive(srcDir, srcDir, zos);
+            return true;
+        } catch (Throwable t) {
+            Log.e("QtObsActivity", "zipDirectory failed: " + t.getMessage());
+            return false;
+        }
+    }
+
+    private static void zipRecursive(java.io.File root, java.io.File current, java.util.zip.ZipOutputStream zos)
+            throws java.io.IOException {
+        java.io.File[] children = current.listFiles();
+        if (children == null) return;
+        byte[] buf = new byte[16384];
+        String rootPath = root.getCanonicalPath();
+        for (java.io.File f : children) {
+            String rel = f.getCanonicalPath().substring(rootPath.length() + 1).replace('\\', '/');
+            if (f.isDirectory()) {
+                zos.putNextEntry(new java.util.zip.ZipEntry(rel + "/"));
+                zos.closeEntry();
+                zipRecursive(root, f, zos);
+            } else {
+                zos.putNextEntry(new java.util.zip.ZipEntry(rel));
+                try (java.io.BufferedInputStream in = new java.io.BufferedInputStream(new java.io.FileInputStream(f))) {
+                    int n;
+                    while ((n = in.read(buf)) > 0) zos.write(buf, 0, n);
+                }
+                zos.closeEntry();
+            }
+        }
+    }
+
+    public static boolean unzipToDirectory(String zipFilePath, String dstDirPath) {
+        if (zipFilePath == null || dstDirPath == null) return false;
+        java.io.File dstDir = new java.io.File(dstDirPath);
+        dstDir.mkdirs();
+        try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(
+                new java.io.BufferedInputStream(new java.io.FileInputStream(zipFilePath)))) {
+            String dstCanonical = dstDir.getCanonicalPath() + java.io.File.separator;
+            byte[] buf = new byte[16384];
+            java.util.zip.ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                java.io.File outFile = new java.io.File(dstDir, entry.getName());
+                String outCanonical = outFile.getCanonicalPath();
+                if (!outCanonical.startsWith(dstCanonical) && !outCanonical.equals(dstDir.getCanonicalPath())) {
+                    throw new SecurityException("Zip slip entry rejected: " + entry.getName());
+                }
+                if (entry.isDirectory()) {
+                    outFile.mkdirs();
+                } else {
+                    if (outFile.getParentFile() != null) outFile.getParentFile().mkdirs();
+                    try (java.io.BufferedOutputStream out = new java.io.BufferedOutputStream(
+                            new java.io.FileOutputStream(outFile))) {
+                        int n;
+                        while ((n = zis.read(buf)) > 0) out.write(buf, 0, n);
+                    }
+                }
+                zis.closeEntry();
+            }
+            return true;
+        } catch (Throwable t) {
+            Log.e("QtObsActivity", "unzipToDirectory failed: " + t.getMessage());
+            return false;
         }
     }
 }

@@ -1,6 +1,7 @@
 #include "android-session-gate.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <jni.h>
+#include <android/native_window_jni.h>
 #include <obs.h>
 #include <obs-module.h>
 #include "android-sources.h"
@@ -15,6 +16,7 @@
 #include "android-move-transition.h"
 #include "android-frame-style-filter.h"
 #include "android-bg-removal-filter.h"
+#include "android-vmix-color-filter.h"
 #include <GLES3/gl3.h>
 #include <util/platform-android.h>
 #include <atomic>
@@ -43,6 +45,16 @@ static jmethodID g_list_srt_urls_method = nullptr;
 static jmethodID g_broadcast_keepalive_method = nullptr;
 static jmethodID g_device_health_method = nullptr;
 static jmethodID g_hw_profile_method = nullptr;
+static jmethodID g_zip_dir_method = nullptr;
+static jmethodID g_unzip_dir_method = nullptr;
+static jmethodID g_list_ext_displays_method = nullptr;
+static jmethodID g_start_ext_display_method = nullptr;
+static jmethodID g_stop_ext_display_method = nullptr;
+static jmethodID g_open_wifi_display_method = nullptr;
+
+static std::mutex g_ext_display_mutex;
+static obs_display_t *g_ext_display = nullptr;
+static ANativeWindow *g_ext_window = nullptr;
 
 namespace { void detach_program_snapshot_now(); }
 
@@ -446,6 +458,18 @@ Java_org_obsandroid_port_NativeBridge_registerActivityHost(JNIEnv *env, jclass, 
         env->ExceptionClear();
         g_hw_profile_method = nullptr;
     }
+    g_zip_dir_method = env->GetStaticMethodID(g_activity_class, "zipDirectory", "(Ljava/lang/String;Ljava/lang/String;)Z");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_zip_dir_method = nullptr; }
+    g_unzip_dir_method = env->GetStaticMethodID(g_activity_class, "unzipToDirectory", "(Ljava/lang/String;Ljava/lang/String;)Z");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_unzip_dir_method = nullptr; }
+    g_list_ext_displays_method = env->GetStaticMethodID(g_activity_class, "listExternalDisplaysJson", "()Ljava/lang/String;");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_list_ext_displays_method = nullptr; }
+    g_start_ext_display_method = env->GetStaticMethodID(g_activity_class, "startExternalDisplay", "(I)Z");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_start_ext_display_method = nullptr; }
+    g_stop_ext_display_method = env->GetStaticMethodID(g_activity_class, "stopExternalDisplay", "()V");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_stop_ext_display_method = nullptr; }
+    g_open_wifi_display_method = env->GetStaticMethodID(g_activity_class, "openWirelessDisplaySettings", "()V");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_open_wifi_display_method = nullptr; }
 }
 
 extern "C" __attribute__((visibility("default"))) void obs_android_set_broadcast_keepalive(bool active)
@@ -494,6 +518,196 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_get_device_he
     }
     if (detach) jvm->DetachCurrentThread();
     return ok;
+}
+
+static bool call_activity_two_string_bool(jmethodID mid, const char *a, const char *b)
+{
+    JavaVM *jvm = nullptr; jclass cls = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class;
+    }
+    if (!jvm || !cls || !mid || !a || !b) return false;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return false; detach = true; }
+    else if (st != JNI_OK) return false;
+    jstring ja = env->NewStringUTF(a);
+    jstring jb = env->NewStringUTF(b);
+    jboolean res = env->CallStaticBooleanMethod(cls, mid, ja, jb);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); res = JNI_FALSE; }
+    env->DeleteLocalRef(ja);
+    env->DeleteLocalRef(jb);
+    if (detach) jvm->DetachCurrentThread();
+    return res == JNI_TRUE;
+}
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_zip_directory(const char *src_dir, const char *zip_path)
+{
+    jmethodID mid = nullptr;
+    { std::lock_guard<std::mutex> lock(g_text_host_mutex); mid = g_zip_dir_method; }
+    return call_activity_two_string_bool(mid, src_dir, zip_path);
+}
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_unzip_to_directory(const char *zip_path, const char *dst_dir)
+{
+    jmethodID mid = nullptr;
+    { std::lock_guard<std::mutex> lock(g_text_host_mutex); mid = g_unzip_dir_method; }
+    return call_activity_two_string_bool(mid, zip_path, dst_dir);
+}
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_list_external_displays(char *out_buf, size_t out_cap)
+{
+    if (!out_buf || out_cap == 0) return false;
+    out_buf[0] = '\0';
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class; mid = g_list_ext_displays_method;
+    }
+    if (!jvm || !cls || !mid) return false;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return false; detach = true; }
+    else if (st != JNI_OK) return false;
+    jstring jres = static_cast<jstring>(env->CallStaticObjectMethod(cls, mid));
+    bool ok = false;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    } else if (jres) {
+        const char *utf = env->GetStringUTFChars(jres, nullptr);
+        if (utf) {
+            std::snprintf(out_buf, out_cap, "%s", utf);
+            env->ReleaseStringUTFChars(jres, utf);
+            ok = true;
+        }
+        env->DeleteLocalRef(jres);
+    }
+    if (detach) jvm->DetachCurrentThread();
+    return ok;
+}
+
+extern "C" __attribute__((visibility("default"))) bool obs_android_start_external_display(int display_id)
+{
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class; mid = g_start_ext_display_method;
+    }
+    if (!jvm || !cls || !mid) return false;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return false; detach = true; }
+    else if (st != JNI_OK) return false;
+    jboolean res = env->CallStaticBooleanMethod(cls, mid, jint(display_id));
+    if (env->ExceptionCheck()) { env->ExceptionClear(); res = JNI_FALSE; }
+    if (detach) jvm->DetachCurrentThread();
+    return res == JNI_TRUE;
+}
+
+extern "C" __attribute__((visibility("default"))) void obs_android_stop_external_display()
+{
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class; mid = g_stop_ext_display_method;
+    }
+    if (!jvm || !cls || !mid) return;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return; detach = true; }
+    else if (st != JNI_OK) return;
+    env->CallStaticVoidMethod(cls, mid);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (detach) jvm->DetachCurrentThread();
+}
+
+extern "C" __attribute__((visibility("default"))) void obs_android_open_wireless_display_settings()
+{
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_text_host_mutex);
+        jvm = g_activity_jvm; cls = g_activity_class; mid = g_open_wifi_display_method;
+    }
+    if (!jvm || !cls || !mid) return;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return; detach = true; }
+    else if (st != JNI_OK) return;
+    env->CallStaticVoidMethod(cls, mid);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (detach) jvm->DetachCurrentThread();
+}
+
+static void draw_external_program(void *, uint32_t cx, uint32_t cy)
+{
+    obs_video_info ovi{};
+    if (!obs_get_video_info(&ovi) || !ovi.base_width || !ovi.base_height || !cx || !cy)
+        return;
+    const float srcAspect = float(ovi.base_width) / float(ovi.base_height);
+    const float dstAspect = float(cx) / float(cy);
+    int vx = 0, vy = 0, vw = int(cx), vh = int(cy);
+    if (srcAspect > dstAspect) {
+        vh = int(float(cx) / srcAspect);
+        vy = (int(cy) - vh) / 2;
+    } else {
+        vw = int(float(cy) * srcAspect);
+        vx = (int(cx) - vw) / 2;
+    }
+    gs_viewport_push();
+    gs_projection_push();
+    gs_set_viewport(vx, vy, std::max(1, vw), std::max(1, vh));
+    gs_ortho(0.0f, float(ovi.base_width), 0.0f, float(ovi.base_height), -100.0f, 100.0f);
+    obs_render_main_texture();
+    gs_projection_pop();
+    gs_viewport_pop();
+}
+
+static void detach_external_display_locked()
+{
+    if (g_ext_display) {
+        obs_display_remove_draw_callback(g_ext_display, draw_external_program, nullptr);
+        obs_display_destroy(g_ext_display);
+        g_ext_display = nullptr;
+    }
+    if (g_ext_window) {
+        ANativeWindow_release(g_ext_window);
+        g_ext_window = nullptr;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_obsandroid_port_NativeBridge_attachExternalDisplay(JNIEnv *env, jclass, jobject surface, jint width, jint height)
+{
+    std::lock_guard<std::mutex> lock(g_ext_display_mutex);
+    if (!obs_initialized() || !surface || width <= 0 || height <= 0)
+        return JNI_FALSE;
+    detach_external_display_locked();
+    ANativeWindow *win = ANativeWindow_fromSurface(env, surface);
+    if (!win)
+        return JNI_FALSE;
+    gs_init_data info{};
+    info.window.android_window = win;
+    info.cx = uint32_t(width);
+    info.cy = uint32_t(height);
+    info.format = GS_BGRA;
+    info.zsformat = GS_ZS_NONE;
+    obs_display_t *disp = obs_display_create(&info, 0x000000);
+    if (!disp) {
+        ANativeWindow_release(win);
+        return JNI_FALSE;
+    }
+    obs_display_add_draw_callback(disp, draw_external_program, nullptr);
+    g_ext_window = win;
+    g_ext_display = disp;
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_obsandroid_port_NativeBridge_detachExternalDisplay(JNIEnv *, jclass)
+{
+    std::lock_guard<std::mutex> lock(g_ext_display_mutex);
+    detach_external_display_locked();
 }
 
 extern "C" bool obs_android_select_video_codec(const char *request, char *result, size_t capacity)
@@ -755,6 +969,7 @@ bool obs_module_load(void)
     android_move_transition_register();
     android_frame_style_filter_register();
     android_bg_removal_filter_register();
+    android_vmix_color_filter_register();
     return true;
 }
 void obs_module_unload(void)

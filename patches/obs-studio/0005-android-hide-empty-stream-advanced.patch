@@ -1,0 +1,44 @@
+diff --git a/frontend/settings/OBSBasicSettings_Stream.cpp b/frontend/settings/OBSBasicSettings_Stream.cpp
+--- a/frontend/settings/OBSBasicSettings_Stream.cpp
++++ b/frontend/settings/OBSBasicSettings_Stream.cpp
+@@ -44,6 +44,16 @@ enum class Section : int {
+ 	StreamKey,
+ };
+ 
++static void UpdateServiceAdvancedOptionsVisibility(Ui::OBSBasicSettings *ui)
++{
++	const bool hasVisibleOption = !ui->twitchAddonDropdown->isHidden() ||
++				      !ui->bandwidthTestEnable->isHidden() ||
++				      !ui->ignoreRecommended->isHidden() ||
++				      (!ui->enforceSettingsLabel->isHidden() &&
++				       !ui->enforceSettingsLabel->text().isEmpty());
++	ui->serviceAdvancedOptionsGroupBox->setVisible(hasVisibleOption);
++}
++
+ bool OBSBasicSettings::IsCustomService() const
+ {
+ 	return ui->service->currentData().toInt() == (int)ListOpt::Custom;
+@@ -850,6 +860,7 @@ void OBSBasicSettings::OnOAuthStreamKeyConnected()
+ 		} else {
+ 			ui->bandwidthTestEnable->setChecked(false);
+ 		}
++		UpdateServiceAdvancedOptionsVisibility(ui.get());
+ #ifdef YOUTUBE_ENABLED
+ 		if (IsYouTubeService(a->service())) {
+ 			ui->key->clear();
+@@ -934,6 +945,7 @@ void OBSBasicSettings::on_disconnectAccount_clicked()
+ 	ui->bandwidthTestEnable->setVisible(false);
+ 	ui->twitchAddonDropdown->setVisible(false);
+ 	ui->twitchAddonLabel->setVisible(false);
++	UpdateServiceAdvancedOptionsVisibility(ui.get());
+ 	ui->key->setText("");
+ 
+ 	ui->connectedAccountLabel->setVisible(false);
+@@ -1136,6 +1148,7 @@ void OBSBasicSettings::UpdateServiceRecommendations()
+ 	}
+ #endif
+ 	ui->enforceSettingsLabel->setText(text);
++	UpdateServiceAdvancedOptionsVisibility(ui.get());
+ }
+ 
+ void OBSBasicSettings::DisplayEnforceWarning(bool checked)

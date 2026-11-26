@@ -1,0 +1,824 @@
+diff --git a/frontend/components/Multiview.cpp b/frontend/components/Multiview.cpp
+index 9bac0c7..cb3f5fe 100644
+--- a/frontend/components/Multiview.cpp
++++ b/frontend/components/Multiview.cpp
+@@ -5,6 +5,14 @@
+ 
+ #include <obs-frontend-api.h>
+ 
++#ifdef __ANDROID__
++#include <QColor>
++#include <QFont>
++#include <QFontMetrics>
++#include <QImage>
++#include <QPainter>
++#endif
++
+ Multiview::Multiview()
+ {
+ 	InitSafeAreas(&actionSafeMargin, &graphicsSafeMargin, &fourByThreeSafeMargin, &leftLine, &topLine, &rightLine);
+@@ -20,6 +28,9 @@ Multiview::~Multiview()
+ 	}
+ 
+ 	obs_enter_graphics();
++#ifdef __ANDROID__
++	DestroyAndroidLabels();
++#endif
+ 	gs_vertexbuffer_destroy(actionSafeMargin);
+ 	gs_vertexbuffer_destroy(graphicsSafeMargin);
+ 	gs_vertexbuffer_destroy(fourByThreeSafeMargin);
+@@ -29,6 +40,93 @@ Multiview::~Multiview()
+ 	obs_leave_graphics();
+ }
+ 
++#ifdef __ANDROID__
++void Multiview::DestroyAndroidLabels()
++{
++	for (auto &lbl : androidLabels) {
++		if (lbl.tex) {
++			gs_texture_destroy(lbl.tex);
++			lbl.tex = nullptr;
++		}
++	}
++	androidLabels.clear();
++}
++
++static void CreateAndroidLabelTex(const char *name, size_t h, gs_texture_t **outTex, uint32_t *outW, uint32_t *outH)
++{
++	*outTex = nullptr;
++	*outW = 0;
++	*outH = 0;
++	QString text = QString::fromUtf8(name ? name : "").trimmed();
++	if (text.isEmpty())
++		return;
++	int pxSize = std::clamp(int(h / 9.5), 18, 64);
++	QFont font(QStringLiteral("sans-serif"));
++	font.setPixelSize(pxSize);
++	font.setBold(true);
++	QFontMetrics fm(font);
++	int padX = std::max(14, pxSize / 2);
++	int padY = std::max(6, pxSize / 4);
++	int textW = fm.horizontalAdvance(text);
++	int textH = fm.height();
++	int w = std::min(1200, textW + padX * 2);
++	int hh = std::max(24, textH + padY * 2);
++
++	QImage img(w, hh, QImage::Format_RGBA8888);
++	img.fill(Qt::transparent);
++	QPainter p(&img);
++	p.setRenderHint(QPainter::Antialiasing, true);
++	p.setRenderHint(QPainter::TextAntialiasing, true);
++	p.setPen(QPen(QColor(255, 255, 255, 70), 2));
++	p.setBrush(QColor(15, 23, 42, 205));
++	p.drawRoundedRect(QRectF(1, 1, w - 2, hh - 2), 8, 8);
++	p.setFont(font);
++	p.setPen(Qt::white);
++	p.drawText(QRect(padX, 0, w - padX * 2, hh), Qt::AlignCenter | Qt::TextSingleLine,
++		   fm.elidedText(text, Qt::ElideRight, w - padX * 2));
++	p.end();
++
++	const uint8_t *bits = img.constBits();
++	*outTex = gs_texture_create(uint32_t(w), uint32_t(hh), GS_RGBA, 1, &bits, 0);
++	if (*outTex) {
++		*outW = uint32_t(w);
++		*outH = uint32_t(hh);
++	}
++}
++
++void Multiview::DrawAndroidLabel(size_t idx, float tileX, float tileY, float tileW, float tileH, float scaleX,
++				 float scaleY)
++{
++	if (idx >= androidLabels.size() || !androidLabels[idx].tex)
++		return;
++	const auto &lbl = androidLabels[idx];
++	float drawW = float(lbl.cx) * scaleX;
++	float drawH = float(lbl.cy) * scaleY;
++	if (drawW > tileW - thicknessx2 * 2) {
++		float fit = (tileW - thicknessx2 * 2) / std::max(1.0f, drawW);
++		drawW *= fit;
++		drawH *= fit;
++	}
++	float lx = tileX + (tileW - drawW) * 0.5f;
++	float ly = tileY + tileH - drawH - thickness * 2.5f;
++
++	gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
++	gs_eparam_t *image = gs_effect_get_param_by_name(def, "image");
++	gs_blend_state_push();
++	gs_enable_blending(true);
++	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
++	gs_matrix_push();
++	gs_matrix_translate3f(lx, ly, 0.0f);
++	gs_matrix_scale3f(drawW / float(lbl.cx), drawH / float(lbl.cy), 1.0f);
++	gs_effect_set_texture(image, lbl.tex);
++	while (gs_effect_loop(def, "Draw")) {
++		gs_draw_sprite(lbl.tex, 0, lbl.cx, lbl.cy);
++	}
++	gs_matrix_pop();
++	gs_blend_state_pop();
++}
++#endif
++
+ static OBSSource CreateLabel(const char *name, size_t h)
+ {
+ 	OBSDataAutoRelease settings = obs_data_create();
+@@ -183,6 +281,25 @@ void Multiview::Update(MultiviewLayout multiviewLayout, bool drawLabel, bool dra
+ 
+ 	multiviewScenes = std::move(updatedScenes);
+ 	multiviewLabels = std::move(updatedLabels);
++
++#ifdef __ANDROID__
++	std::vector<std::pair<std::string, size_t>> labelSpecs;
++	labelSpecs.emplace_back(Str("StudioMode.Preview"), h / 2);
++	labelSpecs.emplace_back(Str("StudioMode.Program"), h / 2);
++	for (OBSWeakSource &weakSrc : multiviewScenes) {
++		OBSSource src = OBSGetStrongRef(weakSrc);
++		labelSpecs.emplace_back(src ? obs_source_get_name(src) : "", h / 2);
++	}
++	obs_enter_graphics();
++	DestroyAndroidLabels();
++	androidLabels.reserve(labelSpecs.size());
++	for (const auto &spec : labelSpecs) {
++		AndroidLabelTex item{};
++		CreateAndroidLabelTex(spec.first.c_str(), spec.second, &item.tex, &item.cx, &item.cy);
++		androidLabels.push_back(item);
++	}
++	obs_leave_graphics();
++#endif
+ }
+ 
+ static inline uint32_t labelOffset(MultiviewLayout multiviewLayout, obs_source_t *label, uint32_t cx)
+@@ -438,6 +555,9 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
+ 			continue;
+ 		}
+ 
++#ifdef __ANDROID__
++		DrawAndroidLabel(i + 2, sourceX, sourceY, scenesCX, scenesCY, ppiScaleX, ppiScaleY);
++#else
+ 		obs_source *label = multiviewLabels[i + 2];
+ 		if (!label) {
+ 			continue;
+@@ -454,6 +574,7 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
+ 		gs_matrix_translate3f(0, thickness, 0.0f);
+ 		obs_source_video_render(label);
+ 		gs_matrix_pop();
++#endif
+ 	}
+ 
+ 	if (multiviewLayout == MultiviewLayout::SCENES_ONLY_4_SCENES ||
+@@ -500,7 +621,12 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
+ 	/* ----------- */
+ 
+ 	// Draw the Label
++#ifdef __ANDROID__
+ 	if (drawLabel) {
++		DrawAndroidLabel(0, sourceX, sourceY, ppiCX, ppiCY, ppiScaleX, ppiScaleY);
++	}
++#else
++	if (drawLabel && previewLabel) {
+ 		gs_matrix_push();
+ 		gs_matrix_translate3f(
+ 			labelX, labelY - (obs_source_get_height(previewLabel) * ppiScaleY) - (thickness * 3), 0.0f);
+@@ -511,6 +637,7 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
+ 		obs_source_video_render(previewLabel);
+ 		gs_matrix_pop();
+ 	}
++#endif
+ 
+ 	/* ----------------------------- */
+ 	/* draw program                  */
+@@ -533,7 +660,12 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
+ 	/* ----------- */
+ 
+ 	// Draw the Label
++#ifdef __ANDROID__
+ 	if (drawLabel) {
++		DrawAndroidLabel(1, sourceX, sourceY, ppiCX, ppiCY, ppiScaleX, ppiScaleY);
++	}
++#else
++	if (drawLabel && programLabel) {
+ 		gs_matrix_push();
+ 		gs_matrix_translate3f(
+ 			labelX, labelY - (obs_source_get_height(programLabel) * ppiScaleY) - (thickness * 3), 0.0f);
+@@ -544,6 +676,7 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
+ 		obs_source_video_render(programLabel);
+ 		gs_matrix_pop();
+ 	}
++#endif
+ 
+ 	// Region for future usage with additional info.
+ 	if (multiviewLayout == MultiviewLayout::HORIZONTAL_TOP_24_SCENES) {
+@@ -556,15 +689,19 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
+ 	endRegion();
+ }
+ 
+-OBSSource Multiview::GetSourceByPosition(int x, int y)
++OBSSource Multiview::GetSourceByPosition(int x, int y, int widgetW, int widgetH)
+ {
+ 	int pos = -1;
+-	QWidget *rec = QApplication::activeWindow();
+-	if (!rec) {
+-		return nullptr;
++	int cx = widgetW;
++	int cy = widgetH;
++	if (cx <= 0 || cy <= 0) {
++		QWidget *rec = QApplication::activeWindow();
++		if (!rec) {
++			return nullptr;
++		}
++		cx = rec->width();
++		cy = rec->height();
+ 	}
+-	int cx = rec->width();
+-	int cy = rec->height();
+ 	int minX = 0;
+ 	int minY = 0;
+ 	int maxX = cx;
+diff --git a/frontend/components/Multiview.hpp b/frontend/components/Multiview.hpp
+index c7382bd..c8c3fae 100644
+--- a/frontend/components/Multiview.hpp
++++ b/frontend/components/Multiview.hpp
+@@ -23,9 +23,20 @@ public:
+ 	~Multiview();
+ 	void Update(MultiviewLayout multiviewLayout, bool drawLabel, bool drawSafeArea);
+ 	void Render(uint32_t cx, uint32_t cy);
+-	OBSSource GetSourceByPosition(int x, int y);
++	OBSSource GetSourceByPosition(int x, int y, int widgetW = -1, int widgetH = -1);
+ 
+ private:
++#ifdef __ANDROID__
++	struct AndroidLabelTex {
++		gs_texture_t *tex = nullptr;
++		uint32_t cx = 0;
++		uint32_t cy = 0;
++	};
++	std::vector<AndroidLabelTex> androidLabels;
++	void DestroyAndroidLabels();
++	void DrawAndroidLabel(size_t idx, float tileX, float tileY, float tileW, float tileH, float scaleX,
++			      float scaleY);
++#endif
+ 	bool drawLabel, drawSafeArea;
+ 	MultiviewLayout multiviewLayout;
+ 	size_t maxSrcs;
+diff --git a/frontend/dialogs/NameDialog.cpp b/frontend/dialogs/NameDialog.cpp
+index a3ed395..5cd7194 100644
+--- a/frontend/dialogs/NameDialog.cpp
++++ b/frontend/dialogs/NameDialog.cpp
+@@ -24,6 +24,12 @@
+ #include <QLabel>
+ #include <QLineEdit>
+ #include <QVBoxLayout>
++#ifdef __ANDROID__
++#include <QApplication>
++#include <QEvent>
++#include <QHBoxLayout>
++#include <QPushButton>
++#endif
+ 
+ #include "moc_NameDialog.cpp"
+ 
+@@ -33,8 +39,13 @@ NameDialog::NameDialog(QWidget *parent) : QDialog(parent)
+ 	setModal(true);
+ 	setWindowModality(Qt::WindowModality::WindowModal);
+ 	setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
++#ifdef __ANDROID__
++	setMinimumWidth(320);
++	resize(460, 170);
++#else
+ 	setFixedWidth(555);
+ 	setMinimumHeight(100);
++#endif
+ 	QVBoxLayout *layout = new QVBoxLayout;
+ 	setLayout(layout);
+ 
+@@ -43,12 +54,34 @@ NameDialog::NameDialog(QWidget *parent) : QDialog(parent)
+ 	label->setText("Set Text");
+ 
+ 	userText = new QLineEdit(this);
++#ifdef __ANDROID__
++	userText->setMinimumHeight(42);
++	QHBoxLayout *inputRow = new QHBoxLayout;
++	inputRow->setContentsMargins(0, 0, 0, 0);
++	inputRow->setSpacing(8);
++	inputRow->addWidget(userText, 1);
++	QPushButton *kbBtn = new QPushButton(QStringLiteral("Teclado"), this);
++	kbBtn->setMinimumHeight(42);
++	connect(kbBtn, &QPushButton::clicked, this, [this]() {
++		QEvent ev(QEvent::RequestSoftwareInputPanel);
++		QApplication::sendEvent(userText, &ev);
++	});
++	inputRow->addWidget(kbBtn);
++	layout->addLayout(inputRow);
++#else
+ 	layout->addWidget(userText);
++#endif
+ 
+ 	checkbox = new QCheckBox(this);
+ 	layout->addWidget(checkbox);
+ 
+ 	QDialogButtonBox *buttonbox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
++#ifdef __ANDROID__
++	for (QAbstractButton *b : buttonbox->buttons()) {
++		b->setMinimumHeight(40);
++		b->setMinimumWidth(96);
++	}
++#endif
+ 	layout->addWidget(buttonbox);
+ 	buttonbox->setCenterButtons(true);
+ 
+diff --git a/frontend/utility/platform-android.cpp b/frontend/utility/platform-android.cpp
+index a8590d2..69df9c9 100644
+--- a/frontend/utility/platform-android.cpp
++++ b/frontend/utility/platform-android.cpp
+@@ -21,12 +21,16 @@
+ #include <QInputMethod>
+ #include <QKeyEvent>
+ #include <QLineEdit>
++#include <QDoubleSpinBox>
+ #include <QMenu>
+ #include <QMouseEvent>
++#include <QPlainTextEdit>
+ #include <QPointer>
+ #include <QScreen>
+ #include <QScroller>
+ #include <QScrollerProperties>
++#include <QSpinBox>
++#include <QTextEdit>
+ #include <QThread>
+ #include <QTimer>
+ #include <QWidget>
+@@ -50,6 +54,10 @@ using RequestTextInputFn = bool (*)(int64_t, const char *, const char *, bool,
+ RequestTextInputFn g_requestTextInput = nullptr;
+ std::atomic<int64_t> g_textReqSeq{0};
+ QPointer<QLineEdit> g_activeLineEdit;
++QPointer<QPlainTextEdit> g_activePlainText;
++QPointer<QTextEdit> g_activeTextEdit;
++QPointer<QSpinBox> g_activeSpinBox;
++QPointer<QDoubleSpinBox> g_activeDoubleSpinBox;
+ int64_t g_activeReqId = 0;
+ bool g_textDialogOpen = false;
+ 
+@@ -84,12 +92,38 @@ void OnNativeTextInputCallback(int64_t reqId, bool accepted, const char *textUtf
+ 			if (reqId != g_activeReqId)
+ 				return;
+ 			g_textDialogOpen = false;
+-			if (accepted && g_activeLineEdit) {
+-				g_activeLineEdit->setText(value);
+-				emit g_activeLineEdit->textEdited(value);
+-				emit g_activeLineEdit->editingFinished();
++			if (accepted) {
++				if (g_activeSpinBox) {
++					bool ok = false;
++					int iv = value.trimmed().toInt(&ok);
++					if (ok) {
++						g_activeSpinBox->setValue(iv);
++						emit g_activeSpinBox->editingFinished();
++					}
++				} else if (g_activeDoubleSpinBox) {
++					bool ok = false;
++					QString normalized = value.trimmed();
++					normalized.replace(',', '.');
++					double dv = normalized.toDouble(&ok);
++					if (ok) {
++						g_activeDoubleSpinBox->setValue(dv);
++						emit g_activeDoubleSpinBox->editingFinished();
++					}
++				} else if (g_activeLineEdit) {
++					g_activeLineEdit->setText(value);
++					emit g_activeLineEdit->textEdited(value);
++					emit g_activeLineEdit->editingFinished();
++				} else if (g_activePlainText) {
++					g_activePlainText->setPlainText(value);
++				} else if (g_activeTextEdit) {
++					g_activeTextEdit->setPlainText(value);
++				}
+ 			}
+ 			g_activeLineEdit = nullptr;
++			g_activePlainText = nullptr;
++			g_activeTextEdit = nullptr;
++			g_activeSpinBox = nullptr;
++			g_activeDoubleSpinBox = nullptr;
+ 		},
+ 		Qt::QueuedConnection);
+ }
+@@ -104,6 +138,18 @@ class AndroidTouchHelper : public QObject {
+ 	{
+ 		if (!dialog || !dialog->isVisible())
+ 			return;
++		if (dialog->property("androidFullScreenLock").toBool()) {
++			QScreen *screen = dialog->screen();
++			if (!screen)
++				screen = QGuiApplication::primaryScreen();
++			if (screen) {
++				const QRect full = screen->geometry();
++				dialog->setMinimumSize(full.size());
++				dialog->setMaximumSize(full.size());
++				dialog->setGeometry(full);
++			}
++			return;
++		}
+ 		QScreen *screen = dialog->screen();
+ 		if (!screen)
+ 			screen = QGuiApplication::primaryScreen();
+@@ -152,41 +198,154 @@ class AndroidTouchHelper : public QObject {
+ 		scroller->setScrollerProperties(props);
+ 	}
+ 
++	static bool ResetStaleTextGuard()
++	{
++		if (g_textDialogOpen && !g_activeLineEdit && !g_activePlainText && !g_activeTextEdit &&
++		    !g_activeSpinBox && !g_activeDoubleSpinBox) {
++			g_textDialogOpen = false;
++		}
++		return !g_textDialogOpen;
++	}
++
++	static QString ResolveInputTitle(QWidget *w, const QString &fallback)
++	{
++		if (!w)
++			return fallback;
++		QString title = w->accessibleName();
++		if (title.isEmpty()) {
++			if (auto *le = qobject_cast<QLineEdit *>(w))
++				title = le->placeholderText();
++			else if (auto *pte = qobject_cast<QPlainTextEdit *>(w))
++				title = pte->placeholderText();
++			else if (auto *te = qobject_cast<QTextEdit *>(w))
++				title = te->placeholderText();
++		}
++		if (title.isEmpty() && w->window())
++			title = w->window()->windowTitle();
++		if (title.isEmpty())
++			title = fallback;
++		return title;
++	}
++
+ 	static bool LaunchNativeEditorForLineEdit(QLineEdit *le)
+ 	{
+-		if (!le || !le->isEnabled() || le->isReadOnly() || !g_requestTextInput || g_textDialogOpen)
+-			return false;
+-		if (qobject_cast<QAbstractSpinBox *>(le->parentWidget()))
++		if (!le || !le->isEnabled() || le->isReadOnly() || !g_requestTextInput || !ResetStaleTextGuard())
+ 			return false;
+ 
+ 		if (auto *im = QGuiApplication::inputMethod())
+ 			im->hide();
+ 
+-		QString title = le->accessibleName();
+-		if (title.isEmpty())
+-			title = le->placeholderText();
+-		if (title.isEmpty())
+-			title = le->objectName();
+-		if (title.isEmpty())
+-			title = QStringLiteral("Editar texto");
++		QSpinBox *sb = qobject_cast<QSpinBox *>(le->parentWidget());
++		QDoubleSpinBox *dsb = qobject_cast<QDoubleSpinBox *>(le->parentWidget());
++		QString title = ResolveInputTitle(sb ? static_cast<QWidget *>(sb)
++						     : (dsb ? static_cast<QWidget *>(dsb) : static_cast<QWidget *>(le)),
++						  QStringLiteral("Editar texto"));
++		QString initText = sb ? QString::number(sb->value())
++				      : (dsb ? QString::number(dsb->value()) : le->text());
++		bool isPassword = (!sb && !dsb && le->echoMode() != QLineEdit::Normal);
+ 
+ 		int64_t reqId = ++g_textReqSeq;
+ 		g_activeReqId = reqId;
+-		g_activeLineEdit = le;
++		g_activeLineEdit = (!sb && !dsb) ? le : nullptr;
++		g_activeSpinBox = sb;
++		g_activeDoubleSpinBox = dsb;
++		g_activePlainText = nullptr;
++		g_activeTextEdit = nullptr;
+ 		g_textDialogOpen = true;
+ 
+ 		QByteArray titleUtf8 = title.toUtf8();
+-		QByteArray initUtf8 = le->text().toUtf8();
+-		bool isPassword = (le->echoMode() != QLineEdit::Normal);
++		QByteArray initUtf8 = initText.toUtf8();
+ 		if (!g_requestTextInput(reqId, titleUtf8.constData(), initUtf8.constData(), isPassword,
+ 					&OnNativeTextInputCallback)) {
+ 			g_textDialogOpen = false;
+ 			g_activeLineEdit = nullptr;
++			g_activeSpinBox = nullptr;
++			g_activeDoubleSpinBox = nullptr;
+ 			return false;
+ 		}
+ 		return true;
+ 	}
+ 
++	static bool LaunchNativeEditorForPlainText(QPlainTextEdit *pte)
++	{
++		if (!pte || !pte->isEnabled() || pte->isReadOnly() || !g_requestTextInput || !ResetStaleTextGuard())
++			return false;
++
++		if (auto *im = QGuiApplication::inputMethod())
++			im->hide();
++
++		QString title = QStringLiteral("__ML__") + ResolveInputTitle(pte, QStringLiteral("Editar texto"));
++		int64_t reqId = ++g_textReqSeq;
++		g_activeReqId = reqId;
++		g_activeLineEdit = nullptr;
++		g_activeSpinBox = nullptr;
++		g_activeDoubleSpinBox = nullptr;
++		g_activePlainText = pte;
++		g_activeTextEdit = nullptr;
++		g_textDialogOpen = true;
++
++		QByteArray titleUtf8 = title.toUtf8();
++		QByteArray initUtf8 = pte->toPlainText().toUtf8();
++		if (!g_requestTextInput(reqId, titleUtf8.constData(), initUtf8.constData(), false,
++					&OnNativeTextInputCallback)) {
++			g_textDialogOpen = false;
++			g_activePlainText = nullptr;
++			return false;
++		}
++		return true;
++	}
++
++	static bool LaunchNativeEditorForTextEdit(QTextEdit *te)
++	{
++		if (!te || !te->isEnabled() || te->isReadOnly() || !g_requestTextInput || !ResetStaleTextGuard())
++			return false;
++
++		if (auto *im = QGuiApplication::inputMethod())
++			im->hide();
++
++		QString title = QStringLiteral("__ML__") + ResolveInputTitle(te, QStringLiteral("Editar texto"));
++		int64_t reqId = ++g_textReqSeq;
++		g_activeReqId = reqId;
++		g_activeLineEdit = nullptr;
++		g_activeSpinBox = nullptr;
++		g_activeDoubleSpinBox = nullptr;
++		g_activePlainText = nullptr;
++		g_activeTextEdit = te;
++		g_textDialogOpen = true;
++
++		QByteArray titleUtf8 = title.toUtf8();
++		QByteArray initUtf8 = te->toPlainText().toUtf8();
++		if (!g_requestTextInput(reqId, titleUtf8.constData(), initUtf8.constData(), false,
++					&OnNativeTextInputCallback)) {
++			g_textDialogOpen = false;
++			g_activeTextEdit = nullptr;
++			return false;
++		}
++		return true;
++	}
++
++	static bool TryLaunchNativeTextEditor(QObject *target)
++	{
++		if (auto *le = qobject_cast<QLineEdit *>(target)) {
++			return LaunchNativeEditorForLineEdit(le);
++		}
++		if (auto *pte = qobject_cast<QPlainTextEdit *>(target)) {
++			return LaunchNativeEditorForPlainText(pte);
++		}
++		if (auto *te = qobject_cast<QTextEdit *>(target)) {
++			return LaunchNativeEditorForTextEdit(te);
++		}
++		if (auto *w = qobject_cast<QWidget *>(target)) {
++			if (auto *pte = qobject_cast<QPlainTextEdit *>(w->parentWidget())) {
++				return LaunchNativeEditorForPlainText(pte);
++			}
++			if (auto *te = qobject_cast<QTextEdit *>(w->parentWidget())) {
++				return LaunchNativeEditorForTextEdit(te);
++			}
++		}
++		return false;
++	}
++
+ public:
+ 	static bool HandleAndroidBack()
+ 	{
+@@ -195,21 +354,33 @@ public:
+ 			return true;
+ 		}
+ 		if (auto *modalDialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
++			if (modalDialog->property("androidFullScreenLock").toBool())
++				return true;
+ 			modalDialog->reject();
+ 			return true;
+ 		}
+ 		if (auto *activeDialog = qobject_cast<QDialog *>(QApplication::activeWindow())) {
++			if (activeDialog->property("androidFullScreenLock").toBool())
++				return true;
+ 			activeDialog->reject();
+ 			return true;
+ 		}
+ 		for (QWidget *top : QApplication::topLevelWidgets()) {
+ 			if (auto *dialog = qobject_cast<QDialog *>(top)) {
+ 				if (dialog->isVisible()) {
++					if (dialog->property("androidFullScreenLock").toBool())
++						return true;
+ 					dialog->reject();
+ 					return true;
+ 				}
+ 			}
+ 		}
++		for (QWidget *top : QApplication::topLevelWidgets()) {
++			if (top && top->isVisible() && top->property("isOBSProjectorWindow").toBool()) {
++				top->close();
++				return true;
++			}
++		}
+ 		if (auto *im = QGuiApplication::inputMethod(); im && im->isVisible()) {
+ 			im->hide();
+ 			return true;
+@@ -264,24 +435,28 @@ public:
+ 			break;
+ 		}
+ 		case QEvent::RequestSoftwareInputPanel: {
+-			if (auto *le = qobject_cast<QLineEdit *>(watched)) {
+-				if (LaunchNativeEditorForLineEdit(le)) {
+-					return true;
+-				}
++			if (TryLaunchNativeTextEditor(watched)) {
++				return true;
++			}
++			break;
++		}
++		case QEvent::TouchBegin: {
++			if (TryLaunchNativeTextEditor(watched)) {
++				event->accept();
++				return true;
+ 			}
+ 			break;
+ 		}
+ 		case QEvent::MouseButtonPress: {
+ 			auto *me = static_cast<QMouseEvent *>(event);
+ 			auto *w = qobject_cast<QWidget *>(watched);
+-			if (auto *le = qobject_cast<QLineEdit *>(w)) {
+-				if (me->button() == Qt::LeftButton && LaunchNativeEditorForLineEdit(le)) {
+-					return true;
+-				}
++			if (me->button() == Qt::LeftButton && TryLaunchNativeTextEditor(watched)) {
++				return true;
+ 			}
+ 			if (w && me->button() == Qt::LeftButton && !qobject_cast<QAbstractButton *>(w) &&
+ 			    !qobject_cast<QAbstractSlider *>(w) && !qobject_cast<QComboBox *>(w) &&
+-			    !qobject_cast<QMenu *>(w) && !qobject_cast<QLineEdit *>(w)) {
++			    !qobject_cast<QMenu *>(w) && !qobject_cast<QLineEdit *>(w) &&
++			    !qobject_cast<QPlainTextEdit *>(w) && !qobject_cast<QTextEdit *>(w)) {
+ 				pressTarget = w;
+ 				pressLocalPos = me->position().toPoint();
+ 				pressGlobalPos = me->globalPosition().toPoint();
+diff --git a/frontend/widgets/OBSProjector.cpp b/frontend/widgets/OBSProjector.cpp
+index 7f9afd2..f8d5af5 100644
+--- a/frontend/widgets/OBSProjector.cpp
++++ b/frontend/widgets/OBSProjector.cpp
+@@ -10,6 +10,9 @@
+ 
+ #include <QScreen>
+ #include <QWindow>
++#ifdef __ANDROID__
++#include <QPushButton>
++#endif
+ 
+ #include "moc_OBSProjector.cpp"
+ 
+@@ -35,7 +38,10 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor,
+ 
+ 	// Mark the window as a projector so SetDisplayAffinity
+ 	// can skip it
+-	windowHandle()->setProperty("isOBSProjectorWindow", true);
++	setProperty("isOBSProjectorWindow", true);
++	if (QWindow *wh = windowHandle()) {
++		wh->setProperty("isOBSProjectorWindow", true);
++	}
+ 
+ #if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__)
+ 	// Prevents resizing of projector windows
+@@ -91,13 +97,68 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor,
+ 	ready = true;
+ 
+ 	if (monitor == -1) {
++#ifdef __ANDROID__
++		if (QScreen *scr = QGuiApplication::primaryScreen()) {
++			setGeometry(scr->availableGeometry());
++		} else {
++			resize(480, 270);
++		}
++#else
+ 		resize(480, 270);
++#endif
+ 	} else {
+ 		SetMonitor(monitor);
+ 	}
+ 
++#ifdef __ANDROID__
++	androidCloseButton = new QPushButton(QStringLiteral("\u2715"), this);
++	androidCloseButton->setObjectName("androidProjectorCloseButton");
++	androidCloseButton->setFixedSize(44, 44);
++	androidCloseButton->setStyleSheet(
++		"QPushButton { background-color: rgba(20, 20, 24, 190); color: white; "
++		"border: 1px solid rgba(255, 255, 255, 90); border-radius: 22px; font-size: 18px; font-weight: bold; }"
++		"QPushButton:pressed { background-color: rgba(200, 40, 40, 220); }");
++	connect(androidCloseButton, &QPushButton::clicked, this, &OBSProjector::EscapeTriggered);
++	androidCloseButton->move(std::max(8, width() - androidCloseButton->width() - 14), 28);
++	androidCloseButton->raise();
++	androidCloseButton->show();
++
++	if (type == ProjectorType::Multiview) {
++		androidTransitionButton = new QPushButton(QStringLiteral("Transición"), this);
++		androidTransitionButton->setObjectName("androidProjectorTransitionButton");
++		androidTransitionButton->setFixedHeight(42);
++		androidTransitionButton->setMinimumWidth(116);
++		androidTransitionButton->setStyleSheet(
++			"QPushButton { background-color: rgba(29, 78, 216, 225); color: white; padding: 0 16px; "
++			"border: 1px solid rgba(255, 255, 255, 110); border-radius: 21px; font-size: 14px; font-weight: bold; }"
++			"QPushButton:pressed { background-color: rgba(37, 99, 235, 245); }");
++		connect(androidTransitionButton, &QPushButton::clicked, this, []() {
++			if (OBSBasic *main = OBSBasic::Get()) {
++				if (main->IsPreviewProgramMode()) {
++					if (OBSSource cur = main->GetCurrentSceneSource()) {
++						main->TransitionToScene(cur);
++					}
++				}
++			}
++		});
++		androidTransitionButton->move(
++			std::max(8, (width() - androidTransitionButton->width()) / 2),
++			std::max(64, (height() - androidTransitionButton->height()) / 2));
++		androidTransitionButton->raise();
++		if (OBSBasic *main = OBSBasic::Get(); main && main->IsPreviewProgramMode()) {
++			androidTransitionButton->show();
++		} else {
++			androidTransitionButton->hide();
++		}
++	}
++#endif
++
+ 	show();
+ 
++	if (QWindow *wh = windowHandle()) {
++		wh->setProperty("isOBSProjectorWindow", true);
++	}
++
+ 	// We need it here to allow keyboard input in X11 to listen to Escape
+ 	activateWindow();
+ }
+@@ -251,7 +312,7 @@ void OBSProjector::mouseDoubleClickEvent(QMouseEvent *event)
+ 
+ 	if (event->button() == Qt::LeftButton) {
+ 		QPoint pos = event->pos();
+-		OBSSource src = multiview->GetSourceByPosition(pos.x(), pos.y());
++		OBSSource src = multiview->GetSourceByPosition(pos.x(), pos.y(), width(), height());
+ 		if (!src) {
+ 			return;
+ 		}
+@@ -301,7 +362,7 @@ void OBSProjector::mousePressEvent(QMouseEvent *event)
+ 		}
+ 
+ 		QPoint pos = event->pos();
+-		OBSSource src = multiview->GetSourceByPosition(pos.x(), pos.y());
++		OBSSource src = multiview->GetSourceByPosition(pos.x(), pos.y(), width(), height());
+ 		if (!src) {
+ 			return;
+ 		}
+@@ -469,6 +530,23 @@ void OBSProjector::closeEvent(QCloseEvent *event)
+ 	event->accept();
+ }
+ 
++#ifdef __ANDROID__
++void OBSProjector::resizeEvent(QResizeEvent *event)
++{
++	OBSQTDisplay::resizeEvent(event);
++	if (androidCloseButton) {
++		androidCloseButton->move(std::max(8, width() - androidCloseButton->width() - 14), 28);
++		androidCloseButton->raise();
++	}
++	if (androidTransitionButton) {
++		androidTransitionButton->move(
++			std::max(8, (width() - androidTransitionButton->width()) / 2),
++			std::max(64, (height() - androidTransitionButton->height()) / 2));
++		androidTransitionButton->raise();
++	}
++}
++#endif
++
+ bool OBSProjector::IsAlwaysOnTop() const
+ {
+ 	return isAlwaysOnTop;
+diff --git a/frontend/widgets/OBSProjector.hpp b/frontend/widgets/OBSProjector.hpp
+index 7f9cd4a..b7d9fc3 100644
+--- a/frontend/widgets/OBSProjector.hpp
++++ b/frontend/widgets/OBSProjector.hpp
+@@ -3,6 +3,9 @@
+ #include "OBSQTDisplay.hpp"
+ 
+ class Multiview;
++#ifdef __ANDROID__
++class QPushButton;
++#endif
+ 
+ enum class ProjectorType {
+ 	Source,
+@@ -27,6 +30,11 @@ private:
+ 	void mousePressEvent(QMouseEvent *event) override;
+ 	void mouseDoubleClickEvent(QMouseEvent *event) override;
+ 	void closeEvent(QCloseEvent *event) override;
++#ifdef __ANDROID__
++	void resizeEvent(QResizeEvent *event) override;
++	QPushButton *androidCloseButton = nullptr;
++	QPushButton *androidTransitionButton = nullptr;
++#endif
+ 
+ 	bool isAlwaysOnTop;
+ 	bool isAlwaysOnTopOverridden = false;
