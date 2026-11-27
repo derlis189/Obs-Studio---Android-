@@ -396,10 +396,15 @@ void vtuber_get_defaults(obs_data_t *s)
     obs_data_set_default_double(s, "vrm_cam_dist", 1.15);
     obs_data_set_default_double(s, "vrm_cam_y", 1.38);
     obs_data_set_default_string(s, "live2d_file", "");
+    obs_data_set_default_string(s, "live2d_framing", "bust");
+    obs_data_set_default_double(s, "live2d_zoom", 1.0);
+    obs_data_set_default_double(s, "live2d_offset_y", 0.0);
     obs_data_set_default_string(s, "inochi_file", "");
     obs_data_set_default_string(s, "vt_gesture", "");
     obs_data_set_default_bool(s, "face_tracking", true);
     obs_data_set_default_double(s, "head_sensitivity", 1.0);
+    obs_data_set_default_bool(s, "vt_invert_x", false);
+    obs_data_set_default_bool(s, "vt_invert_y", false);
     obs_data_set_default_bool(s, "hand_tracking", true);
     obs_data_set_default_bool(s, "lip_sync", true);
     obs_data_set_default_bool(s, "vts_api", true);
@@ -426,13 +431,16 @@ bool on_vt_mode_modified(obs_properties_t *props, obs_property_t *, obs_data_t *
     for (const char *k : {"live2d_info", "install_cubism", "live2d_file"}) {
         if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, is_l2d);
     }
+    for (const char *k : {"live2d_framing", "live2d_zoom", "live2d_offset_y"}) {
+        if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, is_l2d || is_inochi);
+    }
     for (const char *k : {"vrm_info", "vrm_file", "vrma_file", "vrma_loop", "vrm_cam_dist", "vrm_cam_y"}) {
         if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, is_vrm);
     }
     for (const char *k : {"inochi_info", "inochi_file"}) {
         if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, is_inochi);
     }
-    for (const char *k : {"vt_gesture", "vt_zero_copy"}) {
+    for (const char *k : {"vt_gesture", "vt_zero_copy", "vt_invert_x", "vt_invert_y"}) {
         if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, !is_png);
     }
     return true;
@@ -499,6 +507,12 @@ obs_properties_t *vtuber_get_properties(void *data)
         OBS_TEXT_INFO);
     obs_properties_add_button(props, "install_cubism", "Importar Live2D Cubism Core (live2dcubismcore.min.js)...", on_install_cubism_clicked);
     obs_properties_add_path(props, "live2d_file", "Modelo Live2D (.zip / .model3.json / .moc3)", OBS_PATH_FILE, "Todos los archivos (*);;Live2D (*.zip *.json *.moc3)", nullptr);
+    obs_property_t *l2dFrame = obs_properties_add_list(props, "live2d_framing", "Encuadre (parte superior / cuerpo)", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+    obs_property_list_add_string(l2dFrame, "Parte superior / Busto (sin pies · Recomendado)", "bust");
+    obs_property_list_add_string(l2dFrame, "Primer plano (rostro y hombros)", "closeup");
+    obs_property_list_add_string(l2dFrame, "Cuerpo completo (con pies)", "full");
+    obs_properties_add_float_slider(props, "live2d_zoom", "Zoom / Agrandar avatar 2D", 0.5, 3.5, 0.05);
+    obs_properties_add_float_slider(props, "live2d_offset_y", "Posición vertical 2D (arriba / abajo)", -1.0, 1.0, 0.02);
 
     obs_properties_add_text(props, "vrm_info",
         "Usa modelos .vrm (VRoid Studio → 'Export as VRM'). Opcionalmente carga una animación .vrma (gesto o pose continua).",
@@ -525,6 +539,8 @@ obs_properties_t *vtuber_get_properties(void *data)
 
     obs_properties_add_bool(props, "face_tracking", "Seguimiento facial 52 ARKit (MediaPipe GPU + VMC UDP :39539)");
     obs_properties_add_float_slider(props, "head_sensitivity", "Sensibilidad movimiento cabeza", 0.5, 2.5, 0.1);
+    obs_properties_add_bool(props, "vt_invert_x", "Invertir movimiento izquierda / derecha");
+    obs_properties_add_bool(props, "vt_invert_y", "Invertir movimiento arriba / abajo");
     obs_properties_add_bool(props, "hand_tracking", "Seguimiento de manos y dedos (MediaPipe Hands)");
     obs_properties_add_bool(props, "lip_sync", "Sincronización labial 5 vocales + Micrófono");
     obs_properties_add_float_slider(props, "voice_threshold", "Umbral de voz (sensibilidad)", 0.01, 0.30, 0.01);
@@ -592,10 +608,15 @@ void build_config_json(VtuberInstance *inst, obs_data_t *s)
        << "\"camDist\":" << obs_data_get_double(s, "vrm_cam_dist") << ","
        << "\"camY\":" << obs_data_get_double(s, "vrm_cam_y") << ","
        << "\"live2dFile\":\"" << json_escape(obs_data_get_string(s, "live2d_file")) << "\","
+       << "\"live2dFraming\":\"" << json_escape(obs_data_get_string(s, "live2d_framing")) << "\","
+       << "\"live2dZoom\":" << obs_data_get_double(s, "live2d_zoom") << ","
+       << "\"live2dOffsetY\":" << obs_data_get_double(s, "live2d_offset_y") << ","
        << "\"inochiFile\":\"" << json_escape(obs_data_get_string(s, "inochi_file")) << "\","
        << "\"gesture\":\"" << json_escape(obs_data_get_string(s, "vt_gesture")) << "\","
        << "\"faceTracking\":" << (obs_data_get_bool(s, "face_tracking") ? "true" : "false") << ","
        << "\"headSensitivity\":" << obs_data_get_double(s, "head_sensitivity") << ","
+       << "\"invertX\":" << (obs_data_get_bool(s, "vt_invert_x") ? "true" : "false") << ","
+       << "\"invertY\":" << (obs_data_get_bool(s, "vt_invert_y") ? "true" : "false") << ","
        << "\"handTracking\":" << (obs_data_get_bool(s, "hand_tracking") ? "true" : "false") << ","
        << "\"vtsApi\":" << (obs_data_get_bool(s, "vts_api") ? "true" : "false") << ","
        << "\"zeroCopy\":" << (obs_data_get_bool(s, "vt_zero_copy") ? "true" : "false") << ","

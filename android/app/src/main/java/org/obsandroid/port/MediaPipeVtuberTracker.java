@@ -432,9 +432,8 @@ final class MediaPipeVtuberTracker {
                 double r21 = m[6], r22 = m[10];
                 if (r22 > 0.25) {
                     double sy = Math.sqrt(r00 * r00 + r10 * r10);
-                    // MediaPipe facialTransformationMatrixes is row-major: m[6]=R12=-sin(pitch),
-                    // m[2]=R02=+sin(yaw), m[1]=R01=-sin(roll). Positive pitch = looking UP.
-                    double pitchDeg = Math.toDegrees(Math.atan2(r21, r22));
+                    // Positive pitch = looking UP, positive yaw = viewer's RIGHT, positive roll = clockwise
+                    double pitchDeg = Math.toDegrees(Math.atan2(-r21, r22));
                     double yawDeg = Math.toDegrees(Math.atan2(r20, Math.max(1e-4, sy)));
                     double rollDeg = Math.toDegrees(Math.atan2(r10, r00));
                     if (Math.abs(yawDeg) < 60.0 && Math.abs(pitchDeg) < 55.0 && Math.abs(rollDeg) < 55.0) {

@@ -50,8 +50,9 @@ let cfg = {
   mode: 'vrm',
   bounce: true, voiceThreshold: 0.04,
   vrmFile: '', vrmaFile: '', vrmaLoop: true, camDist: 1.15, camY: 1.38,
-  live2dFile: '', inochiFile: '', gesture: '',
-  faceTracking: true, headSensitivity: 1.0, handTracking: true, lipSync: true,
+  live2dFile: '', live2dFraming: 'bust', live2dZoom: 1.0, live2dOffsetY: 0.0,
+  inochiFile: '', gesture: '',
+  faceTracking: true, headSensitivity: 1.0, invertX: false, invertY: false, handTracking: true, lipSync: true,
   vtsApi: true, zeroCopy: zeroCopyAlphaPack,
   quality: 'high', width: 768, height: 768, fps: 30
 };
@@ -533,10 +534,22 @@ function fitLive2dModel() {
   const mw = (live2dModel.internalModel && live2dModel.internalModel.width) || live2dModel.width || 1;
   const mh = (live2dModel.internalModel && live2dModel.internalModel.height) || live2dModel.height || 1;
   if (mw > 0 && mh > 0) {
-    const scale = Math.min(w / mw, h / mh) * 0.94;
+    const framing = cfg.live2dFraming || 'bust';
+    let baseZoom = 1.85;
+    let baseY = 0.86;
+    if (framing === 'closeup') {
+      baseZoom = 2.55;
+      baseY = 1.12;
+    } else if (framing === 'full') {
+      baseZoom = 0.94;
+      baseY = 0.52;
+    }
+    const zoomMul = Math.max(0.4, Math.min(4.0, Number(cfg.live2dZoom) || 1.0));
+    const offY = Math.max(-1.0, Math.min(1.0, Number(cfg.live2dOffsetY) || 0.0));
+    const scale = Math.min(w / mw, h / mh) * baseZoom * zoomMul;
     if (live2dModel.anchor) live2dModel.anchor.set(0.5, 0.5);
     live2dModel.scale.set(scale);
-    live2dModel.position.set(w * 0.5, h * 0.52);
+    live2dModel.position.set(w * 0.5, h * (baseY + offY * 0.55));
   }
 }
 
@@ -598,16 +611,18 @@ function applyLive2dParams(model) {
   const danceX = actGest === 'dance' ? Math.sin(t * 3.8) * 14 : 0;
   const danceZ = actGest === 'dance' ? Math.sin(t * 3.8) * 11 : 0;
   const thinkRoll = actGest === 'think' ? -14 : 0;
-  const yaw = clamp(sm.yaw * sens + danceX, -30, 30);
-  const pitch = clamp(sm.pitch * sens + (actGest === 'think' ? 8 : 0), -30, 30);
-  const roll = clamp(sm.roll * sens + live2dWaveBlend * 7.0 + danceZ + thinkRoll, -30, 30);
+  const invX = cfg.invertX ? -1 : 1;
+  const invY = cfg.invertY ? -1 : 1;
+  const yaw = clamp(sm.yaw * sens * invX + danceX, -30, 30);
+  const pitch = clamp(sm.pitch * sens * invY + (actGest === 'think' ? 8 : 0), -30, 30);
+  const roll = clamp(-sm.roll * sens * invX + live2dWaveBlend * 7.0 + danceZ + thinkRoll, -30, 30);
   const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.75, actGest === 'happy' ? 1 : 0), 0, 1);
   const sad = clamp(track.sad || 0, 0, 1);
   const angry = clamp(track.angry || 0, 0, 1);
   const surprised = clamp(track.surprised || 0, 0, 1);
 
-  const eyeBallX = (track.mp || track.vmc) ? clamp(sm.lookX, -1, 1) : clamp(yaw / 24, -1, 1);
-  const eyeBallY = (track.mp || track.vmc) ? clamp(sm.lookY, -1, 1) : clamp(pitch / 24, -1, 1);
+  const eyeBallX = (track.mp || track.vmc) ? clamp(-sm.lookX * invX, -1, 1) : clamp(yaw / 24, -1, 1);
+  const eyeBallY = (track.mp || track.vmc) ? clamp(sm.lookY * invY, -1, 1) : clamp(pitch / 24, -1, 1);
   const browL = (track.mp || track.vmc) ? clamp(track.browL, -1, 1) : clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1);
   const browR = (track.mp || track.vmc) ? clamp(track.browR, -1, 1) : clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1);
   const mouthForm = clamp(smile + (track.mI + track.mE) * 0.35 - (track.mU + track.mO) * 0.45 - sad * 0.7 - angry * 0.5, -1, 1);
@@ -616,11 +631,11 @@ function applyLive2dParams(model) {
     core.setParameterValueById('ParamAngleX', yaw);
     core.setParameterValueById('ParamAngleY', pitch);
     core.setParameterValueById('ParamAngleZ', roll);
-    core.setParameterValueById('ParamBodyAngleX', clamp(yaw * 0.42 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8 + danceX * 0.4, -10, 10));
-    core.setParameterValueById('ParamBodyAngleY', clamp(pitch * 0.42 - sm.faceY * 4.5, -10, 10));
-    core.setParameterValueById('ParamBodyAngleZ', clamp(roll * 0.38 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5 + danceZ * 0.5, -10, 10));
-    core.setParameterValueById('ParamEyeLOpen', curAutoBlink ? 0 : clamp(sm.eyeL, 0, 1));
-    core.setParameterValueById('ParamEyeROpen', curAutoBlink ? 0 : clamp(sm.eyeR, 0, 1));
+    core.setParameterValueById('ParamBodyAngleX', clamp(sm.bodyYaw * sens * invX * 0.42 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8 + danceX * 0.4, -10, 10));
+    core.setParameterValueById('ParamBodyAngleY', clamp(sm.bodyPitch * sens * invY * 0.42 - sm.faceY * 4.5, -10, 10));
+    core.setParameterValueById('ParamBodyAngleZ', clamp(-sm.bodyRoll * sens * invX * 0.38 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5 + danceZ * 0.5, -10, 10));
+    core.setParameterValueById('ParamEyeLOpen', curAutoBlink ? 0 : clamp(sm.eyeR, 0, 1));
+    core.setParameterValueById('ParamEyeROpen', curAutoBlink ? 0 : clamp(sm.eyeL, 0, 1));
     core.setParameterValueById('ParamEyeLSmile', smile);
     core.setParameterValueById('ParamEyeRSmile', smile);
     core.setParameterValueById('ParamEyeBallX', eyeBallX);
@@ -834,15 +849,20 @@ function drawInochi2dAvatar(w, h, talking, blink) {
   const actGest = getActiveGesture();
   const danceX = actGest === 'dance' ? Math.sin(t * 3.8) * 18 : 0;
   const danceRot = actGest === 'dance' ? Math.sin(t * 3.8) * 0.10 : 0;
-  const scale = Math.min((w * 0.90) / inochiModel.bw, (h * 0.90) / inochiModel.bh);
+  const framing = cfg.live2dFraming || 'bust';
+  const fZoom = framing === 'closeup' ? 2.4 : (framing === 'full' ? 0.90 : 1.75);
+  const fBaseY = framing === 'closeup' ? 1.05 : (framing === 'full' ? 0.52 : 0.82);
+  const zoomMul = Math.max(0.4, Math.min(4.0, Number(cfg.live2dZoom) || 1.0));
+  const offY = Math.max(-1.0, Math.min(1.0, Number(cfg.live2dOffsetY) || 0.0));
+  const scale = Math.min(w / inochiModel.bw, h / inochiModel.bh) * fZoom * zoomMul;
   const breathY = Math.sin(t * 2.1) * 4;
-  ctx2d.translate(w * 0.5 + danceX + track.faceX * w * 0.03, h * 0.52 + breathY - bounceY * 0.25);
-  ctx2d.rotate((track.roll * sens * Math.PI) / 180 * 0.35 + danceRot);
+  ctx2d.translate(w * 0.5 + danceX + sm.faceX * w * 0.03, h * (fBaseY + offY * 0.5) + breathY - bounceY * 0.25);
+  ctx2d.rotate((sm.roll * sens * (cfg.invertX ? -1 : 1) * Math.PI) / 180 * 0.35 + danceRot);
   ctx2d.scale(scale, scale);
   ctx2d.translate(-inochiModel.cx, -inochiModel.cy);
 
-  const headDx = track.yaw * sens * 1.1;
-  const headDy = -track.pitch * sens * 0.9;
+  const headDx = sm.yaw * sens * (cfg.invertX ? -1 : 1) * 1.1;
+  const headDy = -sm.pitch * sens * (cfg.invertY ? -1 : 1) * 0.9;
   const hairSwing = Math.sin(t * 2.6) * 0.035 + (track.roll * 0.002);
   const eyeScale = blink ? 0.08 : Math.max(0.1, (track.eyeL + track.eyeR) * 0.5);
 
@@ -1065,17 +1085,19 @@ function animate(now) {
     camera.lookAt(0, cfg.camY - 0.03, 0);
 
     const sens = Math.max(0.4, Math.min(2.5, Number(cfg.headSensitivity) || 1.0));
+    const invX = cfg.invertX ? -1 : 1;
+    const invY = cfg.invertY ? -1 : 1;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const lerp = (a, b, f) => a + (b - a) * f;
-    const yawDeg = clamp(sm.yaw * sens, -38, 38);
-    const pitchDeg = clamp(sm.pitch * sens, -28, 28);
-    const rollDeg = clamp(sm.roll * sens, -32, 32);
+    const yawDeg = clamp(sm.yaw * sens * invX, -38, 38);
+    const pitchDeg = clamp(sm.pitch * sens * invY, -28, 28);
+    const rollDeg = clamp(sm.roll * sens * invX, -32, 32);
     const yawR = (yawDeg * Math.PI) / 180;
     const pitchR = (pitchDeg * Math.PI) / 180;
     const rollR = (rollDeg * Math.PI) / 180;
-    const bYawR = (clamp(sm.bodyYaw * sens, -38, 38) * Math.PI) / 180;
-    const bPitchR = (clamp(sm.bodyPitch * sens, -28, 28) * Math.PI) / 180;
-    const bRollR = (clamp(sm.bodyRoll * sens, -32, 32) * Math.PI) / 180;
+    const bYawR = (clamp(sm.bodyYaw * sens * invX, -38, 38) * Math.PI) / 180;
+    const bPitchR = (clamp(sm.bodyPitch * sens * invY, -28, 28) * Math.PI) / 180;
+    const bRollR = (clamp(sm.bodyRoll * sens * invX, -32, 32) * Math.PI) / 180;
 
     if (currentVrm) {
       const t = clock.elapsedTime;
@@ -1191,11 +1213,11 @@ function animate(now) {
 
         const danceRoll = actGest === 'dance' ? Math.sin(t * 3.8) * 0.14 : 0;
         const thinkTilt = actGest === 'think' ? -0.18 : 0;
-        // In Three.js VRM normalized space (+Z forward, +Y up), negative X rotation tilts face UP
-        if (chest) chest.rotation.set(breath * 0.022 - bPitchR * 0.12, sway * 0.018 + bYawR * 0.10 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), -bRollR * 0.08 + danceRoll * 0.5);
-        if (head) head.rotation.set(-pitchR * 0.68 + (actGest === 'think' ? 0.12 : 0), yawR * 0.62, -rollR * 0.62 + (vrmWaveR - vrmWaveL) * 0.08 + thinkTilt);
-        if (neck) neck.rotation.set(-bPitchR * 0.28, bYawR * 0.24, -bRollR * 0.24);
-        if (spine) spine.rotation.set(-bPitchR * 0.10 + breath * 0.012, bYawR * 0.08 + sway * 0.015, -bRollR * 0.06 + danceRoll * 0.4);
+        // On VRM0 after rotateVRM0 (+Z world forward), positive local X rotation tilts face UP
+        if (chest) chest.rotation.set(breath * 0.022 + bPitchR * 0.12, sway * 0.018 + bYawR * 0.10 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), bRollR * 0.08 + danceRoll * 0.5);
+        if (head) head.rotation.set(pitchR * 0.68 + (actGest === 'think' ? -0.12 : 0), yawR * 0.62, rollR * 0.62 + (vrmWaveR - vrmWaveL) * 0.08 + thinkTilt);
+        if (neck) neck.rotation.set(bPitchR * 0.28, bYawR * 0.24, bRollR * 0.24);
+        if (spine) spine.rotation.set(bPitchR * 0.10 + breath * 0.012, bYawR * 0.08 + sway * 0.015, bRollR * 0.06 + danceRoll * 0.4);
       }
 
       currentVrm.scene.position.x = 0;
@@ -1248,11 +1270,11 @@ function animate(now) {
   } else if (cfg.mode === 'live2d' && live2dModel && pixiApp) {
     setLayerVis(cl2d);
     if (live2dModel.internalModel && live2dModel.internalModel.focusController) {
-      const sens = Math.max(0.4, Math.min(2.5, Number(cfg.headSensitivity) || 1.0));
-      const fx = Math.max(-1, Math.min(1, (sm.yaw * sens) / 30));
-      const fy = Math.max(-1, Math.min(1, (sm.pitch * sens) / 30));
-      live2dModel.internalModel.focusController.focus(fx, fy);
+      // Keep focusController centered so it never fights or doubles our MediaPipe/VMC parameters
+      live2dModel.internalModel.focusController.focus(0, 0, true);
     }
+    // Feed tracking parameters BEFORE update() so Cubism physics3.json reacts to head & body movement!
+    applyLive2dParams(live2dModel);
     live2dModel.update(dt * 1000);
     pixiApp.render();
     activeGl = pixiApp.renderer && pixiApp.renderer.gl ? pixiApp.renderer.gl : null;
@@ -1290,6 +1312,7 @@ window.OBS_VTUBER = {
       loadVrmModel(cfg.vrmFile);
       loadVrmaAnimation(cfg.vrmaFile);
     } else if (cfg.mode === 'live2d') {
+      fitLive2dModel();
       loadLive2dModel(cfg.live2dFile);
     } else if (cfg.mode === 'inochi2d') {
       loadInochi2dModel(cfg.inochiFile);
