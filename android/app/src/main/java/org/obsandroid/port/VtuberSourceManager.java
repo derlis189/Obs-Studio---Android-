@@ -46,6 +46,12 @@ import org.json.JSONObject;
 public final class VtuberSourceManager {
     private static final String TAG = "ObsVtuber";
     private static final Handler sMain = new Handler(Looper.getMainLooper());
+    private static final java.util.concurrent.ExecutorService sPrepExec =
+        java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "OBS-VtuberPrep");
+            t.setDaemon(true);
+            return t;
+        });
     private static final Map<Long, VtuberInstance> sInstances = new ConcurrentHashMap<>();
     private static FrameLayout sHost;
     private static volatile int thermalFpsCap = 60;
@@ -596,6 +602,13 @@ public final class VtuberSourceManager {
             int r;
             while ((r = in.read(buf)) != -1) out.write(buf, 0, r);
             Log.i(TAG, "Installed live2dcubismcore.min.js (" + dst.length() + " bytes)");
+            sMain.post(() -> {
+                for (VtuberInstance inst : sInstances.values()) {
+                    if (inst != null && !inst.destroyed && inst.webView != null && "live2d".equals(inst.mode)) {
+                        inst.webView.evaluateJavascript("if(window.OBS_VTUBER && window.OBS_VTUBER.onCubismInstalled)window.OBS_VTUBER.onCubismInstalled();", null);
+                    }
+                }
+            });
             return "OK\t" + dst.getAbsolutePath();
         } catch (Exception e) {
             return "ERR\t" + e.getMessage();
@@ -657,6 +670,7 @@ public final class VtuberSourceManager {
 
             String mode = "png";
             String veadoFile = "", pIdle = "", pTalk = "", pBlink = "", pBlinkTalk = "";
+            String rawLive2dPath = "";
             String resolvedJson = configJson;
             boolean useZeroCopy = (Build.VERSION.SDK_INT >= 29);
             boolean enableVtsApi = true;
@@ -691,6 +705,7 @@ public final class VtuberSourceManager {
                 pTalk = obj.optString("pngTalk", "");
                 pBlink = obj.optString("pngBlink", "");
                 pBlinkTalk = obj.optString("pngBlinkTalk", "");
+                rawLive2dPath = obj.optString("live2dFile", "");
 
                 obj.put("width", inst.width);
                 obj.put("height", inst.height);
@@ -698,11 +713,43 @@ public final class VtuberSourceManager {
                 obj.put("zeroCopy", useZeroCopy);
                 obj.put("vrmFile", toLoopbackFileUrl(activity, obj.optString("vrmFile", "")));
                 obj.put("vrmaFile", toLoopbackFileUrl(activity, obj.optString("vrmaFile", "")));
-                obj.put("live2dFile", prepareLive2dModelPath(activity, obj.optString("live2dFile", "")));
                 obj.put("inochiFile", toLoopbackFileUrl(activity, obj.optString("inochiFile", "")));
+                boolean asyncZip = "live2d".equals(mode) && rawLive2dPath.toLowerCase(Locale.US).endsWith(".zip");
+                if (asyncZip) {
+                    obj.put("live2dFile", "");
+                    obj.put("live2dPreparing", true);
+                } else {
+                    obj.put("live2dFile", prepareLive2dModelPath(activity, rawLive2dPath));
+                    obj.put("live2dPreparing", false);
+                }
                 resolvedJson = obj.toString();
             } catch (Exception e) {
                 Log.w(TAG, "Config parse failed", e);
+            }
+
+            if ("live2d".equals(mode) && rawLive2dPath.toLowerCase(Locale.US).endsWith(".zip")) {
+                final String zipPath = rawLive2dPath;
+                final VtuberInstance zipTarget = inst;
+                final Context appCtx = activity.getApplicationContext();
+                final String baseJson = resolvedJson;
+                sPrepExec.execute(() -> {
+                    String modelUrl = prepareLive2dModelPath(appCtx, zipPath);
+                    sMain.post(() -> {
+                        if (zipTarget.destroyed || !"live2d".equals(zipTarget.mode)) return;
+                        try {
+                            JSONObject upd = new JSONObject(baseJson);
+                            upd.put("live2dFile", modelUrl);
+                            upd.put("live2dPreparing", false);
+                            upd.put("live2dPrepError", modelUrl.isEmpty() ? "No se encontró .model3.json/.moc3 dentro del .zip" : "");
+                            String finalJson = upd.toString();
+                            zipTarget.pendingConfigJson = finalJson;
+                            if (zipTarget.webView != null && zipTarget.pageReady) {
+                                zipTarget.webView.evaluateJavascript("window.__OBS_VTUBER_PENDING_CFG=" + finalJson
+                                    + ";if(window.OBS_VTUBER)window.OBS_VTUBER.setConfig(window.__OBS_VTUBER_PENDING_CFG);", null);
+                            }
+                        } catch (Exception ignored) {}
+                    });
+                });
             }
 
             MediaPipeVtuberTracker.setHandTrackingWanted(wantHands);

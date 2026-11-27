@@ -3,9 +3,15 @@ package org.obsandroid.port;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
 import android.media.Image;
+import android.os.Build;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.Display;
+import android.view.Surface;
+import android.view.WindowManager;
 import com.google.mediapipe.framework.image.BitmapImageBuilder;
 import com.google.mediapipe.framework.image.MPImage;
 import com.google.mediapipe.tasks.components.containers.Category;
@@ -45,9 +51,62 @@ final class MediaPipeVtuberTracker {
     private static HandLandmarker sHandLandmarker;
     private static int[] sRgbStaging;
     private static Bitmap sReusableBitmap;
+    private static int sReusableW = 0, sReusableH = 0;
+    private static volatile int sFrontSensorOrient = -1;
+    private static volatile int sBackSensorOrient = -1;
     private static long sLastSubmitMs = 0L;
     private static long sLastTimestampMs = 0L;
     private static int sFrameCounter = 0;
+
+    private static int getSensorOrientation(Context ctx, boolean front) {
+        int cached = front ? sFrontSensorOrient : sBackSensorOrient;
+        if (cached >= 0) return cached;
+        int fallback = front ? 270 : 90;
+        try {
+            CameraManager mgr = ctx.getSystemService(CameraManager.class);
+            if (mgr != null) {
+                int want = front ? CameraCharacteristics.LENS_FACING_FRONT : CameraCharacteristics.LENS_FACING_BACK;
+                for (String id : mgr.getCameraIdList()) {
+                    CameraCharacteristics cc = mgr.getCameraCharacteristics(id);
+                    Integer facing = cc.get(CameraCharacteristics.LENS_FACING);
+                    if (facing != null && facing == want) {
+                        Integer ori = cc.get(CameraCharacteristics.SENSOR_ORIENTATION);
+                        if (ori != null) {
+                            if (front) sFrontSensorOrient = ori;
+                            else sBackSensorOrient = ori;
+                            return ori;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return fallback;
+    }
+
+    private static int getDisplayRotationDegrees(Context ctx) {
+        try {
+            int rot = Surface.ROTATION_0;
+            QtObsActivity act = QtObsActivity.getActiveInstance();
+            if (act != null && Build.VERSION.SDK_INT >= 30 && act.getDisplay() != null) {
+                rot = act.getDisplay().getRotation();
+            } else {
+                WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+                if (wm != null) {
+                    @SuppressWarnings("deprecation")
+                    Display d = wm.getDefaultDisplay();
+                    if (d != null) rot = d.getRotation();
+                }
+            }
+            switch (rot) {
+                case Surface.ROTATION_90: return 90;
+                case Surface.ROTATION_180: return 180;
+                case Surface.ROTATION_270: return 270;
+                default: return 0;
+            }
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
 
     static void setHandTrackingWanted(boolean wanted) {
         sHandTrackingWanted = wanted;
@@ -153,8 +212,15 @@ final class MediaPipeVtuberTracker {
             int srcH = img.getHeight();
             if (srcW < 32 || srcH < 24) { sBusy.set(false); return false; }
 
-            if (sRgbStaging == null || sRgbStaging.length != DST_W * DST_H) {
-                sRgbStaging = new int[DST_W * DST_H];
+            // Compute exact upright clockwise rotation so MediaPipe always sees an upright face
+            int sensorOri = getSensorOrientation(ctx, front);
+            int dispDeg = getDisplayRotationDegrees(ctx);
+            int cwDeg = front ? ((sensorOri + dispDeg) % 360) : ((sensorOri - dispDeg + 360) % 360);
+            final int outW = (cwDeg == 90 || cwDeg == 270) ? DST_H : DST_W;
+            final int outH = (cwDeg == 90 || cwDeg == 270) ? DST_W : DST_H;
+
+            if (sRgbStaging == null || sRgbStaging.length != outW * outH) {
+                sRgbStaging = new int[outW * outH];
             }
             ByteBuffer yBuf = planes[0].getBuffer();
             ByteBuffer uBuf = planes[1].getBuffer();
@@ -163,14 +229,30 @@ final class MediaPipeVtuberTracker {
             int uRow = planes[1].getRowStride(), uPix = planes[1].getPixelStride(), uCap = uBuf.limit();
             int vRow = planes[2].getRowStride(), vPix = planes[2].getPixelStride(), vCap = vBuf.limit();
 
-            // Fast nearest-neighbor downsample YUV_420_888 -> 256x192 ARGB (mirrored if front camera)
-            for (int dy = 0; dy < DST_H; ++dy) {
-                int sy = (dy * srcH) / DST_H;
-                int cy = sy >> 1;
-                int dstOff = dy * DST_W;
-                for (int dx = 0; dx < DST_W; ++dx) {
-                    int sx = ((front ? (DST_W - 1 - dx) : dx) * srcW) / DST_W;
+            // Fast nearest-neighbor downsample + upright rotation + front-camera mirror
+            for (int dy = 0; dy < outH; ++dy) {
+                int dstOff = dy * outW;
+                for (int dx = 0; dx < outW; ++dx) {
+                    int ux = front ? (outW - 1 - dx) : dx;
+                    int uy = dy;
+                    int sx, sy;
+                    if (cwDeg == 90) {
+                        sx = (uy * srcW) / outH;
+                        sy = ((outW - 1 - ux) * srcH) / outW;
+                    } else if (cwDeg == 180) {
+                        sx = ((outW - 1 - ux) * srcW) / outW;
+                        sy = ((outH - 1 - uy) * srcH) / outH;
+                    } else if (cwDeg == 270) {
+                        sx = ((outH - 1 - uy) * srcW) / outH;
+                        sy = (ux * srcH) / outW;
+                    } else {
+                        sx = (ux * srcW) / outW;
+                        sy = (uy * srcH) / outH;
+                    }
+                    if (sx < 0) sx = 0; else if (sx >= srcW) sx = srcW - 1;
+                    if (sy < 0) sy = 0; else if (sy >= srcH) sy = srcH - 1;
                     int cx = sx >> 1;
+                    int cy = sy >> 1;
                     int yi = sy * yRow + sx * yPix;
                     int ui = cy * uRow + cx * uPix;
                     int vi = cy * vRow + cx * vPix;
@@ -197,10 +279,13 @@ final class MediaPipeVtuberTracker {
             final boolean runHands = sHandTrackingWanted && sHandLandmarker != null && ((++sFrameCounter & 1) == 0);
             sExecutor.execute(() -> {
                 try {
-                    if (sReusableBitmap == null || sReusableBitmap.isRecycled()) {
-                        sReusableBitmap = Bitmap.createBitmap(DST_W, DST_H, Bitmap.Config.ARGB_8888);
+                    if (sReusableBitmap == null || sReusableBitmap.isRecycled() || sReusableW != outW || sReusableH != outH) {
+                        if (sReusableBitmap != null && !sReusableBitmap.isRecycled()) sReusableBitmap.recycle();
+                        sReusableBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888);
+                        sReusableW = outW;
+                        sReusableH = outH;
                     }
-                    sReusableBitmap.setPixels(pixels, 0, DST_W, 0, 0, DST_W, DST_H);
+                    sReusableBitmap.setPixels(pixels, 0, outW, 0, 0, outW, outH);
                     MPImage mpImg = new BitmapImageBuilder(sReusableBitmap).build();
                     long ts = Math.max(SystemClock.uptimeMillis(), sLastTimestampMs + 1L);
                     sLastTimestampMs = ts;
@@ -314,31 +399,29 @@ final class MediaPipeVtuberTracker {
         st.surprised = clamp01(((eyeWideL + eyeWideR) * 0.5f) * 0.9f + browInnerUp * 0.45f + jawOpen * 0.35f);
 
         // Extract exact 3D head orientation from 4x4 facial transformation matrix (column-major)
+        // Only accept valid front-facing rotations (r22 > 0.25) to prevent 180-deg gimbal flips.
         Optional<List<float[]>> optMat = res.facialTransformationMatrixes();
         if (optMat.isPresent() && !optMat.get().isEmpty()) {
             float[] m = optMat.get().get(0);
             if (m != null && m.length >= 16) {
-                // Rotation submatrix R (column-major: m[col*4 + row])
                 double r00 = m[0], r10 = m[1], r20 = m[2];
                 double r21 = m[6], r22 = m[10];
-                double sy = Math.sqrt(r00 * r00 + r10 * r10);
-                double pitchRad, yawRad, rollRad;
-                if (sy > 1e-6) {
-                    pitchRad = Math.atan2(r21, r22);
-                    yawRad = Math.atan2(-r20, sy);
-                    rollRad = Math.atan2(r10, r00);
-                } else {
-                    pitchRad = Math.atan2(-m[9], m[5]);
-                    yawRad = Math.atan2(-r20, sy);
-                    rollRad = 0.0;
+                if (r22 > 0.25) {
+                    double sy = Math.sqrt(r00 * r00 + r10 * r10);
+                    double pitchDeg = Math.toDegrees(Math.atan2(-r21, r22));
+                    double yawDeg = Math.toDegrees(Math.atan2(-r20, Math.max(1e-4, sy)));
+                    double rollDeg = Math.toDegrees(Math.atan2(-r10, r00));
+                    if (Math.abs(yawDeg) < 60.0 && Math.abs(pitchDeg) < 50.0 && Math.abs(rollDeg) < 55.0) {
+                        float rawYaw = Math.max(-35f, Math.min(35f, (float) yawDeg));
+                        float rawPitch = Math.max(-25f, Math.min(25f, (float) pitchDeg));
+                        float rawRoll = Math.max(-30f, Math.min(30f, (float) rollDeg));
+                        // Gentle exponential smoothing for rock-solid head tracking
+                        float a = 0.28f;
+                        st.yaw = st.yaw + (rawYaw - st.yaw) * a;
+                        st.pitch = st.pitch + (rawPitch - st.pitch) * a;
+                        st.roll = st.roll + (rawRoll - st.roll) * a;
+                    }
                 }
-                float rawYaw = Math.max(-42f, Math.min(42f, (float) Math.toDegrees(yawRad)));
-                float rawPitch = Math.max(-32f, Math.min(32f, (float) Math.toDegrees(pitchRad)));
-                float rawRoll = Math.max(-38f, Math.min(38f, (float) Math.toDegrees(rollRad)));
-                float a = 0.42f;
-                st.yaw = st.yaw + (rawYaw - st.yaw) * a;
-                st.pitch = st.pitch + (rawPitch - st.pitch) * a;
-                st.roll = st.roll + (rawRoll - st.roll) * a;
             }
         }
 
@@ -401,20 +484,21 @@ final class MediaPipeVtuberTracker {
                 float cPinky = fingerCurl(lm, 17, 20);
                 float avgCurl = (cIdx + cMid + cRing + cPinky) * 0.25f;
                 int gesture = classifyHandGesture(cIdx, cMid, cRing, cPinky);
-                float raise = clamp01((0.92f - wrist.y()) / 0.65f);
+                // Only raise avatar arm when the hand is clearly raised above lower chest (wrist.y < 0.78)
+                float raise = clamp01((0.80f - wrist.y()) / 0.50f);
 
                 if (isLeft) {
                     sawL = true;
-                    st.handL = st.handL + (Math.max(0.25f, raise) - st.handL) * 0.45f;
-                    st.handLX = st.handLX + (wrist.x() - st.handLX) * 0.45f;
-                    st.handLY = st.handLY + (wrist.y() - st.handLY) * 0.45f;
+                    st.handL = st.handL + (raise - st.handL) * 0.30f;
+                    st.handLX = st.handLX + (wrist.x() - st.handLX) * 0.32f;
+                    st.handLY = st.handLY + (wrist.y() - st.handLY) * 0.32f;
                     st.fingerCurlL = avgCurl;
                     st.handGestureL = gesture;
                 } else {
                     sawR = true;
-                    st.handR = st.handR + (Math.max(0.25f, raise) - st.handR) * 0.45f;
-                    st.handRX = st.handRX + (wrist.x() - st.handRX) * 0.45f;
-                    st.handRY = st.handRY + (wrist.y() - st.handRY) * 0.45f;
+                    st.handR = st.handR + (raise - st.handR) * 0.30f;
+                    st.handRX = st.handRX + (wrist.x() - st.handRX) * 0.32f;
+                    st.handRY = st.handRY + (wrist.y() - st.handRY) * 0.32f;
                     st.fingerCurlR = avgCurl;
                     st.handGestureR = gesture;
                 }

@@ -528,6 +528,7 @@ public final class WebRemoteServer {
     static synchronized String registerVtuberModel(File model) {
         String name = model.getName().toLowerCase(Locale.ROOT);
         if (!model.isFile() || !(name.endsWith(".vrm") || name.endsWith(".glb") ||
+                name.endsWith(".vrma") || name.endsWith(".inp") || name.endsWith(".inx") ||
                 name.endsWith(".model3.json"))) return "";
         String key = generateToken();
         if (registeredModels.size() >= 256) {
@@ -545,9 +546,11 @@ public final class WebRemoteServer {
         if (parts[2].equals(model.getName())) return model;
         if (!model.getName().toLowerCase(Locale.ROOT).endsWith(".model3.json")) return null;
         String name = parts[2].toLowerCase(Locale.ROOT);
-        if (!(name.endsWith(".png") || name.endsWith(".moc3") || name.endsWith(".motion3.json") ||
+        if (!(name.endsWith(".png") || name.endsWith(".webp") || name.endsWith(".jpg") || name.endsWith(".jpeg") ||
+              name.endsWith(".moc3") || name.endsWith(".motion3.json") ||
               name.endsWith(".exp3.json") || name.endsWith(".physics3.json") ||
-              name.endsWith(".pose3.json") || name.endsWith(".cdi3.json"))) return null;
+              name.endsWith(".pose3.json") || name.endsWith(".cdi3.json") ||
+              name.endsWith(".userdata3.json"))) return null;
         File parent = model.getParentFile();
         File file = new File(parent, parts[2]).getCanonicalFile();
         return file.getPath().startsWith(parent.getPath() + File.separator) ? file : null;

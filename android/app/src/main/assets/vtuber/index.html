@@ -20,8 +20,6 @@
 }
 </script>
 <script src="/vtuber/lib/pixi.min.js"></script>
-<script src="/vtuber/live2dcubismcore.min.js"></script>
-<script src="/vtuber/lib/cubism4.min.js"></script>
 <script>
 window.addEventListener('error', (e) => console.error('VTuberWindowErr:', e.message, e.filename, e.lineno));
 window.addEventListener('unhandledrejection', (e) => console.error('VTuberPromiseErr:', e.reason));
@@ -76,6 +74,7 @@ let vrmWaveL = 0, vrmWaveR = 0, live2dWaveBlend = 0;
 // Three.js / VRM / VRMA state
 let renderer = null, scene = null, camera = null, currentVrm = null, demoHead = null;
 let loadedVrmUrl = '';
+let vrmSettleFrames = 0;
 let vrmaMixer = null, vrmaAction = null, loadedVrmaUrl = '', pendingVrmaData = null;
 const clock = new THREE.Clock();
 const tmpQuat = new THREE.Quaternion();
@@ -84,9 +83,10 @@ const tmpQuat = new THREE.Quaternion();
 let pixiApp = null, live2dModel = null, loadedLive2dUrl = '';
 let live2dLoadSeq = 0;
 let live2dWaveInfo = { toggleIds: [], swingIds: [], armLIds: [], armRIds: [] };
+let live2dStatusText = '';
 let curAutoBlink = false, curMouthVal = 0;
 let cubismReady = !!(window.Live2DCubismCore && window.PIXI && window.PIXI.live2d);
-let cubismTried = cubismReady;
+let cubismLoadingPromise = null;
 if (window.PIXI && window.PIXI.settings) {
   window.PIXI.settings.MIPMAP_TEXTURES = window.PIXI.MIPMAP_MODES ? window.PIXI.MIPMAP_MODES.ON : 1;
   window.PIXI.settings.SCALE_MODE = window.PIXI.SCALE_MODES ? window.PIXI.SCALE_MODES.LINEAR : 1;
@@ -416,6 +416,23 @@ async function loadVrmModel(url) {
     });
     currentVrm = vrm;
     scene.add(vrm.scene);
+    // Apply relaxed A-pose immediately and reset spring bones BEFORE first frame so clothes/hair never fly upward!
+    const initHum = vrm.humanoid;
+    if (initHum) {
+      const lU = initHum.getNormalizedBoneNode('leftUpperArm');
+      const rU = initHum.getNormalizedBoneNode('rightUpperArm');
+      const lL = initHum.getNormalizedBoneNode('leftLowerArm');
+      const rL = initHum.getNormalizedBoneNode('rightLowerArm');
+      if (lU) lU.rotation.set(0.08, 0.06, 1.22);
+      if (rU) rU.rotation.set(0.08, -0.06, -1.22);
+      if (lL) lL.rotation.set(0.05, 0.14, 0.10);
+      if (rL) rL.rotation.set(0.05, -0.14, -0.10);
+    }
+    vrm.update(0);
+    vrm.scene.updateMatrixWorld(true);
+    if (vrm.springBoneManager) vrm.springBoneManager.reset();
+    vrmSettleFrames = 8;
+    clock.getDelta();
     if (demoHead) demoHead.visible = false;
     if (pendingVrmaData) bindVrmaClip();
     console.log('Loaded VRM model successfully: ' + url + ' aniso=' + maxAniso);
@@ -475,21 +492,31 @@ async function ensureLive2dCore() {
     cubismReady = true;
     return true;
   }
-  if (cubismReady) return true;
-  if (cubismTried) return false;
-  cubismTried = true;
-  if (!window.Live2DCubismCore) {
-    const okCore = await loadScript('/vtuber/live2dcubismcore.min.js');
-    if (!okCore || !window.Live2DCubismCore) {
-      console.warn('live2dcubismcore.min.js failed to load; using 2D rigged avatar.');
-      return false;
+  if (cubismLoadingPromise) return cubismLoadingPromise;
+  cubismLoadingPromise = (async () => {
+    const bust = '?t=' + Date.now();
+    if (!window.Live2DCubismCore) {
+      const okCore = await loadScript('/vtuber/live2dcubismcore.min.js' + bust);
+      if (!okCore || !window.Live2DCubismCore) {
+        console.warn('live2dcubismcore.min.js not imported yet.');
+        live2dStatusText = 'Importa live2dcubismcore.min.js en Propiedades';
+        return false;
+      }
     }
+    if (!(window.PIXI && window.PIXI.live2d)) {
+      await loadScript('/vtuber/lib/cubism4.min.js' + bust);
+    }
+    cubismReady = !!(window.Live2DCubismCore && window.PIXI && window.PIXI.live2d);
+    if (!cubismReady) {
+      live2dStatusText = 'Error al inicializar Cubism4 Runtime';
+    }
+    return cubismReady;
+  })();
+  try {
+    return await cubismLoadingPromise;
+  } finally {
+    cubismLoadingPromise = null;
   }
-  if (!(window.PIXI && window.PIXI.live2d)) {
-    await loadScript('/vtuber/lib/cubism4.min.js');
-  }
-  cubismReady = !!(window.Live2DCubismCore && window.PIXI && window.PIXI.live2d);
-  return cubismReady;
 }
 
 function fitLive2dModel() {
@@ -614,9 +641,13 @@ async function loadLive2dModel(url) {
     if (live2dModel && pixiApp) { pixiApp.stage.removeChild(live2dModel); live2dModel.destroy(); live2dModel = null; }
     loadedLive2dUrl = '';
     live2dWaveInfo = { toggleIds: [], swingIds: [], armLIds: [], armRIds: [] };
+    if (cfg.live2dPreparing) live2dStatusText = 'Descomprimiendo modelo Live2D (.zip)...';
+    else if (cfg.live2dPrepError) live2dStatusText = cfg.live2dPrepError;
+    else live2dStatusText = 'Selecciona un .zip o .model3.json en Propiedades';
     return;
   }
-  if (url === loadedLive2dUrl && live2dModel) return;
+  if (url === loadedLive2dUrl && live2dModel) { live2dStatusText = ''; return; }
+  live2dStatusText = 'Cargando Live2D...';
   const ready = await ensureLive2dCore();
   if (!ready || seq !== live2dLoadSeq) return;
   loadedLive2dUrl = url;
@@ -650,11 +681,13 @@ async function loadLive2dModel(url) {
       model.internalModel.on('beforeModelUpdate', () => applyLive2dParams(model));
     }
     live2dModel = model;
+    live2dStatusText = '';
     pixiApp.stage.addChild(model);
     fitLive2dModel();
     console.log('Loaded Live2D model successfully: ' + url);
   } catch (e) {
     loadedLive2dUrl = '';
+    live2dStatusText = 'Error Live2D: ' + ((e && e.message) ? e.message.slice(0, 60) : 'modelo incompatible');
     console.error('Live2D load failed:', e && e.stack ? e.stack : e);
   }
 }
@@ -877,6 +910,23 @@ function draw2DRiggedAvatar(w, h, talking, blink) {
   ctx2d.arc(fx * 0.5, fy - s * 0.18, s * 0.72, Math.PI * 1.05, Math.PI * 1.95);
   ctx2d.fill();
   ctx2d.restore();
+
+  if (cfg.mode === 'live2d' && live2dStatusText) {
+    ctx2d.save();
+    const fontSize = Math.max(16, Math.round(w * 0.032));
+    ctx2d.font = '600 ' + fontSize + 'px sans-serif';
+    ctx2d.textAlign = 'center';
+    ctx2d.textBaseline = 'middle';
+    const tw = Math.min(w * 0.90, ctx2d.measureText(live2dStatusText).width + 32);
+    const bh = fontSize + 20;
+    const bx = (w - tw) * 0.5;
+    const by = h * 0.84 - bh * 0.5;
+    ctx2d.fillStyle = 'rgba(15, 23, 42, 0.85)';
+    ctx2d.fillRect(bx, by, tw, bh);
+    ctx2d.fillStyle = '#f8fafc';
+    ctx2d.fillText(live2dStatusText, w * 0.5, h * 0.84, w * 0.86);
+    ctx2d.restore();
+  }
 }
 
 function pushCurrentFrame(activeGl) {
@@ -937,7 +987,7 @@ function animate(now) {
   if (now - lastRenderTime < 1000 / Math.max(1, Math.min(cfg.fps || 30, renderBudgetFps))) return;
   lastRenderTime = now;
 
-  const dt = Math.min(0.05, clock.getDelta());
+  const dt = Math.min(0.033, clock.getDelta());
   resizeAll();
 
   const [w, h] = getRenderSize();
@@ -1082,8 +1132,9 @@ function animate(now) {
             lerp(-0.06, 0.18 + spreadR * 0.35, vrmWaveR),
             lerp(-1.22 + breath * 0.025, 0.32 - (1 - liftR) * 0.45, vrmWaveR)
           );
-          const oscL = (actGest === 'peace') ? 0 : waveOsc * 0.42;
-          const oscR = (actGest === 'peace') ? 0 : waveOsc * 0.42;
+          const liveOsc = (actGest === 'wave') ? waveOsc * 0.42 : clamp(track.waveOsc || 0, -1, 1) * 0.28;
+          const oscL = (actGest === 'peace') ? 0 : liveOsc;
+          const oscR = (actGest === 'peace') ? 0 : liveOsc;
           if (lLower) lLower.rotation.set(
             lerp(0.05, -0.22, vrmWaveL),
             lerp(0.14, 0.05, vrmWaveL),
@@ -1098,9 +1149,11 @@ function animate(now) {
           if (rHand) rHand.rotation.set(0, 0, oscR * 0.65 * vrmWaveR);
         }
 
-        // Apply finger curls & hand gestures (peace / fist / point / open)
-        applyVrmFingers(hum, 'L', track.curlL || 0, track.gestL || 0);
-        applyVrmFingers(hum, 'R', track.curlR || 0, actGest === 'peace' ? 3 : (track.gestR || 0));
+        // Only apply finger pose when hand is actively raised or gesture requested
+        if (vrmWaveL > 0.15) applyVrmFingers(hum, 'L', track.curlL || 0, track.gestL || 0);
+        else applyVrmFingers(hum, 'L', 0.15, 0);
+        if (vrmWaveR > 0.15 || actGest === 'peace') applyVrmFingers(hum, 'R', track.curlR || 0, actGest === 'peace' ? 3 : (track.gestR || 0));
+        else applyVrmFingers(hum, 'R', 0.15, 0);
 
         const danceRoll = actGest === 'dance' ? Math.sin(t * 3.8) * 0.14 : 0;
         const thinkTilt = actGest === 'think' ? -0.18 : 0;
@@ -1138,7 +1191,14 @@ function animate(now) {
         em.setValue('angry', clamp(track.angry || 0, 0, 1));
         em.setValue('surprised', clamp(track.surprised || 0, 0, 1));
       }
-      currentVrm.update(dt);
+      if (vrmSettleFrames > 0) {
+        vrmSettleFrames--;
+        currentVrm.update(0.001);
+        currentVrm.scene.updateMatrixWorld(true);
+        if (currentVrm.springBoneManager) currentVrm.springBoneManager.reset();
+      } else {
+        currentVrm.update(dt);
+      }
     } else if (demoHead) {
       const u = demoHead.userData;
       u.head.rotation.set(pitchR * 0.9, yawR * 0.9, -rollR * 0.8);
@@ -1182,6 +1242,11 @@ function animate(now) {
 
 window.OBS_VTUBER = {
   setRenderBudget(fps) { renderBudgetFps = Math.max(1, Math.min(60, Number(fps) || 30)); },
+  onCubismInstalled() {
+    cubismReady = false;
+    loadedLive2dUrl = '';
+    if (cfg.mode === 'live2d' && cfg.live2dFile) loadLive2dModel(cfg.live2dFile);
+  },
   setConfig(next) {
     cfg = Object.assign(cfg, next || {});
     resizeAll();
