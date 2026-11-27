@@ -57,6 +57,9 @@ final class MediaPipeVtuberTracker {
     private static long sLastSubmitMs = 0L;
     private static long sLastTimestampMs = 0L;
     private static int sFrameCounter = 0;
+    private static int sHandStreakL = 0;
+    private static int sHandStreakR = 0;
+    private static float sPrevWristX = 0.5f;
 
     private static int getSensorOrientation(Context ctx, boolean front) {
         int cached = front ? sFrontSensorOrient : sBackSensorOrient;
@@ -110,10 +113,29 @@ final class MediaPipeVtuberTracker {
 
     static void setHandTrackingWanted(boolean wanted) {
         sHandTrackingWanted = wanted;
+        if (!wanted) {
+            FaceTrackerManager.TrackingState st = FaceTrackerManager.getState();
+            st.handL = 0f;
+            st.handR = 0f;
+            st.waveOsc = 0f;
+            st.handGestureL = 0;
+            st.handGestureR = 0;
+            st.mpHandsActive = false;
+            sHandStreakL = 0;
+            sHandStreakR = 0;
+        }
+    }
+
+    static boolean isHandTrackingWanted() {
+        return sHandTrackingWanted;
     }
 
     static boolean isReady() {
         return sInitialized && sFaceLandmarker != null;
+    }
+
+    static boolean isHandTrackerReady() {
+        return sInitialized && sHandLandmarker != null;
     }
 
     private static synchronized void ensureInitialized(Context ctx) {
@@ -179,9 +201,9 @@ final class MediaPipeVtuberTracker {
                 .setBaseOptions(base)
                 .setRunningMode(RunningMode.VIDEO)
                 .setNumHands(2)
-                .setMinHandDetectionConfidence(0.45f)
-                .setMinHandPresenceConfidence(0.45f)
-                .setMinTrackingConfidence(0.45f)
+                .setMinHandDetectionConfidence(0.68f)
+                .setMinHandPresenceConfidence(0.68f)
+                .setMinTrackingConfidence(0.65f)
                 .build();
             HandLandmarker hl = HandLandmarker.createFromOptions(app, opts);
             Log.i(TAG, "HandLandmarker created with " + (useGpu ? "GPU" : "CPU") + " delegate");
@@ -470,49 +492,75 @@ final class MediaPipeVtuberTracker {
             for (int i = 0; i < hands.size(); ++i) {
                 List<NormalizedLandmark> lm = hands.get(i);
                 if (lm == null || lm.size() < 21) continue;
-                NormalizedLandmark wrist = lm.get(0);
-                // Determine left/right (input bitmap is already mirrored for selfie view)
-                boolean isLeft = (wrist.x() < 0.5f);
+                float score = 1f;
+                boolean isLeft = (lm.get(0).x() < 0.5f);
                 if (handed != null && i < handed.size() && !handed.get(i).isEmpty()) {
-                    String cat = handed.get(i).get(0).categoryName();
+                    Category c = handed.get(i).get(0);
+                    score = c.score();
+                    String cat = c.categoryName();
                     if ("Left".equalsIgnoreCase(cat)) isLeft = true;
                     else if ("Right".equalsIgnoreCase(cat)) isLeft = false;
                 }
+                // Reject low-confidence detections (e.g., face/chin/clothing mistaken for a hand)
+                if (score < 0.65f) continue;
+
+                NormalizedLandmark wrist = lm.get(0);
+                NormalizedLandmark midMcp = lm.get(9);
+                // Reject tiny bogus detections or hands resting low at the bottom edge
+                double handSpan = Math.hypot(midMcp.x() - wrist.x(), midMcp.y() - wrist.y());
+                if (handSpan < 0.055 || wrist.y() > 0.76f) continue;
+
                 float cIdx = fingerCurl(lm, 5, 8);
                 float cMid = fingerCurl(lm, 9, 12);
                 float cRing = fingerCurl(lm, 13, 16);
                 float cPinky = fingerCurl(lm, 17, 20);
                 float avgCurl = (cIdx + cMid + cRing + cPinky) * 0.25f;
                 int gesture = classifyHandGesture(cIdx, cMid, cRing, cPinky);
-                // Only raise avatar arm when the hand is clearly raised above lower chest (wrist.y < 0.78)
-                float raise = clamp01((0.80f - wrist.y()) / 0.50f);
+                float raise = clamp01((0.76f - wrist.y()) / 0.44f);
+                if (raise < 0.12f) continue;
+
+                float dx = (wrist.x() - sPrevWristX) * 14f;
+                sPrevWristX = wrist.x();
+                st.waveOsc = st.waveOsc * 0.65f + Math.max(-1f, Math.min(1f, dx)) * 0.35f;
 
                 if (isLeft) {
                     sawL = true;
-                    st.handL = st.handL + (raise - st.handL) * 0.30f;
-                    st.handLX = st.handLX + (wrist.x() - st.handLX) * 0.32f;
-                    st.handLY = st.handLY + (wrist.y() - st.handLY) * 0.32f;
-                    st.fingerCurlL = avgCurl;
-                    st.handGestureL = gesture;
+                    sHandStreakL = Math.min(6, sHandStreakL + 1);
+                    if (sHandStreakL >= 3) {
+                        st.handL = st.handL + (raise - st.handL) * 0.32f;
+                        st.handLX = st.handLX + (wrist.x() - st.handLX) * 0.32f;
+                        st.handLY = st.handLY + (wrist.y() - st.handLY) * 0.32f;
+                        st.fingerCurlL = avgCurl;
+                        st.handGestureL = gesture;
+                    }
                 } else {
                     sawR = true;
-                    st.handR = st.handR + (raise - st.handR) * 0.30f;
-                    st.handRX = st.handRX + (wrist.x() - st.handRX) * 0.32f;
-                    st.handRY = st.handRY + (wrist.y() - st.handRY) * 0.32f;
-                    st.fingerCurlR = avgCurl;
-                    st.handGestureR = gesture;
+                    sHandStreakR = Math.min(6, sHandStreakR + 1);
+                    if (sHandStreakR >= 3) {
+                        st.handR = st.handR + (raise - st.handR) * 0.32f;
+                        st.handRX = st.handRX + (wrist.x() - st.handRX) * 0.32f;
+                        st.handRY = st.handRY + (wrist.y() - st.handRY) * 0.32f;
+                        st.fingerCurlR = avgCurl;
+                        st.handGestureR = gesture;
+                    }
                 }
             }
         }
         if (!sawL) {
-            st.handL *= 0.72f;
-            if (st.handL < 0.02f) { st.handL = 0f; st.handGestureL = 0; }
+            sHandStreakL = 0;
+            st.handL *= 0.60f;
+            if (st.handL < 0.03f) { st.handL = 0f; st.handGestureL = 0; }
         }
         if (!sawR) {
-            st.handR *= 0.72f;
-            if (st.handR < 0.02f) { st.handR = 0f; st.handGestureR = 0; }
+            sHandStreakR = 0;
+            st.handR *= 0.60f;
+            if (st.handR < 0.03f) { st.handR = 0f; st.handGestureR = 0; }
         }
-        st.mpHandsActive = sawL || sawR;
+        if (!sawL && !sawR) {
+            st.waveOsc *= 0.55f;
+            if (Math.abs(st.waveOsc) < 0.02f) st.waveOsc = 0f;
+        }
+        st.mpHandsActive = (sHandStreakL >= 3) || (sHandStreakR >= 3);
         st.lastMpHandsMs = now;
     }
 

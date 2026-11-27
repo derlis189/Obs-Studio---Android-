@@ -314,10 +314,11 @@ public final class FaceTrackerManager {
     public static void onFrontCameraYuv(Image img, boolean front) {
         if (img == null) return;
         // Run MediaPipe Face Landmarker (52 ARKit blendshapes) + Hand Landmarker asynchronously first
-        boolean mpSubmitted = MediaPipeVtuberTracker.submitYuvFrame(img, front, sState);
+        MediaPipeVtuberTracker.submitYuvFrame(img, front, sState);
+        // Never run the legacy skin-motion heuristic when MediaPipe HandLandmarker is available
+        // or when hand tracking is disabled — otherwise shoulders/lighting flicker trigger false waves!
+        if (MediaPipeVtuberTracker.isHandTrackerReady() || !MediaPipeVtuberTracker.isHandTrackingWanted()) return;
         long now = System.currentTimeMillis();
-        // Skip legacy skin-motion heuristic when MediaPipe Hand Landmarker is actively tracking
-        if (mpSubmitted && sState.mpHandsActive && (now - sState.lastMpHandsMs) < 1200L) return;
         if (now - sLastHandAnalyzeMs < 60L) return; // ~16 Hz fallback hand-wave tracker (<0.25 ms CPU)
         sLastHandAnalyzeMs = now;
         try {

@@ -580,9 +580,11 @@ function applyLive2dParams(model) {
   const handOn = cfg.handTracking !== false;
   const actGest = getActiveGesture();
   const gestWave = (actGest === 'wave' || actGest === 'peace') ? 1.0 : 0;
-  const targetWave = Math.max(handOn ? Math.max(track.handL || 0, track.handR || 0) : 0, gestWave);
-  live2dWaveBlend += (targetWave - live2dWaveBlend) * (targetWave > live2dWaveBlend ? 0.25 : 0.12);
-  if (live2dWaveBlend < 0.005) live2dWaveBlend = 0;
+  const rawHand = handOn ? Math.max(track.handL || 0, track.handR || 0) : 0;
+  const cleanHand = rawHand > 0.20 ? (rawHand - 0.20) / 0.80 : 0;
+  const targetWave = Math.max(cleanHand, gestWave);
+  live2dWaveBlend += (targetWave - live2dWaveBlend) * (targetWave > live2dWaveBlend ? 0.25 : 0.14);
+  if (live2dWaveBlend < 0.01) live2dWaveBlend = 0;
 
   const waveSwing = Math.sin(t * 7.8) * 0.72 + clamp(track.waveOsc || 0, -1, 1) * 0.28;
   const danceX = actGest === 'dance' ? Math.sin(t * 3.8) * 14 : 0;
