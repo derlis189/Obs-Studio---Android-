@@ -96,6 +96,7 @@ El resultado completo queda en `out/phase1/report.json`, con comandos y errores 
 - [Navegador GPU y video real de VDO.Ninja](docs/VERIFICACION-NAVEGADOR-VDO-NINJA.md).
 - [Ahorro térmico de capturas y vistas previas](docs/VERIFICACION-AHORRO-TERMICO.md).
 - [Rendimiento, codificadores compartidos y ciclo de vida](docs/VERIFICACION-RENDIMIENTO-2026-11-25.md).
+- [Auditoría técnica EGM v2 (post-remediación y hoja de ruta v3)](docs/AUDITORIA-EGM-2026-11-26.md).
 - [Director automático: plugin original y prueba Android](docs/VERIFICACION-DIRECTOR-AUTOMATICO.md).
 - [MediaCodec y RTMP comprobados](docs/VERIFICACION-FASE5.md).
 - [Licencias y distribución](docs/LICENCIAS.md).
