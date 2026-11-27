@@ -486,11 +486,18 @@ function applyVrmFingers(hum, side, curl, gesture) {
     }
     const prox = hum?.getNormalizedBoneNode(pfx + fingers[i] + 'Proximal');
     const inter = hum?.getNormalizedBoneNode(pfx + fingers[i] + 'Intermediate');
-    if (prox) prox.rotation.z = s * fCurl * 1.15;
+    if (prox) {
+      prox.rotation.z = s * fCurl * 1.15;
+      if (gesture === 3) {
+        prox.rotation.y = (i === 0 ? 0.16 : i === 1 ? -0.16 : 0) * s;
+      } else {
+        prox.rotation.y = 0;
+      }
+    }
     if (inter) inter.rotation.z = s * fCurl * 1.05;
   }
   const thumb = hum?.getNormalizedBoneNode(pfx + 'ThumbProximal');
-  if (thumb) thumb.rotation.y = -s * (gesture === 2 ? 0.65 : curl * 0.45);
+  if (thumb) thumb.rotation.y = -s * (gesture === 2 || gesture === 3 ? 0.72 : gesture === 1 ? 0.05 : curl * 0.45);
 }
 
 // ---------- Live2D ----------
@@ -623,23 +630,28 @@ function applyLive2dParams(model) {
   const sens = Math.max(0.4, Math.min(2.5, Number(cfg.headSensitivity) || 1.0));
   const handOn = cfg.handTracking !== false;
   const actGest = getActiveGesture();
-  const gestWave = (actGest === 'wave' || actGest === 'peace') ? 1.0 : 0;
-  const rawHand = handOn ? Math.max(track.handL || 0, track.handR || 0) : 0;
+  const suppressWave = (actGest === 'clap' || actGest === 'peace' || actGest === 'think' || actGest === 'dance');
+  const gestWave = (actGest === 'wave') ? 1.0 : 0;
+  const rawHand = (handOn && !suppressWave) ? Math.max(track.handL || 0, track.handR || 0) : 0;
   const cleanHand = rawHand > 0.20 ? (rawHand - 0.20) / 0.80 : 0;
   const targetWave = Math.max(cleanHand, gestWave);
   live2dWaveBlend += (targetWave - live2dWaveBlend) * (targetWave > live2dWaveBlend ? 0.25 : 0.14);
   if (live2dWaveBlend < 0.01) live2dWaveBlend = 0;
 
   const waveSwing = Math.sin(t * 7.8) * 0.72 + clamp(track.waveOsc || 0, -1, 1) * 0.28;
+  const isClap = actGest === 'clap';
+  const isPeace = actGest === 'peace';
+  const clapBeat = isClap ? Math.abs(Math.sin(t * 7.5)) : 0;
+  const clapSway = isClap ? Math.sin(t * 3.75) : 0;
   const danceX = actGest === 'dance' ? Math.sin(t * 3.8) * 14 : 0;
   const danceZ = actGest === 'dance' ? Math.sin(t * 3.8) * 11 : 0;
   const thinkRoll = actGest === 'think' ? -14 : 0;
   const invX = cfg.invertX ? -1 : 1;
   const invY = cfg.invertY ? -1 : 1;
-  const yaw = clamp(sm.yaw * sens * invX + danceX, -30, 30);
-  const pitch = clamp(sm.pitch * sens * invY + (actGest === 'think' ? 8 : 0), -30, 30);
-  const roll = clamp(-sm.roll * sens * invX + live2dWaveBlend * 7.0 + danceZ + thinkRoll, -30, 30);
-  const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.65, actGest === 'happy' ? 1 : 0), 0, 1);
+  const yaw = clamp(sm.yaw * sens * invX + danceX + (isPeace ? 10 : 0), -30, 30);
+  const pitch = clamp(sm.pitch * sens * invY + (actGest === 'think' ? 8 : 0) + (isClap ? (clapBeat * 10.0 - 3.5) : 0) + (isPeace ? 5 : 0), -30, 30);
+  const roll = clamp(-sm.roll * sens * invX + live2dWaveBlend * 7.0 + danceZ + thinkRoll + (isClap ? clapSway * 7.5 : 0) + (isPeace ? -16 : 0), -30, 30);
+  const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.65, (actGest === 'happy' || isClap || isPeace) ? 1 : 0), 0, 1);
   const sad = clamp(Math.max(track.sad || 0, actGest === 'sad' ? 1 : 0), 0, 1);
   const angry = clamp(Math.max(track.angry || 0, actGest === 'angry' ? 1 : 0), 0, 1);
   const surprised = clamp(Math.max(track.surprised || 0, actGest === 'surprised' ? 1 : 0), 0, 1);
@@ -657,24 +669,24 @@ function applyLive2dParams(model) {
 
   // Rich lip-sync: fuse ARKit mouth shape + dynamic microphone vowel contour
   const micNorm = cfg.lipSync ? clamp(track.mic / Math.max(0.018, cfg.voiceThreshold * 2.8), 0, 1) : 0;
-  const mouthOpen = clamp(Math.max(sm.mouth, micNorm * 0.92, surprised * 0.78), 0, 1);
+  const mouthOpen = clamp(Math.max(sm.mouth, micNorm * 0.92, surprised * 0.78, isPeace ? 0.22 : 0, isClap ? clapBeat * 0.28 : 0), 0, 1);
   // Subtle syllable modulation on MouthForm when speaking by mic alone
   const micVowelMod = (!track.mp && micNorm > 0.15) ? (Math.sin(t * 14.0) * 0.35 * micNorm) : 0;
   const baseForm = (track.mp || track.vmc)
     ? sm.mouthForm
     : clamp(smile * 0.9 - sad * 0.75 - angry * 0.6 + micVowelMod, -1, 1);
-  const mouthForm = clamp(baseForm + (actGest === 'happy' ? 0.8 : 0) - (actGest === 'sad' ? 0.6 : 0), -1, 1);
+  const mouthForm = clamp(baseForm + (actGest === 'happy' || isClap || isPeace ? 0.85 : 0) - (actGest === 'sad' ? 0.6 : 0), -1, 1);
 
-  // Independent Duchenne eye smiles + wide-eyed surprise boost
-  const eyeSmileL = clamp(Math.max((track.mp || track.vmc) ? sm.eyeSmileR : smile, actGest === 'happy' ? 0.95 : 0), 0, 1);
-  const eyeSmileR = clamp(Math.max((track.mp || track.vmc) ? sm.eyeSmileL : smile, actGest === 'happy' ? 0.95 : 0), 0, 1);
-  const eyeOpenL = curAutoBlink ? 0 : clamp(sm.eyeR + sm.eyeWideR * 0.35 + surprised * 0.25, 0, 1.35);
-  const eyeOpenR = curAutoBlink ? 0 : clamp(sm.eyeL + sm.eyeWideL * 0.35 + surprised * 0.25, 0, 1.35);
+  // Independent Duchenne eye smiles + wide-eyed surprise boost + Victory wink
+  const eyeSmileL = clamp(Math.max((track.mp || track.vmc) ? sm.eyeSmileR : smile, (actGest === 'happy' || isClap) ? 0.95 : (isPeace ? 0.45 : 0)), 0, 1);
+  const eyeSmileR = clamp(Math.max((track.mp || track.vmc) ? sm.eyeSmileL : smile, (actGest === 'happy' || isClap || isPeace) ? 1.0 : 0), 0, 1);
+  const eyeOpenL = curAutoBlink ? 0 : clamp((isPeace ? 1.18 : sm.eyeR) + sm.eyeWideR * 0.35 + surprised * 0.25, 0, 1.35);
+  const eyeOpenR = (curAutoBlink || isPeace) ? 0 : clamp(sm.eyeL + sm.eyeWideL * 0.35 + surprised * 0.25, 0, 1.35);
 
   // Smooth custom model expression overlays (auto-discovered from .cdi3.json + live touch toggles)
-  const tgtHappyExp = (manualExp.happy || smile > 0.62 || actGest === 'happy') ? 1 : 0;
+  const tgtHappyExp = (manualExp.happy || smile > 0.62 || actGest === 'happy' || isClap) ? 1 : 0;
   const tgtGloomExp = (manualExp.gloom || angry > 0.55 || sad > 0.60 || actGest === 'angry' || actGest === 'sad') ? 1 : 0;
-  const tgtStarExp = (manualExp.star || surprised > 0.58 || actGest === 'peace' || actGest === 'clap') ? 1 : 0;
+  const tgtStarExp = (manualExp.star || surprised > 0.58 || isPeace) ? 1 : 0;
   const tgtCryExp = (manualExp.cry || sad > 0.68) ? 1 : 0;
   const tgtCoatExp = manualExp.coat ? 1 : 0;
   l2dExpBlend.happy += (tgtHappyExp - l2dExpBlend.happy) * 0.18;
@@ -687,9 +699,9 @@ function applyLive2dParams(model) {
     core.setParameterValueById('ParamAngleX', yaw);
     core.setParameterValueById('ParamAngleY', pitch);
     core.setParameterValueById('ParamAngleZ', roll);
-    core.setParameterValueById('ParamBodyAngleX', clamp(sm.bodyYaw * sens * invX * 0.44 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8 + danceX * 0.4, -10, 10));
-    core.setParameterValueById('ParamBodyAngleY', clamp(sm.bodyPitch * sens * invY * 0.44 - sm.faceY * 4.5, -10, 10));
-    core.setParameterValueById('ParamBodyAngleZ', clamp(-sm.bodyRoll * sens * invX * 0.40 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5 + danceZ * 0.5, -10, 10));
+    core.setParameterValueById('ParamBodyAngleX', clamp(sm.bodyYaw * sens * invX * 0.44 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8 + danceX * 0.4 + (isPeace ? 4.0 : 0), -10, 10));
+    core.setParameterValueById('ParamBodyAngleY', clamp(sm.bodyPitch * sens * invY * 0.44 - sm.faceY * 4.5 + (isClap ? (clapBeat * 8.5 - 3.0) : 0), -10, 10));
+    core.setParameterValueById('ParamBodyAngleZ', clamp(-sm.bodyRoll * sens * invX * 0.40 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5 + danceZ * 0.5 + (isClap ? clapSway * 6.5 : 0) + (isPeace ? -6.0 : 0), -10, 10));
 
     core.setParameterValueById('ParamEyeLOpen', eyeOpenL);
     core.setParameterValueById('ParamEyeROpen', eyeOpenR);
@@ -719,7 +731,7 @@ function applyLive2dParams(model) {
     core.setParameterValueById('ParamBrowLForm', browFormL);
     core.setParameterValueById('ParamBrowRForm', browFormR);
 
-    core.setParameterValueById('ParamCheek', clamp(Math.max(live2dWaveBlend * 0.55, sm.cheekPuff, smile * 0.65, surprised * 0.30), 0, 1));
+    core.setParameterValueById('ParamCheek', clamp(Math.max(live2dWaveBlend * 0.55, sm.cheekPuff, smile * 0.65, surprised * 0.30, isClap ? 0.8 : 0, isPeace ? 0.85 : 0), 0, 1));
     core.setParameterValueById('CheekPuff', clamp(sm.cheekPuff, 0, 1));
     core.setParameterValueById('ParamBreath', breath);
 
@@ -736,8 +748,8 @@ function applyLive2dParams(model) {
 
     for (const id of live2dWaveInfo.toggleIds) core.setParameterValueById(id, live2dWaveBlend);
     for (const id of live2dWaveInfo.swingIds) core.setParameterValueById(id, waveSwing * 30 * live2dWaveBlend);
-    const hL = Math.max(handOn ? clamp(track.handL || 0, 0, 1) : 0, actGest === 'clap' ? 1 : 0);
-    const hR = Math.max(handOn ? clamp(track.handR || 0, 0, 1) : 0, (actGest === 'wave' || actGest === 'clap' || actGest === 'peace') ? 1 : 0);
+    const hL = (handOn && !suppressWave) ? clamp(track.handL || 0, 0, 1) : 0;
+    const hR = Math.max((handOn && !suppressWave) ? clamp(track.handR || 0, 0, 1) : 0, actGest === 'wave' ? 1 : 0);
     for (const id of live2dWaveInfo.armLIds) core.setParameterValueById(id, hL * (1 + waveSwing * 0.25));
     for (const id of live2dWaveInfo.armRIds) core.setParameterValueById(id, hR * (1 + waveSwing * 0.25));
     for (const id of ['ParamArmLA', 'ParamArmL', 'ParamHandL']) core.setParameterValueById(id, hL * 10);
@@ -1261,22 +1273,39 @@ function animate(now) {
         if (rShoulder) rShoulder.rotation.set(0, 0, lerp(-0.05 + breath * 0.012, 0.18, vrmWaveR));
 
         if (actGest === 'clap') {
-          const cl = Math.abs(Math.sin(t * 8.5));
-          if (lUpper) lUpper.rotation.set(-0.55, 0.35 + cl * 0.18, 0.45);
-          if (rUpper) rUpper.rotation.set(-0.55, -0.35 - cl * 0.18, -0.45);
-          if (lLower) lLower.rotation.set(-0.25, 0.85 + cl * 0.30, -0.40);
-          if (rLower) rLower.rotation.set(-0.25, -0.85 - cl * 0.30, 0.40);
+          const cl = 0.5 - 0.5 * Math.cos(t * 14.0);
+          if (lShoulder) lShoulder.rotation.set(0, 0.10, 0.04);
+          if (rShoulder) rShoulder.rotation.set(0, -0.10, -0.04);
+          if (lUpper) lUpper.rotation.set(0.20, 0.55 + cl * 0.22, 0.85);
+          if (rUpper) rUpper.rotation.set(0.20, -0.55 - cl * 0.22, -0.85);
+          if (lLower) lLower.rotation.set(0.15, 0.95 + cl * 0.45, -0.35);
+          if (rLower) rLower.rotation.set(0.15, -0.95 - cl * 0.45, 0.35);
+          if (lHand) lHand.rotation.set(0, 0.15, 0.25);
+          if (rHand) rHand.rotation.set(0, -0.15, -0.25);
+        } else if (actGest === 'peace') {
+          if (lShoulder) lShoulder.rotation.set(0, 0, 0.05 - breath * 0.012);
+          if (rShoulder) rShoulder.rotation.set(0, 0, 0.14);
+          if (lUpper) lUpper.rotation.set(0.08, 0.06, 1.22 - breath * 0.025);
+          if (lLower) lLower.rotation.set(0.05, 0.14, 0.10);
+          if (lHand) lHand.rotation.set(0, 0, 0);
+          if (rUpper) rUpper.rotation.set(-0.32, -0.48, -0.45);
+          if (rLower) rLower.rotation.set(-0.18, -0.45, 1.85);
+          if (rHand) rHand.rotation.set(0.10, -0.35, -0.18);
         } else if (actGest === 'think') {
           if (lUpper) lUpper.rotation.set(0.08, 0.06, 1.22);
           if (lLower) lLower.rotation.set(0.05, 0.14, 0.10);
+          if (lHand) lHand.rotation.set(0, 0, 0);
           if (rUpper) rUpper.rotation.set(-0.65, -0.25, -0.35);
           if (rLower) rLower.rotation.set(-0.35, -0.45, 1.65);
+          if (rHand) rHand.rotation.set(0, 0, 0);
         } else if (actGest === 'dance') {
           const d = Math.sin(t * 3.8);
           if (lUpper) lUpper.rotation.set(-0.25, 0.12, 0.65 + d * 0.45);
           if (rUpper) rUpper.rotation.set(-0.25, -0.12, -0.65 + d * 0.45);
           if (lLower) lLower.rotation.set(-0.20, 0.35, -0.65 - d * 0.35);
           if (rLower) rLower.rotation.set(-0.20, -0.35, 0.65 - d * 0.35);
+          if (lHand) lHand.rotation.set(0, 0, 0);
+          if (rHand) rHand.rotation.set(0, 0, 0);
         } else {
           if (lUpper) lUpper.rotation.set(
             lerp(0.08, -0.35 - liftL * 0.25, vrmWaveL),
@@ -1289,33 +1318,41 @@ function animate(now) {
             lerp(-1.22 + breath * 0.025, 0.32 - (1 - liftR) * 0.45, vrmWaveR)
           );
           const liveOsc = (actGest === 'wave') ? waveOsc * 0.42 : clamp(track.waveOsc || 0, -1, 1) * 0.28;
-          const oscL = (actGest === 'peace') ? 0 : liveOsc;
-          const oscR = (actGest === 'peace') ? 0 : liveOsc;
           if (lLower) lLower.rotation.set(
             lerp(0.05, -0.22, vrmWaveL),
             lerp(0.14, 0.05, vrmWaveL),
-            lerp(0.10, -1.35 - oscL, vrmWaveL)
+            lerp(0.10, -1.35 - liveOsc, vrmWaveL)
           );
           if (rLower) rLower.rotation.set(
             lerp(0.05, -0.22, vrmWaveR),
             lerp(-0.14, -0.05, vrmWaveR),
-            lerp(-0.10, 1.35 + oscR, vrmWaveR)
+            lerp(-0.10, 1.35 + liveOsc, vrmWaveR)
           );
-          if (lHand) lHand.rotation.set(0, 0, -oscL * 0.65 * vrmWaveL);
-          if (rHand) rHand.rotation.set(0, 0, oscR * 0.65 * vrmWaveR);
+          if (lHand) lHand.rotation.set(0, 0, -liveOsc * 0.65 * vrmWaveL);
+          if (rHand) rHand.rotation.set(0, 0, liveOsc * 0.65 * vrmWaveR);
         }
 
         // Only apply finger pose when hand is actively raised or gesture requested
-        if (vrmWaveL > 0.15) applyVrmFingers(hum, 'L', track.curlL || 0, track.gestL || 0);
-        else applyVrmFingers(hum, 'L', 0.15, 0);
-        if (vrmWaveR > 0.15 || actGest === 'peace') applyVrmFingers(hum, 'R', track.curlR || 0, actGest === 'peace' ? 3 : (track.gestR || 0));
-        else applyVrmFingers(hum, 'R', 0.15, 0);
+        if (actGest === 'clap') {
+          applyVrmFingers(hum, 'L', 0.05, 1);
+          applyVrmFingers(hum, 'R', 0.05, 1);
+        } else if (actGest === 'peace') {
+          applyVrmFingers(hum, 'L', 0.15, 0);
+          applyVrmFingers(hum, 'R', 0, 3);
+        } else {
+          if (vrmWaveL > 0.15) applyVrmFingers(hum, 'L', track.curlL || 0, track.gestL || 0);
+          else applyVrmFingers(hum, 'L', 0.15, 0);
+          if (vrmWaveR > 0.15) applyVrmFingers(hum, 'R', track.curlR || 0, actGest === 'wave' ? 1 : (track.gestR || 0));
+          else applyVrmFingers(hum, 'R', 0.15, 0);
+        }
 
         const danceRoll = actGest === 'dance' ? Math.sin(t * 3.8) * 0.14 : 0;
         const thinkTilt = actGest === 'think' ? -0.18 : 0;
+        const peaceTilt = actGest === 'peace' ? 0.16 : 0;
+        const clapBob = actGest === 'clap' ? (0.5 - 0.5 * Math.cos(t * 14.0)) * 0.08 : 0;
         // On VRM0 after rotateVRM0 (+Z world forward), positive local X rotation tilts face UP
-        if (chest) chest.rotation.set(breath * 0.022 + bPitchR * 0.12, sway * 0.018 + bYawR * 0.10 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), bRollR * 0.08 + danceRoll * 0.5);
-        if (head) head.rotation.set(pitchR * 0.68 + (actGest === 'think' ? -0.12 : 0), yawR * 0.62, rollR * 0.62 + (vrmWaveR - vrmWaveL) * 0.08 + thinkTilt);
+        if (chest) chest.rotation.set(breath * 0.022 + bPitchR * 0.12 - clapBob * 0.5, sway * 0.018 + bYawR * 0.10 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), bRollR * 0.08 + danceRoll * 0.5 + (actGest === 'peace' ? 0.05 : 0));
+        if (head) head.rotation.set(pitchR * 0.68 + (actGest === 'think' ? -0.12 : 0) + clapBob, yawR * 0.62 + (actGest === 'peace' ? -0.08 : 0), rollR * 0.62 + (actGest === 'wave' ? (vrmWaveR - vrmWaveL) * 0.08 : 0) + thinkTilt + peaceTilt);
         if (neck) neck.rotation.set(bPitchR * 0.28, bYawR * 0.24, bRollR * 0.24);
         if (spine) spine.rotation.set(bPitchR * 0.10 + breath * 0.012, bYawR * 0.08 + sway * 0.015, bRollR * 0.06 + danceRoll * 0.4);
       }
@@ -1343,7 +1380,7 @@ function animate(now) {
           em.setValue('ih', 0); em.setValue('ou', 0); em.setValue('ee', 0); em.setValue('oh', 0);
         }
         em.setValue('blinkLeft', autoBlink ? 1 : clamp(1 - sm.eyeL, 0, 1));
-        em.setValue('blinkRight', autoBlink ? 1 : clamp(1 - sm.eyeR, 0, 1));
+        em.setValue('blinkRight', (autoBlink || actGest === 'peace') ? 1 : clamp(1 - sm.eyeR, 0, 1));
         em.setValue('happy', clamp(Math.max(track.happy, maxWave * 0.55, gestHappy), 0, 1));
         em.setValue('sad', clamp(track.sad || 0, 0, 1));
         em.setValue('angry', clamp(track.angry || 0, 0, 1));
