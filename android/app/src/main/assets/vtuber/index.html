@@ -59,8 +59,10 @@ let cfg = {
 
 const track = {
   yaw: 0, pitch: 0, roll: 0, eyeL: 1, eyeR: 1,
-  lookX: 0, lookY: 0, browL: 0, browR: 0, cheekPuff: 0,
-  mouthOpen: 0, mA: 0, mI: 0, mU: 0, mE: 0, mO: 0,
+  eyeSmileL: 0, eyeSmileR: 0, eyeWideL: 0, eyeWideR: 0,
+  lookX: 0, lookY: 0, browL: 0, browR: 0, browAngleL: 0, browAngleR: 0, cheekPuff: 0,
+  mouthOpen: 0, mouthForm: 0, mouthX: 0, mFunnel: 0, mPucker: 0, mShrug: 0,
+  mA: 0, mI: 0, mU: 0, mE: 0, mO: 0,
   happy: 0, sad: 0, angry: 0, surprised: 0,
   faceX: 0, faceY: 0, mic: 0, faceDetected: false, mp: false, vmc: false,
   handL: 0, handR: 0, handLX: 0.25, handLY: 0.75, handRX: 0.75, handRY: 0.75,
@@ -71,13 +73,15 @@ const track = {
 let bounceY = 0, bounceVel = 0, wasTalking = false;
 let blinkTimer = 0, blinkDur = 0;
 let vrmWaveL = 0, vrmWaveR = 0, live2dWaveBlend = 0;
+const l2dExpBlend = { happy: 0, gloom: 0, star: 0, cry: 0 };
 // Per-frame dt-independent continuous damping for silky-smooth 30/60 FPS avatar motion
 const sm = {
   yaw: 0, pitch: 0, roll: 0,
   bodyYaw: 0, bodyPitch: 0, bodyRoll: 0,
   faceX: 0, faceY: 0,
-  eyeL: 1, eyeR: 1, lookX: 0, lookY: 0,
-  mouth: 0, mA: 0, mI: 0, mU: 0, mE: 0, mO: 0
+  eyeL: 1, eyeR: 1, eyeSmileL: 0, eyeSmileR: 0, eyeWideL: 0, eyeWideR: 0,
+  lookX: 0, lookY: 0, browL: 0, browR: 0, browAngleL: 0, browAngleR: 0, cheekPuff: 0,
+  mouth: 0, mouthForm: 0, mouthX: 0, mA: 0, mI: 0, mU: 0, mE: 0, mO: 0
 };
 
 // Three.js / VRM / VRMA state
@@ -91,7 +95,10 @@ const tmpQuat = new THREE.Quaternion();
 // Live2D Pixi state
 let pixiApp = null, live2dModel = null, loadedLive2dUrl = '';
 let live2dLoadSeq = 0;
-let live2dWaveInfo = { toggleIds: [], swingIds: [], armLIds: [], armRIds: [] };
+let live2dWaveInfo = {
+  toggleIds: [], swingIds: [], armLIds: [], armRIds: [],
+  happyIds: [], gloomIds: [], starIds: [], starRotIds: [], cryIds: [], cryLoopIds: []
+};
 let live2dStatusText = '';
 let curAutoBlink = false, curMouthVal = 0;
 let cubismReady = !!(window.Live2DCubismCore && window.PIXI && window.PIXI.live2d);
@@ -554,7 +561,10 @@ function fitLive2dModel() {
 }
 
 async function discoverLive2dWaveParams(model3Url) {
-  const info = { toggleIds: [], swingIds: [], armLIds: [], armRIds: [] };
+  const info = {
+    toggleIds: [], swingIds: [], armLIds: [], armRIds: [],
+    happyIds: [], gloomIds: [], starIds: [], starRotIds: [], cryIds: [], cryLoopIds: []
+  };
   try {
     const r = await fetch(model3Url);
     if (!r.ok) return info;
@@ -580,6 +590,16 @@ async function discoverLive2dWaveParams(model3Url) {
       } else if (nm.includes('arm') || nm.includes('hand')) {
         if (nm.includes('left') || idLow.includes('arml') || idLow.includes('handl')) info.armLIds.push(id);
         else if (nm.includes('right') || idLow.includes('armr') || idLow.includes('handr')) info.armRIds.push(id);
+      } else if (nm.includes('sparkle') || nm.includes('happy') || nm.includes('heart') || idLow.includes('happysparkle')) {
+        info.happyIds.push(id);
+      } else if (nm.includes('gloom') || nm.includes('angry') || nm.includes('shadow') || nm.includes('dark') || idLow.includes('gloom')) {
+        info.gloomIds.push(id);
+      } else if (nm.includes('star') || idLow.includes('stareye') || idLow === 'serr' || idLow === 'serl') {
+        if (nm.includes('rot') || nm.includes('spin') || idLow === 'serr' || idLow === 'serl') info.starRotIds.push(id);
+        else info.starIds.push(id);
+      } else if (nm.includes('cry') || nm.includes('tear')) {
+        if (nm.includes('loop') || nm.includes('anim')) info.cryLoopIds.push(id);
+        else info.cryIds.push(id);
       }
     }
   } catch (e) {}
@@ -616,38 +636,97 @@ function applyLive2dParams(model) {
   const yaw = clamp(sm.yaw * sens * invX + danceX, -30, 30);
   const pitch = clamp(sm.pitch * sens * invY + (actGest === 'think' ? 8 : 0), -30, 30);
   const roll = clamp(-sm.roll * sens * invX + live2dWaveBlend * 7.0 + danceZ + thinkRoll, -30, 30);
-  const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.75, actGest === 'happy' ? 1 : 0), 0, 1);
-  const sad = clamp(track.sad || 0, 0, 1);
-  const angry = clamp(track.angry || 0, 0, 1);
-  const surprised = clamp(track.surprised || 0, 0, 1);
+  const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.65, actGest === 'happy' ? 1 : 0), 0, 1);
+  const sad = clamp(Math.max(track.sad || 0, actGest === 'sad' ? 1 : 0), 0, 1);
+  const angry = clamp(Math.max(track.angry || 0, actGest === 'angry' ? 1 : 0), 0, 1);
+  const surprised = clamp(Math.max(track.surprised || 0, actGest === 'surprised' ? 1 : 0), 0, 1);
 
   const eyeBallX = (track.mp || track.vmc) ? clamp(-sm.lookX * invX, -1, 1) : clamp(yaw / 24, -1, 1);
   const eyeBallY = (track.mp || track.vmc) ? clamp(sm.lookY * invY, -1, 1) : clamp(pitch / 24, -1, 1);
-  const browL = (track.mp || track.vmc) ? clamp(track.browL, -1, 1) : clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1);
-  const browR = (track.mp || track.vmc) ? clamp(track.browR, -1, 1) : clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1);
-  const mouthForm = clamp(smile + (track.mI + track.mE) * 0.35 - (track.mU + track.mO) * 0.45 - sad * 0.7 - angry * 0.5, -1, 1);
+  // Mirror brows & eye smiles to match selfie view (user right -> character left)
+  const browL = (track.mp || track.vmc) ? clamp(sm.browR, -1, 1) : clamp(sad * 0.55 + surprised * 0.85 - angry * 0.8, -1, 1);
+  const browR = (track.mp || track.vmc) ? clamp(sm.browL, -1, 1) : clamp(sad * 0.55 + surprised * 0.85 - angry * 0.8, -1, 1);
+  const browAngL = (track.mp || track.vmc) ? clamp(sm.browAngleR, -1, 1) : clamp(sad * 0.7 - angry * 0.9, -1, 1);
+  const browAngR = (track.mp || track.vmc) ? clamp(sm.browAngleL, -1, 1) : clamp(sad * 0.7 - angry * 0.9, -1, 1);
+  const browFormL = clamp(smile * 0.65 + surprised * 0.35 - angry * 0.95 - sad * 0.45, -1, 1);
+  const browFormR = clamp(smile * 0.65 + surprised * 0.35 - angry * 0.95 - sad * 0.45, -1, 1);
+  const browPinch = clamp(-angry * 0.65 - sad * 0.30, -1, 1);
+
+  // Rich lip-sync: fuse ARKit mouth shape + dynamic microphone vowel contour
+  const micNorm = cfg.lipSync ? clamp(track.mic / Math.max(0.018, cfg.voiceThreshold * 2.8), 0, 1) : 0;
+  const mouthOpen = clamp(Math.max(sm.mouth, micNorm * 0.92, surprised * 0.78), 0, 1);
+  // Subtle syllable modulation on MouthForm when speaking by mic alone
+  const micVowelMod = (!track.mp && micNorm > 0.15) ? (Math.sin(t * 14.0) * 0.35 * micNorm) : 0;
+  const baseForm = (track.mp || track.vmc)
+    ? sm.mouthForm
+    : clamp(smile * 0.9 - sad * 0.75 - angry * 0.6 + micVowelMod, -1, 1);
+  const mouthForm = clamp(baseForm + (actGest === 'happy' ? 0.8 : 0) - (actGest === 'sad' ? 0.6 : 0), -1, 1);
+
+  // Independent Duchenne eye smiles + wide-eyed surprise boost
+  const eyeSmileL = clamp(Math.max((track.mp || track.vmc) ? sm.eyeSmileR : smile, actGest === 'happy' ? 0.95 : 0), 0, 1);
+  const eyeSmileR = clamp(Math.max((track.mp || track.vmc) ? sm.eyeSmileL : smile, actGest === 'happy' ? 0.95 : 0), 0, 1);
+  const eyeOpenL = curAutoBlink ? 0 : clamp(sm.eyeR + sm.eyeWideR * 0.35 + surprised * 0.25, 0, 1.35);
+  const eyeOpenR = curAutoBlink ? 0 : clamp(sm.eyeL + sm.eyeWideL * 0.35 + surprised * 0.25, 0, 1.35);
+
+  // Smooth custom model expression overlays (auto-discovered from .cdi3.json)
+  const tgtHappyExp = (smile > 0.62 || actGest === 'happy') ? 1 : 0;
+  const tgtGloomExp = (angry > 0.55 || sad > 0.60 || actGest === 'angry' || actGest === 'sad') ? 1 : 0;
+  const tgtStarExp = (surprised > 0.58 || actGest === 'peace' || actGest === 'clap') ? 1 : 0;
+  const tgtCryExp = (sad > 0.68) ? 1 : 0;
+  l2dExpBlend.happy += (tgtHappyExp - l2dExpBlend.happy) * 0.16;
+  l2dExpBlend.gloom += (tgtGloomExp - l2dExpBlend.gloom) * 0.14;
+  l2dExpBlend.star += (tgtStarExp - l2dExpBlend.star) * 0.18;
+  l2dExpBlend.cry += (tgtCryExp - l2dExpBlend.cry) * 0.14;
 
   try {
     core.setParameterValueById('ParamAngleX', yaw);
     core.setParameterValueById('ParamAngleY', pitch);
     core.setParameterValueById('ParamAngleZ', roll);
-    core.setParameterValueById('ParamBodyAngleX', clamp(sm.bodyYaw * sens * invX * 0.42 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8 + danceX * 0.4, -10, 10));
-    core.setParameterValueById('ParamBodyAngleY', clamp(sm.bodyPitch * sens * invY * 0.42 - sm.faceY * 4.5, -10, 10));
-    core.setParameterValueById('ParamBodyAngleZ', clamp(-sm.bodyRoll * sens * invX * 0.38 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5 + danceZ * 0.5, -10, 10));
-    core.setParameterValueById('ParamEyeLOpen', curAutoBlink ? 0 : clamp(sm.eyeR, 0, 1));
-    core.setParameterValueById('ParamEyeROpen', curAutoBlink ? 0 : clamp(sm.eyeL, 0, 1));
-    core.setParameterValueById('ParamEyeLSmile', smile);
-    core.setParameterValueById('ParamEyeRSmile', smile);
+    core.setParameterValueById('ParamBodyAngleX', clamp(sm.bodyYaw * sens * invX * 0.44 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8 + danceX * 0.4, -10, 10));
+    core.setParameterValueById('ParamBodyAngleY', clamp(sm.bodyPitch * sens * invY * 0.44 - sm.faceY * 4.5, -10, 10));
+    core.setParameterValueById('ParamBodyAngleZ', clamp(-sm.bodyRoll * sens * invX * 0.40 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5 + danceZ * 0.5, -10, 10));
+
+    core.setParameterValueById('ParamEyeLOpen', eyeOpenL);
+    core.setParameterValueById('ParamEyeROpen', eyeOpenR);
+    core.setParameterValueById('ParamEyeLSmile', eyeSmileL);
+    core.setParameterValueById('ParamEyeRSmile', eyeSmileR);
     core.setParameterValueById('ParamEyeBallX', eyeBallX);
     core.setParameterValueById('ParamEyeBallY', eyeBallY);
-    core.setParameterValueById('ParamMouthOpenY', clamp(Math.max(curMouthVal, surprised * 0.85), 0, 1));
+
+    // Primary Cubism 4 Lip-Sync + optional VBridger / ARKit mouth params
+    core.setParameterValueById('ParamMouthOpenY', mouthOpen);
     core.setParameterValueById('ParamMouthForm', mouthForm);
+    core.setParameterValueById('ParamMouthX', clamp(-sm.mouthX * invX, -1, 1));
+    core.setParameterValueById('MouthX', clamp(-sm.mouthX * invX, -1, 1));
+    core.setParameterValueById('MouthOpen', mouthOpen);
+    core.setParameterValueById('JawOpen', mouthOpen);
+    core.setParameterValueById('MouthFunnel', clamp(track.mFunnel || 0, 0, 1));
+    core.setParameterValueById('MouthPucker', clamp(track.mPucker || 0, 0, 1));
+    core.setParameterValueById('MouthShrug', clamp(track.mShrug || 0, 0, 1));
+
+    // Full 8-parameter eyebrow expressiveness
+    core.setParameterValueById('ParamBrowLX', browPinch);
+    core.setParameterValueById('ParamBrowRX', browPinch);
     core.setParameterValueById('ParamBrowLY', browL);
     core.setParameterValueById('ParamBrowRY', browR);
-    core.setParameterValueById('ParamBrowLForm', clamp(smile - angry * 0.8, -1, 1));
-    core.setParameterValueById('ParamBrowRForm', clamp(smile - angry * 0.8, -1, 1));
-    core.setParameterValueById('ParamCheek', clamp(Math.max(live2dWaveBlend * 0.55, track.cheekPuff || 0, smile * 0.45), 0, 1));
+    core.setParameterValueById('ParamBrowLAngle', browAngL);
+    core.setParameterValueById('ParamBrowRAngle', browAngR);
+    core.setParameterValueById('ParamBrowLForm', browFormL);
+    core.setParameterValueById('ParamBrowRForm', browFormR);
+
+    core.setParameterValueById('ParamCheek', clamp(Math.max(live2dWaveBlend * 0.55, sm.cheekPuff, smile * 0.65, surprised * 0.30), 0, 1));
+    core.setParameterValueById('CheekPuff', clamp(sm.cheekPuff, 0, 1));
     core.setParameterValueById('ParamBreath', breath);
+
+    // Auto-discovered custom expression toggles & loops (Sparkle, Star Eyes, Gloom, Cry)
+    for (const id of live2dWaveInfo.happyIds) core.setParameterValueById(id, l2dExpBlend.happy);
+    for (const id of live2dWaveInfo.gloomIds) core.setParameterValueById(id, l2dExpBlend.gloom);
+    for (const id of live2dWaveInfo.starIds) core.setParameterValueById(id, l2dExpBlend.star);
+    for (const id of live2dWaveInfo.starRotIds) core.setParameterValueById(id, ((t * 1.4) % 2) - 1);
+    for (const id of live2dWaveInfo.cryIds) core.setParameterValueById(id, l2dExpBlend.cry);
+    for (let i = 0; i < live2dWaveInfo.cryLoopIds.length; ++i) {
+      core.setParameterValueById(live2dWaveInfo.cryLoopIds[i], (t * 1.8 + i * 0.25) % 1.0);
+    }
 
     for (const id of live2dWaveInfo.toggleIds) core.setParameterValueById(id, live2dWaveBlend);
     for (const id of live2dWaveInfo.swingIds) core.setParameterValueById(id, waveSwing * 30 * live2dWaveBlend);
@@ -665,7 +744,10 @@ async function loadLive2dModel(url) {
   if (!url) {
     if (live2dModel && pixiApp) { pixiApp.stage.removeChild(live2dModel); live2dModel.destroy(); live2dModel = null; }
     loadedLive2dUrl = '';
-    live2dWaveInfo = { toggleIds: [], swingIds: [], armLIds: [], armRIds: [] };
+    live2dWaveInfo = {
+      toggleIds: [], swingIds: [], armLIds: [], armRIds: [],
+      happyIds: [], gloomIds: [], starIds: [], starRotIds: [], cryIds: [], cryLoopIds: []
+    };
     if (cfg.live2dPreparing) live2dStatusText = 'Descomprimiendo modelo Live2D (.zip)...';
     else if (cfg.live2dPrepError) live2dStatusText = cfg.live2dPrepError;
     else live2dStatusText = 'Selecciona un .zip o .model3.json en Propiedades';
@@ -1051,16 +1133,28 @@ function animate(now) {
   sm.bodyRoll = damp(sm.bodyRoll, sm.roll, 5.0);
   sm.faceX = damp(sm.faceX, track.faceX || 0, 6.0);
   sm.faceY = damp(sm.faceY, track.faceY || 0, 6.0);
-  sm.eyeL = damp(sm.eyeL, track.eyeL, 20.0);
-  sm.eyeR = damp(sm.eyeR, track.eyeR, 20.0);
-  sm.lookX = damp(sm.lookX, track.lookX, 14.0);
-  sm.lookY = damp(sm.lookY, track.lookY, 14.0);
-  sm.mouth = damp(sm.mouth, mouthVal, 18.0);
-  sm.mA = damp(sm.mA, Math.max(track.mA, micMouth * 0.85), 18.0);
-  sm.mI = damp(sm.mI, track.mI, 16.0);
-  sm.mU = damp(sm.mU, track.mU, 16.0);
-  sm.mE = damp(sm.mE, track.mE, 16.0);
-  sm.mO = damp(sm.mO, track.mO, 16.0);
+  sm.eyeL = damp(sm.eyeL, track.eyeL, 22.0);
+  sm.eyeR = damp(sm.eyeR, track.eyeR, 22.0);
+  sm.eyeSmileL = damp(sm.eyeSmileL, track.eyeSmileL || 0, 14.0);
+  sm.eyeSmileR = damp(sm.eyeSmileR, track.eyeSmileR || 0, 14.0);
+  sm.eyeWideL = damp(sm.eyeWideL, track.eyeWideL || 0, 16.0);
+  sm.eyeWideR = damp(sm.eyeWideR, track.eyeWideR || 0, 16.0);
+  sm.lookX = damp(sm.lookX, track.lookX, 15.0);
+  sm.lookY = damp(sm.lookY, track.lookY, 15.0);
+  sm.browL = damp(sm.browL, track.browL || 0, 13.0);
+  sm.browR = damp(sm.browR, track.browR || 0, 13.0);
+  sm.browAngleL = damp(sm.browAngleL, track.browAngleL || 0, 12.0);
+  sm.browAngleR = damp(sm.browAngleR, track.browAngleR || 0, 12.0);
+  sm.cheekPuff = damp(sm.cheekPuff, track.cheekPuff || 0, 12.0);
+  // Crisp fast-attack, smooth-release lip-sync
+  sm.mouth = damp(sm.mouth, mouthVal, mouthVal > sm.mouth ? 26.0 : 15.0);
+  sm.mouthForm = damp(sm.mouthForm, track.mouthForm || 0, 16.0);
+  sm.mouthX = damp(sm.mouthX, track.mouthX || 0, 16.0);
+  sm.mA = damp(sm.mA, Math.max(track.mA, micMouth * 0.85), 22.0);
+  sm.mI = damp(sm.mI, track.mI, 18.0);
+  sm.mU = damp(sm.mU, track.mU, 18.0);
+  sm.mE = damp(sm.mE, track.mE, 18.0);
+  sm.mO = damp(sm.mO, track.mO, 18.0);
 
   curAutoBlink = autoBlink;
   curMouthVal = sm.mouth;
@@ -1326,12 +1420,23 @@ window.OBS_VTUBER = {
     track.roll = data.roll || 0;
     track.eyeL = data.eyeL !== undefined ? data.eyeL : 1;
     track.eyeR = data.eyeR !== undefined ? data.eyeR : 1;
-    track.lookX = smooth(track.lookX, data.lookX, 0.35);
-    track.lookY = smooth(track.lookY, data.lookY, 0.35);
-    track.browL = smooth(track.browL, data.browL, 0.30);
-    track.browR = smooth(track.browR, data.browR, 0.30);
-    track.cheekPuff = smooth(track.cheekPuff, data.cheekPuff, 0.30);
+    track.eyeSmileL = data.eyeSmileL || 0;
+    track.eyeSmileR = data.eyeSmileR || 0;
+    track.eyeWideL = data.eyeWideL || 0;
+    track.eyeWideR = data.eyeWideR || 0;
+    track.lookX = smooth(track.lookX, data.lookX, 0.38);
+    track.lookY = smooth(track.lookY, data.lookY, 0.38);
+    track.browL = smooth(track.browL, data.browL, 0.36);
+    track.browR = smooth(track.browR, data.browR, 0.36);
+    track.browAngleL = smooth(track.browAngleL, data.browAngleL, 0.34);
+    track.browAngleR = smooth(track.browAngleR, data.browAngleR, 0.34);
+    track.cheekPuff = smooth(track.cheekPuff, data.cheekPuff, 0.32);
     track.mouthOpen = data.mouthOpen || 0;
+    track.mouthForm = data.mouthForm || 0;
+    track.mouthX = data.mouthX || 0;
+    track.mFunnel = data.mFunnel || 0;
+    track.mPucker = data.mPucker || 0;
+    track.mShrug = data.mShrug || 0;
     track.mA = smooth(track.mA, data.mA, 0.45);
     track.mI = smooth(track.mI, data.mI, 0.45);
     track.mU = smooth(track.mU, data.mU, 0.45);

@@ -45,8 +45,19 @@ public final class FaceTrackerManager {
         public volatile float lookY;       // -1..+1 eye gaze vertical
         public volatile float browL;       // -1..+1 left eyebrow
         public volatile float browR;       // -1..+1 right eyebrow
+        public volatile float browAngleL;  // -1..+1 left brow angle
+        public volatile float browAngleR;  // -1..+1 right brow angle
+        public volatile float eyeSmileL;   // 0..1 left eye smile/squint
+        public volatile float eyeSmileR;   // 0..1 right eye smile/squint
+        public volatile float eyeWideL;    // 0..1 left eye wide
+        public volatile float eyeWideR;    // 0..1 right eye wide
         public volatile float cheekPuff;   // 0..1
         public volatile float mouthOpen;   // 0..1
+        public volatile float mouthForm;   // -1..+1 (-1=O/U/frown, +1=smile/I/E)
+        public volatile float mouthX;      // -1..+1 horizontal mouth shift
+        public volatile float mouthFunnel; // 0..1
+        public volatile float mouthPucker; // 0..1
+        public volatile float mouthShrug;  // 0..1
         public volatile float mouthA, mouthI, mouthU, mouthE, mouthO; // 5-vowel visemes
         public volatile float happy;       // 0..1
         public volatile float sad;         // 0..1
@@ -625,19 +636,26 @@ public final class FaceTrackerManager {
         boolean exprFresh = vmcFresh || mpFresh;
         String gesture = (ts.activeGestureUntilMs > now && ts.activeGesture != null) ? ts.activeGesture : "";
 
-        StringBuilder sb = new StringBuilder(512);
+        StringBuilder sb = new StringBuilder(640);
         sb.append(String.format(Locale.US,
             "{\"yaw\":%.2f,\"pitch\":%.2f,\"roll\":%.2f,\"eyeL\":%.3f,\"eyeR\":%.3f,"
-            + "\"lookX\":%.3f,\"lookY\":%.3f,\"browL\":%.3f,\"browR\":%.3f,\"cheekPuff\":%.3f,"
-            + "\"mouthOpen\":%.3f,\"mA\":%.3f,\"mI\":%.3f,\"mU\":%.3f,\"mE\":%.3f,\"mO\":%.3f,"
+            + "\"eyeSmileL\":%.3f,\"eyeSmileR\":%.3f,\"eyeWideL\":%.3f,\"eyeWideR\":%.3f,"
+            + "\"lookX\":%.3f,\"lookY\":%.3f,\"browL\":%.3f,\"browR\":%.3f,\"browAngleL\":%.3f,\"browAngleR\":%.3f,\"cheekPuff\":%.3f,"
+            + "\"mouthOpen\":%.3f,\"mouthForm\":%.3f,\"mouthX\":%.3f,\"mFunnel\":%.3f,\"mPucker\":%.3f,\"mShrug\":%.3f,"
+            + "\"mA\":%.3f,\"mI\":%.3f,\"mU\":%.3f,\"mE\":%.3f,\"mO\":%.3f,"
             + "\"happy\":%.3f,\"sad\":%.3f,\"angry\":%.3f,\"surprised\":%.3f,"
             + "\"faceX\":%.3f,\"faceY\":%.3f,\"mic\":%.4f,\"detected\":%s,\"mp\":%s,\"vmc\":%s,"
             + "\"handL\":%.3f,\"handR\":%.3f,\"handLX\":%.3f,\"handLY\":%.3f,\"handRX\":%.3f,\"handRY\":%.3f,"
             + "\"curlL\":%.3f,\"curlR\":%.3f,\"gestL\":%d,\"gestR\":%d,\"waveOsc\":%.3f,\"gesture\":\"%s\"",
             ts.yaw, ts.pitch, ts.roll, ts.eyeL, ts.eyeR,
+            exprFresh ? ts.eyeSmileL : 0f, exprFresh ? ts.eyeSmileR : 0f,
+            exprFresh ? ts.eyeWideL : 0f, exprFresh ? ts.eyeWideR : 0f,
             exprFresh ? ts.lookX : 0f, exprFresh ? ts.lookY : 0f,
-            exprFresh ? ts.browL : 0f, exprFresh ? ts.browR : 0f, exprFresh ? ts.cheekPuff : 0f,
-            ts.mouthOpen, exprFresh ? ts.mouthA : ts.mouthOpen, exprFresh ? ts.mouthI : 0f,
+            exprFresh ? ts.browL : 0f, exprFresh ? ts.browR : 0f,
+            exprFresh ? ts.browAngleL : 0f, exprFresh ? ts.browAngleR : 0f, exprFresh ? ts.cheekPuff : 0f,
+            ts.mouthOpen, exprFresh ? ts.mouthForm : 0f, exprFresh ? ts.mouthX : 0f,
+            exprFresh ? ts.mouthFunnel : 0f, exprFresh ? ts.mouthPucker : 0f, exprFresh ? ts.mouthShrug : 0f,
+            exprFresh ? ts.mouthA : ts.mouthOpen, exprFresh ? ts.mouthI : 0f,
             exprFresh ? ts.mouthU : 0f, exprFresh ? ts.mouthE : 0f, exprFresh ? ts.mouthO : 0f,
             exprFresh ? ts.happy : 0f, exprFresh ? ts.sad : 0f, exprFresh ? ts.angry : 0f, exprFresh ? ts.surprised : 0f,
             ts.faceX, ts.faceY, mic, ts.faceDetected ? "true" : "false",

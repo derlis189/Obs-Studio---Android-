@@ -351,11 +351,13 @@ final class MediaPipeVtuberTracker {
         List<Category> cats = optBs.get().get(0);
         if (cats == null || cats.isEmpty()) return;
 
-        float blinkL = 0f, blinkR = 0f;
+        float blinkL = 0f, blinkR = 0f, squintL = 0f, squintR = 0f;
         float lookInL = 0f, lookOutL = 0f, lookUpL = 0f, lookDownL = 0f;
         float lookInR = 0f, lookOutR = 0f, lookUpR = 0f, lookDownR = 0f;
-        float jawOpen = 0f, funnel = 0f, pucker = 0f, smileL = 0f, smileR = 0f;
+        float jawOpen = 0f, mouthClose = 0f, funnel = 0f, pucker = 0f, smileL = 0f, smileR = 0f;
         float frownL = 0f, frownR = 0f, stretchL = 0f, stretchR = 0f;
+        float mouthLeft = 0f, mouthRight = 0f, lowerDownL = 0f, lowerDownR = 0f, upperUpL = 0f, upperUpR = 0f;
+        float shrugLower = 0f, shrugUpper = 0f, cheekSquintL = 0f, cheekSquintR = 0f, noseSneerL = 0f, noseSneerR = 0f;
         float browInnerUp = 0f, browOuterUpL = 0f, browOuterUpR = 0f, browDownL = 0f, browDownR = 0f;
         float eyeWideL = 0f, eyeWideR = 0f, cheekPuff = 0f;
 
@@ -366,6 +368,8 @@ final class MediaPipeVtuberTracker {
             switch (name) {
                 case "eyeBlinkLeft": blinkL = score; break;
                 case "eyeBlinkRight": blinkR = score; break;
+                case "eyeSquintLeft": squintL = score; break;
+                case "eyeSquintRight": squintR = score; break;
                 case "eyeLookInLeft": lookInL = score; break;
                 case "eyeLookOutLeft": lookOutL = score; break;
                 case "eyeLookUpLeft": lookUpL = score; break;
@@ -375,6 +379,7 @@ final class MediaPipeVtuberTracker {
                 case "eyeLookUpRight": lookUpR = score; break;
                 case "eyeLookDownRight": lookDownR = score; break;
                 case "jawOpen": jawOpen = score; break;
+                case "mouthClose": mouthClose = score; break;
                 case "mouthFunnel": funnel = score; break;
                 case "mouthPucker": pucker = score; break;
                 case "mouthSmileLeft": smileL = score; break;
@@ -383,6 +388,18 @@ final class MediaPipeVtuberTracker {
                 case "mouthFrownRight": frownR = score; break;
                 case "mouthStretchLeft": stretchL = score; break;
                 case "mouthStretchRight": stretchR = score; break;
+                case "mouthLeft": mouthLeft = score; break;
+                case "mouthRight": mouthRight = score; break;
+                case "mouthLowerDownLeft": lowerDownL = score; break;
+                case "mouthLowerDownRight": lowerDownR = score; break;
+                case "mouthUpperUpLeft": upperUpL = score; break;
+                case "mouthUpperUpRight": upperUpR = score; break;
+                case "mouthShrugLower": shrugLower = score; break;
+                case "mouthShrugUpper": shrugUpper = score; break;
+                case "cheekSquintLeft": cheekSquintL = score; break;
+                case "cheekSquintRight": cheekSquintR = score; break;
+                case "noseSneerLeft": noseSneerL = score; break;
+                case "noseSneerRight": noseSneerR = score; break;
                 case "browInnerUp": browInnerUp = score; break;
                 case "browOuterUpLeft": browOuterUpL = score; break;
                 case "browOuterUpRight": browOuterUpR = score; break;
@@ -396,31 +413,49 @@ final class MediaPipeVtuberTracker {
         }
 
         // Smooth ARKit -> high-level tracking channels (mirrored selfie orientation)
-        st.eyeL = 1f - clamp01(blinkL * 1.15f);
-        st.eyeR = 1f - clamp01(blinkR * 1.15f);
-        st.lookX = Math.max(-1f, Math.min(1f, ((lookInL - lookOutL) + (lookOutR - lookInR)) * 0.85f));
-        st.lookY = Math.max(-1f, Math.min(1f, ((lookUpL + lookUpR) - (lookDownL + lookDownR)) * 0.75f));
+        st.eyeL = 1f - clamp01(blinkL * 1.18f);
+        st.eyeR = 1f - clamp01(blinkR * 1.18f);
+        st.eyeSmileL = clamp01(smileL * 0.85f + squintL * 0.65f + cheekSquintL * 0.45f - 0.08f);
+        st.eyeSmileR = clamp01(smileR * 0.85f + squintR * 0.65f + cheekSquintR * 0.45f - 0.08f);
+        st.eyeWideL = clamp01((eyeWideL - 0.12f) * 1.35f);
+        st.eyeWideR = clamp01((eyeWideR - 0.12f) * 1.35f);
+        st.lookX = Math.max(-1f, Math.min(1f, ((lookInL - lookOutL) + (lookOutR - lookInR)) * 0.90f));
+        st.lookY = Math.max(-1f, Math.min(1f, ((lookUpL + lookUpR) - (lookDownL + lookDownR)) * 0.80f));
 
-        // 5-vowel viseme decomposition from ARKit mouth blendshapes (Kalidokit-inspired)
+        // High-responsiveness ARKit lip-sync & mouth shape decomposition (VTube Studio / VBridger style)
         float smile = (smileL + smileR) * 0.5f;
         float frown = (frownL + frownR) * 0.5f;
         float stretch = (stretchL + stretchR) * 0.5f;
-        st.mouthOpen = clamp01(jawOpen * 1.25f);
-        st.mouthA = clamp01(jawOpen * 1.2f - funnel * 0.35f - pucker * 0.3f);
-        st.mouthO = clamp01(funnel * 0.85f + jawOpen * 0.45f * (1f - stretch));
-        st.mouthU = clamp01(pucker * 1.15f);
-        st.mouthI = clamp01(smile * 0.55f + stretch * 0.65f - jawOpen * 0.25f);
-        st.mouthE = clamp01(stretch * 0.55f + jawOpen * 0.45f * (1f - pucker));
+        float lipPart = (lowerDownL + lowerDownR + upperUpL + upperUpR) * 0.25f;
+        float rawOpen = (jawOpen - mouthClose * 0.55f) * 1.95f + lipPart * 0.48f - 0.035f;
+        st.mouthOpen = clamp01(rawOpen);
+        float rawForm = (smile * 1.25f + stretch * 0.55f) - (pucker * 1.35f + funnel * 0.90f + frown * 1.05f);
+        st.mouthForm = Math.max(-1f, Math.min(1f, rawForm));
+        st.mouthX = Math.max(-1f, Math.min(1f, (mouthRight - mouthLeft) * 1.45f));
+        st.mouthFunnel = funnel;
+        st.mouthPucker = pucker;
+        st.mouthShrug = clamp01((shrugLower + shrugUpper) * 0.65f);
 
-        st.browL = Math.max(-1f, Math.min(1f, (browInnerUp * 0.6f + browOuterUpL * 0.7f) - browDownL * 1.1f));
-        st.browR = Math.max(-1f, Math.min(1f, (browInnerUp * 0.6f + browOuterUpR * 0.7f) - browDownR * 1.1f));
-        st.cheekPuff = cheekPuff;
+        st.mouthA = clamp01(st.mouthOpen * 1.10f - funnel * 0.35f - pucker * 0.35f);
+        st.mouthO = clamp01(funnel * 0.95f + st.mouthOpen * 0.42f * (1f - stretch));
+        st.mouthU = clamp01(pucker * 1.25f);
+        st.mouthI = clamp01(smile * 0.60f + stretch * 0.72f - st.mouthOpen * 0.20f);
+        st.mouthE = clamp01(stretch * 0.60f + st.mouthOpen * 0.45f * (1f - pucker));
 
-        // High-level emotions derived from ARKit blendshapes
-        st.happy = clamp01(smile * 1.15f);
-        st.sad = clamp01(frown * 0.85f + browInnerUp * 0.45f);
-        st.angry = clamp01(((browDownL + browDownR) * 0.5f) * 1.1f + frown * 0.3f);
-        st.surprised = clamp01(((eyeWideL + eyeWideR) * 0.5f) * 0.9f + browInnerUp * 0.45f + jawOpen * 0.35f);
+        st.browL = Math.max(-1f, Math.min(1f, (browInnerUp * 0.72f + browOuterUpL * 0.85f) - browDownL * 1.25f));
+        st.browR = Math.max(-1f, Math.min(1f, (browInnerUp * 0.72f + browOuterUpR * 0.85f) - browDownR * 1.25f));
+        st.browAngleL = Math.max(-1f, Math.min(1f, (browInnerUp * 0.95f - browOuterUpL * 0.45f) - browDownL * 0.95f));
+        st.browAngleR = Math.max(-1f, Math.min(1f, (browInnerUp * 0.95f - browOuterUpR * 0.45f) - browDownR * 0.95f));
+        st.cheekPuff = clamp01((cheekPuff - 0.06f) * 1.45f);
+
+        // Clean, well-separated high-level emotions (subtracting neutral resting bias)
+        float sneer = (noseSneerL + noseSneerR) * 0.5f;
+        float browDownAvg = (browDownL + browDownR) * 0.5f;
+        float eyeWideAvg = (eyeWideL + eyeWideR) * 0.5f;
+        st.happy = clamp01((smile * 1.35f + (cheekSquintL + cheekSquintR) * 0.30f) - 0.14f);
+        st.sad = clamp01((frown * 1.05f + browInnerUp * 0.65f - smile * 0.8f) - 0.16f);
+        st.angry = clamp01((browDownAvg * 1.35f + sneer * 0.55f + frown * 0.35f - smile * 0.7f) - 0.15f);
+        st.surprised = clamp01((eyeWideAvg * 1.15f + browInnerUp * 0.55f + jawOpen * 0.45f) - 0.18f);
 
         // Extract exact 3D head orientation from 4x4 facial transformation matrix (column-major)
         // Only accept valid front-facing rotations (r22 > 0.25) to prevent 180-deg gimbal flips.
