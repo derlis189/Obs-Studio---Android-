@@ -39,6 +39,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import org.json.JSONObject;
@@ -590,6 +591,143 @@ public final class VtuberSourceManager {
         }
     }
 
+    private static int readHeaderMagic(File f) {
+        try (FileInputStream in = new FileInputStream(f)) {
+            int b0 = in.read();
+            int b1 = in.read();
+            if (b0 < 0 || b1 < 0) return 0;
+            return ((b0 & 0xFF) << 8) | (b1 & 0xFF);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private static boolean readFully(InputStream in, byte[] buf, int len) throws java.io.IOException {
+        int off = 0;
+        while (off < len) {
+            int r = in.read(buf, off, len - off);
+            if (r < 0) return false;
+            off += r;
+        }
+        return true;
+    }
+
+    private static void skipFully(InputStream in, long n) throws java.io.IOException {
+        byte[] scratch = new byte[16384];
+        long rem = n;
+        while (rem > 0) {
+            int toRead = (int) Math.min(scratch.length, rem);
+            int r = in.read(scratch, 0, toRead);
+            if (r < 0) break;
+            rem -= r;
+        }
+    }
+
+    private static String readTarString(byte[] hdr, int off, int maxLen) {
+        int end = off;
+        int limit = off + maxLen;
+        while (end < limit && hdr[end] != 0) end++;
+        return new String(hdr, off, end - off, StandardCharsets.UTF_8).trim();
+    }
+
+    private static long parseTarOctal(byte[] hdr, int off, int len) {
+        String s = readTarString(hdr, off, len);
+        if (s.isEmpty()) return 0L;
+        try {
+            return Long.parseLong(s, 8);
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    private static boolean isCubismCoreEntryName(String rawName) {
+        if (rawName == null || rawName.isEmpty()) return false;
+        String n = rawName.replace('\\', '/').toLowerCase(Locale.US);
+        int slash = n.lastIndexOf('/');
+        String base = slash >= 0 ? n.substring(slash + 1) : n;
+        return "live2dcubismcore.min.js".equals(base) || "live2dcubismcore.js".equals(base);
+    }
+
+    private static boolean extractCubismFromZip(File src, File dst) {
+        File tmp = new File(dst.getParentFile(), "live2dcubismcore.min.js.tmp");
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(src)))) {
+            ZipEntry e;
+            byte[] buf = new byte[65536];
+            while ((e = zis.getNextEntry()) != null) {
+                if (e.isDirectory()) continue;
+                if (isCubismCoreEntryName(e.getName())) {
+                    try (FileOutputStream out = new FileOutputStream(tmp)) {
+                        int r;
+                        while ((r = zis.read(buf)) != -1) out.write(buf, 0, r);
+                    }
+                    if (tmp.length() > 1024 && tmp.renameTo(dst)) {
+                        Log.i(TAG, "Extracted " + e.getName() + " from ZIP (" + dst.length() + " bytes)");
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "extractCubismFromZip failed: " + e.getMessage());
+        }
+        if (tmp.exists()) tmp.delete();
+        return false;
+    }
+
+    private static boolean extractCubismFromTgz(File src, File dst) {
+        File tmp = new File(dst.getParentFile(), "live2dcubismcore.min.js.tmp");
+        try (InputStream gis = new BufferedInputStream(new GZIPInputStream(new BufferedInputStream(new FileInputStream(src)), 65536))) {
+            byte[] hdr = new byte[512];
+            byte[] buf = new byte[65536];
+            while (readFully(gis, hdr, 512)) {
+                boolean allZero = true;
+                for (int i = 0; i < 512; ++i) {
+                    if (hdr[i] != 0) { allZero = false; break; }
+                }
+                if (allZero) break;
+                String name = readTarString(hdr, 0, 100);
+                String prefix = readTarString(hdr, 345, 155);
+                String fullName = prefix.isEmpty() ? name : (prefix + "/" + name);
+                long size = parseTarOctal(hdr, 124, 12);
+                byte typeFlag = hdr[156];
+                boolean isFile = (typeFlag == 0 || typeFlag == '0');
+                if (isFile && size > 1024 && size < 16L * 1024L * 1024L && isCubismCoreEntryName(fullName)) {
+                    try (FileOutputStream out = new FileOutputStream(tmp)) {
+                        long rem = size;
+                        while (rem > 0) {
+                            int r = gis.read(buf, 0, (int) Math.min(buf.length, rem));
+                            if (r < 0) break;
+                            out.write(buf, 0, r);
+                            rem -= r;
+                        }
+                    }
+                    if (tmp.length() == size) {
+                        if (dst.exists()) dst.delete();
+                        if (tmp.renameTo(dst)) {
+                            Log.i(TAG, "Extracted " + fullName + " from TGZ (" + dst.length() + " bytes)");
+                            return true;
+                        }
+                    }
+                } else {
+                    long padded = ((size + 511L) / 512L) * 512L;
+                    if (padded > 0) skipFully(gis, padded);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "extractCubismFromTgz failed: " + e.getMessage());
+        }
+        if (tmp.exists()) tmp.delete();
+        return false;
+    }
+
+    private static void autoRepairCubismCoreAsync(Context appCtx) {
+        File dst = new File(appCtx.getFilesDir(), "obs-studio/vtuber/live2dcubismcore.min.js");
+        if (!dst.isFile()) return;
+        int magic = readHeaderMagic(dst);
+        if (magic != 0x1F8B && magic != 0x504B) return;
+        Log.i(TAG, "Detected archived Cubism Core (" + dst.length() + " bytes); auto-extracting live2dcubismcore.min.js");
+        sPrepExec.execute(() -> installCubismCore(appCtx, dst.getAbsolutePath()));
+    }
+
     public static String installCubismCore(Context ctx, String sourcePath) {
         if (ctx == null || sourcePath == null || sourcePath.isEmpty()) return "ERR\tArchivo vacío.";
         File src = new File(sourcePath);
@@ -597,11 +735,29 @@ public final class VtuberSourceManager {
         File dstDir = new File(ctx.getFilesDir(), "obs-studio/vtuber");
         if (!dstDir.isDirectory()) dstDir.mkdirs();
         File dst = new File(dstDir, "live2dcubismcore.min.js");
-        try (InputStream in = new FileInputStream(src); FileOutputStream out = new FileOutputStream(dst)) {
-            byte[] buf = new byte[65536];
-            int r;
-            while ((r = in.read(buf)) != -1) out.write(buf, 0, r);
-            Log.i(TAG, "Installed live2dcubismcore.min.js (" + dst.length() + " bytes)");
+        try {
+            int magic = readHeaderMagic(src);
+            boolean extracted = false;
+            if (magic == 0x504B) { // ZIP archive (e.g. CubismSdkForWeb-*.zip)
+                extracted = extractCubismFromZip(src, dst);
+                if (!extracted) return "ERR\tEl archivo .zip no contiene live2dcubismcore.min.js.";
+            } else if (magic == 0x1F8B) { // GZIP / .tgz archive (e.g. live2dcubismcore-*.tgz)
+                extracted = extractCubismFromTgz(src, dst);
+                if (!extracted) return "ERR\tEl archivo .tgz/.gz no contiene live2dcubismcore.min.js.";
+            } else {
+                if (src.length() > 8L * 1024L * 1024L) {
+                    return "ERR\tEl archivo es demasiado grande; selecciona live2dcubismcore.min.js, el .zip o el .tgz del SDK.";
+                }
+                File tmp = new File(dstDir, "live2dcubismcore.min.js.tmp");
+                try (InputStream in = new FileInputStream(src); FileOutputStream out = new FileOutputStream(tmp)) {
+                    byte[] buf = new byte[65536];
+                    int r;
+                    while ((r = in.read(buf)) != -1) out.write(buf, 0, r);
+                }
+                if (dst.exists()) dst.delete();
+                if (!tmp.renameTo(dst)) return "ERR\tNo se pudo guardar live2dcubismcore.min.js.";
+                Log.i(TAG, "Installed live2dcubismcore.min.js (" + dst.length() + " bytes)");
+            }
             sMain.post(() -> {
                 for (VtuberInstance inst : sInstances.values()) {
                     if (inst != null && !inst.destroyed && inst.webView != null && "live2d".equals(inst.mode)) {
@@ -725,6 +881,10 @@ public final class VtuberSourceManager {
                 resolvedJson = obj.toString();
             } catch (Exception e) {
                 Log.w(TAG, "Config parse failed", e);
+            }
+
+            if ("live2d".equals(mode)) {
+                autoRepairCubismCoreAsync(activity.getApplicationContext());
             }
 
             if ("live2d".equals(mode) && rawLive2dPath.toLowerCase(Locale.US).endsWith(".zip")) {
