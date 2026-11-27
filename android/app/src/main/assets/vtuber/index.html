@@ -74,6 +74,7 @@ let vrmWaveL = 0, vrmWaveR = 0, live2dWaveBlend = 0;
 const sm = {
   yaw: 0, pitch: 0, roll: 0,
   bodyYaw: 0, bodyPitch: 0, bodyRoll: 0,
+  faceX: 0, faceY: 0,
   eyeL: 1, eyeR: 1, lookX: 0, lookY: 0,
   mouth: 0, mA: 0, mI: 0, mU: 0, mE: 0, mO: 0
 };
@@ -605,8 +606,8 @@ function applyLive2dParams(model) {
   const angry = clamp(track.angry || 0, 0, 1);
   const surprised = clamp(track.surprised || 0, 0, 1);
 
-  const eyeBallX = (track.mp || track.vmc) ? clamp(track.lookX, -1, 1) : clamp(yaw / 24, -1, 1);
-  const eyeBallY = (track.mp || track.vmc) ? clamp(track.lookY, -1, 1) : clamp(pitch / 24, -1, 1);
+  const eyeBallX = (track.mp || track.vmc) ? clamp(sm.lookX, -1, 1) : clamp(yaw / 24, -1, 1);
+  const eyeBallY = (track.mp || track.vmc) ? clamp(sm.lookY, -1, 1) : clamp(pitch / 24, -1, 1);
   const browL = (track.mp || track.vmc) ? clamp(track.browL, -1, 1) : clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1);
   const browR = (track.mp || track.vmc) ? clamp(track.browR, -1, 1) : clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1);
   const mouthForm = clamp(smile + (track.mI + track.mE) * 0.35 - (track.mU + track.mO) * 0.45 - sad * 0.7 - angry * 0.5, -1, 1);
@@ -616,10 +617,10 @@ function applyLive2dParams(model) {
     core.setParameterValueById('ParamAngleY', pitch);
     core.setParameterValueById('ParamAngleZ', roll);
     core.setParameterValueById('ParamBodyAngleX', clamp(yaw * 0.42 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8 + danceX * 0.4, -10, 10));
-    core.setParameterValueById('ParamBodyAngleY', clamp(pitch * 0.34, -10, 10));
+    core.setParameterValueById('ParamBodyAngleY', clamp(pitch * 0.42 - sm.faceY * 4.5, -10, 10));
     core.setParameterValueById('ParamBodyAngleZ', clamp(roll * 0.38 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5 + danceZ * 0.5, -10, 10));
-    core.setParameterValueById('ParamEyeLOpen', curAutoBlink ? 0 : clamp(track.eyeL, 0, 1));
-    core.setParameterValueById('ParamEyeROpen', curAutoBlink ? 0 : clamp(track.eyeR, 0, 1));
+    core.setParameterValueById('ParamEyeLOpen', curAutoBlink ? 0 : clamp(sm.eyeL, 0, 1));
+    core.setParameterValueById('ParamEyeROpen', curAutoBlink ? 0 : clamp(sm.eyeR, 0, 1));
     core.setParameterValueById('ParamEyeLSmile', smile);
     core.setParameterValueById('ParamEyeRSmile', smile);
     core.setParameterValueById('ParamEyeBallX', eyeBallX);
@@ -1028,6 +1029,8 @@ function animate(now) {
   sm.bodyYaw = damp(sm.bodyYaw, sm.yaw, 5.5);
   sm.bodyPitch = damp(sm.bodyPitch, sm.pitch, 5.5);
   sm.bodyRoll = damp(sm.bodyRoll, sm.roll, 5.0);
+  sm.faceX = damp(sm.faceX, track.faceX || 0, 6.0);
+  sm.faceY = damp(sm.faceY, track.faceY || 0, 6.0);
   sm.eyeL = damp(sm.eyeL, track.eyeL, 20.0);
   sm.eyeR = damp(sm.eyeR, track.eyeR, 20.0);
   sm.lookX = damp(sm.lookX, track.lookX, 14.0);
@@ -1188,13 +1191,15 @@ function animate(now) {
 
         const danceRoll = actGest === 'dance' ? Math.sin(t * 3.8) * 0.14 : 0;
         const thinkTilt = actGest === 'think' ? -0.18 : 0;
-        if (chest) chest.rotation.set(breath * 0.022 + bPitchR * 0.08, sway * 0.018 + bYawR * 0.10 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), -bRollR * 0.08 + danceRoll * 0.5);
-        if (head) head.rotation.set(pitchR * 0.62 + (actGest === 'think' ? 0.12 : 0), yawR * 0.62, -rollR * 0.62 + (vrmWaveR - vrmWaveL) * 0.08 + thinkTilt);
-        if (neck) neck.rotation.set(bPitchR * 0.24, bYawR * 0.24, -bRollR * 0.24);
-        if (spine) spine.rotation.set(bPitchR * 0.08 + breath * 0.012, bYawR * 0.08 + sway * 0.015, -bRollR * 0.06 + danceRoll * 0.4);
+        // In Three.js VRM normalized space (+Z forward, +Y up), negative X rotation tilts face UP
+        if (chest) chest.rotation.set(breath * 0.022 - bPitchR * 0.12, sway * 0.018 + bYawR * 0.10 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), -bRollR * 0.08 + danceRoll * 0.5);
+        if (head) head.rotation.set(-pitchR * 0.68 + (actGest === 'think' ? 0.12 : 0), yawR * 0.62, -rollR * 0.62 + (vrmWaveR - vrmWaveL) * 0.08 + thinkTilt);
+        if (neck) neck.rotation.set(-bPitchR * 0.28, bYawR * 0.24, -bRollR * 0.24);
+        if (spine) spine.rotation.set(-bPitchR * 0.10 + breath * 0.012, bYawR * 0.08 + sway * 0.015, -bRollR * 0.06 + danceRoll * 0.4);
       }
 
       currentVrm.scene.position.x = 0;
+      currentVrm.scene.position.y = clamp(-sm.faceY * 0.028, -0.04, 0.04);
 
       // Full 52-ARKit-driven VRM Expressions + 5-vowel visemes + Eye Gaze
       const em = currentVrm.expressionManager;
@@ -1232,10 +1237,10 @@ function animate(now) {
       }
     } else if (demoHead) {
       const u = demoHead.userData;
-      u.head.rotation.set(pitchR * 0.9, yawR * 0.9, -rollR * 0.8);
-      u.eyeL.scale.y = autoBlink ? 0.1 : Math.max(0.1, track.eyeL);
-      u.eyeR.scale.y = autoBlink ? 0.1 : Math.max(0.1, track.eyeR);
-      u.mouth.scale.y = 0.18 + mouthVal * 0.95;
+      u.head.rotation.set(-pitchR * 0.9, yawR * 0.9, -rollR * 0.8);
+      u.eyeL.scale.y = autoBlink ? 0.1 : Math.max(0.1, sm.eyeL);
+      u.eyeR.scale.y = autoBlink ? 0.1 : Math.max(0.1, sm.eyeR);
+      u.mouth.scale.y = 0.18 + sm.mouth * 0.95;
     }
     renderer.render(scene, camera);
     activeGl = renderer.getContext();
@@ -1244,8 +1249,8 @@ function animate(now) {
     setLayerVis(cl2d);
     if (live2dModel.internalModel && live2dModel.internalModel.focusController) {
       const sens = Math.max(0.4, Math.min(2.5, Number(cfg.headSensitivity) || 1.0));
-      const fx = Math.max(-1, Math.min(1, (track.yaw * sens) / 30));
-      const fy = Math.max(-1, Math.min(1, (track.pitch * sens) / 30));
+      const fx = Math.max(-1, Math.min(1, (sm.yaw * sens) / 30));
+      const fy = Math.max(-1, Math.min(1, (sm.pitch * sens) / 30));
       live2dModel.internalModel.focusController.focus(fx, fy);
     }
     live2dModel.update(dt * 1000);

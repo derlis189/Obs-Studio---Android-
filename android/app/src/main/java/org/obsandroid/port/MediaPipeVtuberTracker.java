@@ -60,6 +60,8 @@ final class MediaPipeVtuberTracker {
     private static int sHandStreakL = 0;
     private static int sHandStreakR = 0;
     private static float sPrevWristX = 0.5f;
+    private static float sPitchBaseline = 0f;
+    private static boolean sHasPitchBaseline = false;
 
     private static int getSensorOrientation(Context ctx, boolean front) {
         int cached = front ? sFrontSensorOrient : sBackSensorOrient;
@@ -430,19 +432,29 @@ final class MediaPipeVtuberTracker {
                 double r21 = m[6], r22 = m[10];
                 if (r22 > 0.25) {
                     double sy = Math.sqrt(r00 * r00 + r10 * r10);
-                    double pitchDeg = Math.toDegrees(Math.atan2(-r21, r22));
-                    // Invert yaw & roll to match mirrored selfie view on VRM/Live2D/Inochi2D
+                    // MediaPipe facialTransformationMatrixes is row-major: m[6]=R12=-sin(pitch),
+                    // m[2]=R02=+sin(yaw), m[1]=R01=-sin(roll). Positive pitch = looking UP.
+                    double pitchDeg = Math.toDegrees(Math.atan2(r21, r22));
                     double yawDeg = Math.toDegrees(Math.atan2(r20, Math.max(1e-4, sy)));
                     double rollDeg = Math.toDegrees(Math.atan2(r10, r00));
-                    if (Math.abs(yawDeg) < 60.0 && Math.abs(pitchDeg) < 50.0 && Math.abs(rollDeg) < 55.0) {
+                    if (Math.abs(yawDeg) < 60.0 && Math.abs(pitchDeg) < 55.0 && Math.abs(rollDeg) < 55.0) {
+                        // Gently adapt vertical baseline for natural phone-holding angle (clamped +-14 deg)
+                        float clampedBase = Math.max(-14f, Math.min(14f, (float) pitchDeg));
+                        if (!sHasPitchBaseline) {
+                            sPitchBaseline = clampedBase;
+                            sHasPitchBaseline = true;
+                        } else if (Math.abs(pitchDeg - sPitchBaseline) < 16.0) {
+                            sPitchBaseline += (clampedBase - sPitchBaseline) * 0.012f;
+                        }
+                        float centeredPitch = (float) (pitchDeg - sPitchBaseline) * 1.35f;
                         float rawYaw = Math.max(-35f, Math.min(35f, (float) yawDeg));
-                        float rawPitch = Math.max(-25f, Math.min(25f, (float) pitchDeg));
+                        float rawPitch = Math.max(-30f, Math.min(30f, centeredPitch));
                         float rawRoll = Math.max(-30f, Math.min(30f, (float) rollDeg));
                         // Micro-deadzone + responsive EMA; per-frame 60 FPS damping happens in WebGL
-                        float a = 0.34f;
-                        if (Math.abs(rawYaw - st.yaw) > 0.4f) st.yaw = st.yaw + (rawYaw - st.yaw) * a;
-                        if (Math.abs(rawPitch - st.pitch) > 0.4f) st.pitch = st.pitch + (rawPitch - st.pitch) * a;
-                        if (Math.abs(rawRoll - st.roll) > 0.4f) st.roll = st.roll + (rawRoll - st.roll) * a;
+                        float a = 0.36f;
+                        if (Math.abs(rawYaw - st.yaw) > 0.35f) st.yaw = st.yaw + (rawYaw - st.yaw) * a;
+                        if (Math.abs(rawPitch - st.pitch) > 0.35f) st.pitch = st.pitch + (rawPitch - st.pitch) * a;
+                        if (Math.abs(rawRoll - st.roll) > 0.35f) st.roll = st.roll + (rawRoll - st.roll) * a;
                     }
                 }
             }
