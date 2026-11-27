@@ -182,6 +182,7 @@ public final class QtObsActivity extends QtActivity {
             if (!cacheDir.isDirectory()) cacheDir.mkdirs();
             File dst = new File(cacheDir, hex + "_" + displayName);
             if (dst.exists() && dst.length() > 0 && (expectedSize <= 0 || dst.length() == expectedSize)) {
+                try { dst.setLastModified(System.currentTimeMillis()); } catch (Throwable ignored) {}
                 return dst.getAbsolutePath();
             }
 
@@ -197,7 +198,7 @@ public final class QtObsActivity extends QtActivity {
             }
             if (dst.exists()) dst.delete();
             if (!tmp.renameTo(dst)) return tmp.getAbsolutePath();
-            trimMediaCacheLru(cacheDir, 150L * 1024L * 1024L, dst);
+            trimMediaCacheLru(activity.getFilesDir(), cacheDir, 512L * 1024L * 1024L, dst);
             Log.i("QtObsActivity", "Resolved content URI -> " + dst.getAbsolutePath() + " (" + dst.length() + " bytes)");
             return dst.getAbsolutePath();
         } catch (Exception e) {
@@ -206,19 +207,76 @@ public final class QtObsActivity extends QtActivity {
         }
     }
 
-    private static void trimMediaCacheLru(File cacheDir, long maxBytes, File keepFile) {
+    private static java.util.Set<String> collectReferencedCacheNames(File filesDir) {
+        java.util.Set<String> refs = new java.util.HashSet<>();
+        File obsRoot = new File(filesDir, "obs-studio");
+        if (!obsRoot.isDirectory()) return refs;
+        java.util.List<File> configDirs = java.util.Arrays.asList(
+            new File(obsRoot, "basic/scenes"),
+            new File(obsRoot, "vertical"),
+            obsRoot
+        );
+        final String marker = "obs-media-cache/";
+        for (File dir : configDirs) {
+            if (!dir.isDirectory()) continue;
+            File[] entries = dir.listFiles();
+            if (entries == null) continue;
+            for (File cfg : entries) {
+                if (!cfg.isFile()) continue;
+                String nm = cfg.getName().toLowerCase(Locale.US);
+                if (!nm.endsWith(".json") && !nm.endsWith(".json.bak") && !nm.endsWith(".ini")) continue;
+                if (cfg.length() <= 0 || cfg.length() > 16L * 1024L * 1024L) continue;
+                try {
+                    byte[] raw = java.nio.file.Files.readAllBytes(cfg.toPath());
+                    String text = new String(raw, StandardCharsets.UTF_8);
+                    int idx = 0;
+                    while ((idx = text.indexOf(marker, idx)) >= 0) {
+                        int start = idx + marker.length();
+                        int end = start;
+                        while (end < text.length()) {
+                            char c = text.charAt(end);
+                            if (c == '"' || c == '\'' || c == '\n' || c == '\r' || c == '\\' || c == '/') break;
+                            end++;
+                        }
+                        if (end > start) refs.add(text.substring(start, end));
+                        idx = end;
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        return refs;
+    }
+
+    private static void trimMediaCacheLru(File filesDir, File cacheDir, long maxOrphanBytes, File keepFile) {
         try {
             File[] files = cacheDir.listFiles();
             if (files == null || files.length == 0) return;
-            long total = 0L;
-            for (File f : files) if (f.isFile()) total += f.length();
-            if (total <= maxBytes) return;
-            java.util.Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            long now = System.currentTimeMillis();
+            // Always clean stale incomplete .part files older than 5 minutes
             for (File f : files) {
-                if (total <= maxBytes) break;
-                if (f.equals(keepFile) || !f.isFile()) continue;
+                if (f.isFile() && f.getName().endsWith(".part") && (now - f.lastModified()) > 300_000L) {
+                    f.delete();
+                }
+            }
+            // Protect EVERY media file still referenced by any OBS scene, Stinger transition, bug, or vertical config
+            java.util.Set<String> referenced = collectReferencedCacheNames(filesDir);
+            java.util.List<File> orphans = new java.util.ArrayList<>();
+            long orphanTotal = 0L;
+            for (File f : files) {
+                if (!f.isFile() || f.equals(keepFile)) continue;
+                if (referenced.contains(f.getName())) continue;
+                orphans.add(f);
+                orphanTotal += f.length();
+            }
+            if (orphanTotal <= maxOrphanBytes) return;
+            orphans.sort((a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            for (File f : orphans) {
+                if (orphanTotal <= maxOrphanBytes) break;
                 long len = f.length();
-                if (f.delete()) total -= len;
+                if (f.delete()) {
+                    orphanTotal -= len;
+                    Log.i("QtObsActivity", "Evicted unreferenced media cache file: " + f.getName());
+                }
             }
         } catch (Throwable ignored) {}
     }
