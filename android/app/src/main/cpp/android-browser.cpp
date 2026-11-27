@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 using PFN_eglGetNativeClientBufferANDROID = EGLClientBuffer(EGLAPIENTRYP)(const struct AHardwareBuffer *buffer);
@@ -188,7 +189,7 @@ void blit_browser_ahb(BrowserHwState &hw, AHardwareBuffer *ahb, int w, int h, in
     if (dpy == EGL_NO_DISPLAY) return;
 
     const bool size_changed = (!hw.obs_tex || hw.tex_w != uint32_t(w) || hw.tex_h != uint32_t(h));
-    if (size_changed || hw.cached_dpy != dpy || hw.img_cache.size() > 8) {
+    if (size_changed || hw.cached_dpy != dpy || hw.img_cache.size() > 4) {
         hw.clear_img_cache();
         hw.cached_dpy = dpy;
     }
@@ -676,21 +677,33 @@ void android_browser_shutdown()
     JavaVM *jvm = nullptr;
     jclass cls = nullptr;
     jmethodID mid = nullptr;
+    std::vector<std::shared_ptr<BrowserSourceInstance>> remaining;
     {
         std::lock_guard<std::mutex> lock(g_browser_mutex);
         jvm = g_browser_jvm;
         cls = g_browser_host_class;
         mid = g_mid_destroy_all;
+        remaining.reserve(g_instances.size());
+        for (auto &kv : g_instances) {
+            if (kv.second) remaining.push_back(kv.second);
+        }
         g_instances.clear();
+    }
+    for (auto &inst : remaining) {
+        inst->hw.clear_pending();
     }
     if (obs_initialized()) {
         obs_enter_graphics();
+        for (auto &inst : remaining) {
+            inst->hw.destroy_gl_resources();
+        }
         if (g_browser_oes.prog) { glDeleteProgram(g_browser_oes.prog); g_browser_oes.prog = 0; }
         if (g_browser_oes.vao) { glDeleteVertexArrays(1, &g_browser_oes.vao); g_browser_oes.vao = 0; }
         g_browser_oes.initialized = false;
         g_browser_oes.supported = false;
         obs_leave_graphics();
     }
+    remaining.clear();
     if (!jvm || !cls || !mid) return;
     JniAttachGuard guard(jvm);
     if (!guard.env) return;

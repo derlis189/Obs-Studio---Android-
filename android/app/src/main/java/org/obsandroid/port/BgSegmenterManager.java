@@ -8,6 +8,7 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder;
 import com.google.mediapipe.framework.image.ByteBufferExtractor;
 import com.google.mediapipe.framework.image.MPImage;
 import com.google.mediapipe.tasks.core.BaseOptions;
+import com.google.mediapipe.tasks.core.Delegate;
 import com.google.mediapipe.tasks.vision.core.RunningMode;
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter;
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenterResult;
@@ -38,14 +39,35 @@ public final class BgSegmenterManager {
 
         WorkerInstance(long id, Context context) {
             this.id = id;
-            BaseOptions base = BaseOptions.builder().setModelAssetPath(MODEL).build();
-            ImageSegmenter.ImageSegmenterOptions options = ImageSegmenter.ImageSegmenterOptions.builder()
-                .setBaseOptions(base)
-                .setRunningMode(RunningMode.VIDEO)
-                .setOutputCategoryMask(false)
-                .setOutputConfidenceMasks(true)
-                .build();
-            this.segmenter = ImageSegmenter.createFromOptions(context, options);
+            ImageSegmenter created = null;
+            try {
+                BaseOptions gpuBase = BaseOptions.builder()
+                    .setModelAssetPath(MODEL)
+                    .setDelegate(Delegate.GPU)
+                    .build();
+                ImageSegmenter.ImageSegmenterOptions gpuOpts = ImageSegmenter.ImageSegmenterOptions.builder()
+                    .setBaseOptions(gpuBase)
+                    .setRunningMode(RunningMode.VIDEO)
+                    .setOutputCategoryMask(false)
+                    .setOutputConfidenceMasks(true)
+                    .build();
+                created = ImageSegmenter.createFromOptions(context, gpuOpts);
+                Log.i(TAG, "MediaPipe ImageSegmenter initialized with GPU delegate (id=" + id + ")");
+            } catch (Throwable gpuErr) {
+                Log.w(TAG, "MediaPipe GPU delegate unavailable, falling back to CPU: " + gpuErr.getMessage());
+                BaseOptions cpuBase = BaseOptions.builder()
+                    .setModelAssetPath(MODEL)
+                    .setDelegate(Delegate.CPU)
+                    .build();
+                ImageSegmenter.ImageSegmenterOptions cpuOpts = ImageSegmenter.ImageSegmenterOptions.builder()
+                    .setBaseOptions(cpuBase)
+                    .setRunningMode(RunningMode.VIDEO)
+                    .setOutputCategoryMask(false)
+                    .setOutputConfidenceMasks(true)
+                    .build();
+                created = ImageSegmenter.createFromOptions(context, cpuOpts);
+            }
+            this.segmenter = created;
             this.executor = Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "OBS-BgSeg-" + id);
                 t.setPriority(Thread.NORM_PRIORITY);

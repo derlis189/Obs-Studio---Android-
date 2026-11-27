@@ -332,6 +332,12 @@ struct Encoder {
             return fail("No se pudo crear el codificador hardware verificado (recursos no disponibles)");
         }
 
+        const int init_tier = obs_android_get_thermal_tier();
+        const float init_factor = (init_tier >= 3) ? 0.65f : (init_tier == 2 ? 0.80f : 1.0f);
+        const int32_t base_br = user_bitrate_kbps > 0 ? user_bitrate_kbps : bitrate_kbps;
+        bitrate_kbps = std::min(base_br, std::max<int32_t>(600, int32_t(std::lround(base_br * init_factor))));
+        last_thermal_tier = init_tier;
+
         AMediaFormat *format = AMediaFormat_new();
         AMediaFormat_setString(format, "mime", mime);
         AMediaFormat_setInt32(format, "width", int32_t(width));
@@ -491,6 +497,7 @@ struct Encoder {
             resolve_video_params();
             if (color_format != 19 && color_format != 21) {
                 AMediaFormat_delete(format);
+                reset_codec();
                 return fail("Initial encoder requires planar I420 or semiplanar NV12 byte buffers");
             }
             planar = color_format == 19;
@@ -518,8 +525,14 @@ struct Encoder {
              codec_name.empty() ? (audio ? "default-aac" : (hevc ? "default-hevc" : "default-avc")) : codec_name.c_str(),
              hardware, AMediaFormat_toString(format), status);
         AMediaFormat_delete(format);
-        if (status != AMEDIA_OK) return fail("MediaCodec configure failed; check supported profile/size/bitrate");
-        if (AMediaCodec_start(codec) != AMEDIA_OK) return fail("MediaCodec start failed");
+        if (status != AMEDIA_OK) {
+            reset_codec();
+            return fail("MediaCodec configure failed; check supported profile/size/bitrate");
+        }
+        if (AMediaCodec_start(codec) != AMEDIA_OK) {
+            reset_codec();
+            return fail("MediaCodec start failed");
+        }
         if (!audio) read_input_layout();
         started = true;
         surface_mode = false;
@@ -941,7 +954,8 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_encoder_stats
     auto json = nlohmann::json{{"active_surface_codecs", active_surface_codecs.load()},
         {"active_cpu_video_codecs", active_buffer_codecs.load()}, {"surface_frames", surface_frames.load()},
         {"cpu_video_frames", cpu_frames.load()}, {"encode_avg_ms", calls ? double(encode_ns.load()) / calls / 1e6 : 0.0},
-        {"encode_max_ms", double(encode_max_ns.load()) / 1e6}}.dump();
+        {"encode_max_ms", double(encode_max_ns.load()) / 1e6},
+        {"thermal_tier", obs_android_get_thermal_tier()}}.dump();
     if (json.size() >= capacity) return false;
     std::memcpy(out, json.c_str(), json.size() + 1);
     return true;

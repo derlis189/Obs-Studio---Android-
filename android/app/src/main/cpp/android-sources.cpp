@@ -1177,6 +1177,44 @@ void android_uvc_deliver_yuy2(const uint8_t *data, uint32_t width, uint32_t heig
     }
 }
 
+void android_uvc_deliver_nv12(const uint8_t *y, const uint8_t *uv, uint32_t stride,
+                              uint32_t width, uint32_t height, uint64_t timestamp_ns)
+{
+    if (!y || !uv || !width || !height || stride < width) return;
+    std::vector<obs_source_t *> targets;
+    {
+        std::lock_guard<std::mutex> guard(source_mutex);
+        auto &capture = captures[4];
+        if (capture.active_sources.empty()) return;
+        targets.reserve(capture.active_sources.size());
+        for (obs_source_t *src : capture.active_sources) {
+            if (src) {
+                obs_source_t *ref = obs_source_get_ref(src);
+                if (ref) targets.push_back(ref);
+            }
+        }
+        capture.width = int(width); capture.height = int(height);
+        capture.frames++; capture.timestamp = timestamp_ns;
+    }
+    if (targets.empty()) return;
+    obs_source_frame frame{};
+    frame.data[0] = const_cast<uint8_t *>(y);
+    frame.data[1] = const_cast<uint8_t *>(uv);
+    frame.linesize[0] = stride;
+    frame.linesize[1] = stride;
+    frame.width = width;
+    frame.height = height;
+    frame.timestamp = timestamp_ns;
+    frame.format = VIDEO_FORMAT_NV12;
+    frame.full_range = false;
+    video_format_get_parameters(height >= 720 ? VIDEO_CS_709 : VIDEO_CS_601, VIDEO_RANGE_PARTIAL,
+                                frame.color_matrix, frame.color_range_min, frame.color_range_max);
+    for (obs_source_t *src : targets) {
+        obs_source_output_video(src, &frame);
+        obs_source_release(src);
+    }
+}
+
 void android_uvc_deliver_i420(const uint8_t *y, const uint8_t *u, const uint8_t *v,
                               uint32_t y_stride, uint32_t u_stride, uint32_t v_stride,
                               uint32_t width, uint32_t height, uint64_t timestamp_ns)

@@ -52,12 +52,13 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class BrowserSourceManager {
     private static final String TAG = "ObsBrowserSource";
     private static final Handler sMain = new Handler(Looper.getMainLooper());
-    private static final Map<Long, BrowserInstance> sInstances = new HashMap<>();
+    private static final Map<Long, BrowserInstance> sInstances = new ConcurrentHashMap<>();
     private static volatile int sThermalFpsCap = 60;
     private static String audioScript;
     private static final HandlerThread sCaptureThread0 = new HandlerThread("OBS-BrowserCap0");
@@ -95,7 +96,7 @@ public final class BrowserSourceManager {
         ImageReader displayReader;
         int surfaceWidth;
         int surfaceHeight;
-        boolean surfaceZeroCopy;
+        volatile boolean surfaceZeroCopy;
         volatile boolean capturePending;
         volatile long capturedFrames;
         final BrowserFrameGate frameGate = new BrowserFrameGate();
@@ -680,12 +681,25 @@ public final class BrowserSourceManager {
             topBar.setBackgroundColor(Color.parseColor("#2A2E39"));
 
             TextView title = new TextView(activity);
-            title.setText("Interactuar: " + (inst.url != null ? inst.url : "Navegador"));
+            String hostOnly = null;
+            if (inst.url != null && !inst.url.isEmpty()) {
+                try { hostOnly = Uri.parse(inst.url).getHost(); } catch (Throwable ignored) {}
+            }
+            title.setText("Interactuar: " + (hostOnly != null && !hostOnly.isEmpty() ? hostOnly : "Navegador"));
             title.setTextColor(Color.WHITE);
             title.setSingleLine(true);
+            title.setEllipsize(android.text.TextUtils.TruncateAt.END);
             title.setTextSize(14f);
             LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             topBar.addView(title, titleLp);
+
+            Button backBtn = new Button(activity);
+            backBtn.setText("←");
+            backBtn.setContentDescription("Atrás");
+            backBtn.setOnClickListener(v -> {
+                if (inst.webView != null && inst.webView.canGoBack()) inst.webView.goBack();
+            });
+            topBar.addView(backBtn);
 
             Button reloadBtn = new Button(activity);
             reloadBtn.setText("Recargar");

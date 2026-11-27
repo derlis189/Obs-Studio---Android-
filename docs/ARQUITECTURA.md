@@ -31,9 +31,9 @@ El servidor local `WebRemoteServer` permanece ligado a `127.0.0.1` hasta habilit
 
 ---
 
-## Diagnóstico histórico del port (Fase 1)
+## Referencia histórica del port (Diagnóstico de Fase 1 — archivado)
 
-Análisis del commit fijado en `source-lock.json`. Las rutas de esta página son relativas a `upstream/obs-studio/`. `audit-phase1.ps1` vuelve a localizar los puntos críticos y guarda sus líneas reales en `out/phase1/source-evidence.json`; falla si cambian las firmas examinadas.
+> **Nota histórica:** La sección siguiente documenta el análisis estático original realizado en Fase 1 sobre `upstream/obs-studio/` (antes de compilar `libobs`, MediaCodec y el frontend Qt 6.9.3 descritos arriba). Se conserva únicamente como evidencia técnica de los bloqueos que fueron resueltos mediante los parches `patches/obs-studio/0001..0012`. `audit-phase1.ps1` vuelve a localizar los puntos críticos y guarda sus líneas reales en `out/phase1/source-evidence.json`.
 
 ## Componentes reutilizables
 
@@ -74,20 +74,4 @@ La lógica del modo estudio también vive en el frontend: conservar libobs no po
 | Linux/BSD | `obs-nix-x11.c`, GL X11/Wayland, XCB, PulseAudio, ALSA, PipeWire, JACK, V4L2, OSS y sndio de escritorio. |
 | Compartido | Escenas, fuentes, señales, datos, mezcla, encoder/output/service, filtros compatibles, RTMP y utilidades portables. |
 
-La categoría 3 de plugins significa que **el módulo actual** no ofrece una implementación Android utilizable, no que su función deba desaparecer. Sus funciones esenciales se proporcionarán mediante módulos Android del propio OBS. Un SDK de fabricante Android futuro permitiría reevaluar módulos de hardware profesional; no se ha demostrado tal soporte aquí.
-
-## Integración Android propuesta, todavía no implementada
-
-```text
-Activity táctil → JNI (cola serial de comandos) → libobs original
-                       ↑                         ↓
-Foreground service     fuentes OBS Android       backend EGL/GLES
-(ciclo de vida)         Camera2 / AudioRecord      Preview / Program
-                       MediaProjection            Surface de MediaCodec
-                                                  ↓
-                       MediaCodec encoder OBS → paquetes OBS
-                                                  ↓
-                              obs-outputs RTMP/RTMPS + grabación
-```
-
-Camera2/MediaProjection alimentarán fuentes OBS con `SurfaceTexture`/textura externa o una ruta inicial de frames asíncronos. El compositor seguirá siendo OBS. La ruta de superficie de MediaCodec debe integrar su sincronización con la API de encoder y el hilo gráfico OBS; no basta con registrar una función `encode`. Primero se valida corrección; la eliminación de copias se mide después. Vulkan queda como backend opcional futuro tras GLES funcional, sin afirmar que OBS ya disponga de él.
+La categoría 3 de plugins significa que **el módulo actual** no ofrece una implementación Android utilizable, no que su función deba desaparecer. Sus funciones esenciales se proporcionan mediante los módulos Android nativos descritos en la arquitectura implementada al inicio de este documento (`Camera2`, `MediaProjection`, `AudioRecord`, `MediaCodec`, `BrowserSourceManager`, `LiveGraphicsManager`, `SRT`, `NDI`, `PTZ`, `ISO/Replay`). Vulkan queda como backend opcional futuro tras GLES 3.2 funcional.

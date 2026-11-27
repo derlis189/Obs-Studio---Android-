@@ -11,8 +11,8 @@ El APK experimental abre el frontend Qt 6.9.3 y admite edición de escenas, Modo
 El menú **Herramientas** está organizado en 4 categorías:
 
 - **Producción en Vivo:**
-  - **Director Deck (Control táctil en vivo ≥48dp):** switcher en vivo de un toque con cuadrícula de escenas (Programa verde / Vista previa ámbar), Transición/Corte, Transmitir, Grabar, Replay 15s (0.5x), Título al aire, Silenciar Micrófono y telemetría térmica/batería.
-  - **Llamadas e Invitados en Vivo (WebRTC):** sala automática en 1 toque (QR / WhatsApp) o invitados individuales con captura **GPU zero-copy (`HardwareBuffer` → `EGLImageKHR`)** y disposiciones automáticas (`Pantalla completa`, `Lado a lado 640×720`, `Cuadrícula 2×2`, `PIP`).
+  - **Director Deck (Control táctil en vivo):** switcher en vivo de un toque con cuadrícula de escenas (Programa verde / Vista previa ámbar), Transición/Corte, Transmitir, Grabar, Replay 15s (0.5x), Título al aire, Silenciar Micrófono y telemetría térmica/batería.
+  - **Llamadas e Invitados en Vivo (WebRTC):** sala automática en 1 toque (QR / WhatsApp, conserva fondo transparente) o invitados individuales con captura **GPU zero-copy (`HardwareBuffer` → `EGLImageKHR`)** y disposiciones automáticas (`Pantalla completa`, `Lado a lado 640×720`, `Cuadrícula 2×2`, `PIP`).
   - **Generador Avanzado de Títulos Animados:** motor 30 FPS en GPU (`AndroidRgbaFrame`) con 8 plantillas, 7 animaciones de entrada, 4 de salida, selectores de color visuales (`QColorDialog`), shimmer, ticker y presets.
   - **Control de Gráficos:** Marcador Deportivo, Lower Third, Cronómetro/Temporizador, Biblia RV1909 offline y fuente **Fecha, Hora y Clima** (Open-Meteo, 6 diseños, auto-tamaño horizontal/vertical).
   - **Control PTZ:** VISCA sobre IP (UDP/TCP), ONVIF Profile S (SOAP + WS-Discovery), Pelco-D y soporte nativo para mando **PlayStation DualShock 4 / DualSense** (Bluetooth/USB).
@@ -20,8 +20,8 @@ El menú **Herramientas** está organizado en 4 categorías:
   - **Grabación ISO (Multi-fuente y Mosaico 2×2):** hasta 4 pistas MP4 independientes con codificador AAC compartido, o **Modo Mosaico 2×2** en un solo codificador GPU (75% menos carga térmica/MediaCodec), con finalización asíncrona en segundo plano.
   - **Repetición Instantánea (Instant Replay):** ring buffer de hasta 60 s con exportación MP4 asíncrona y reproducción en cámara lenta al aire.
 - **Salidas y Red:** Salida SRT (Caller/Listener Wi-Fi o datos móviles), Salida NDI en red, Salida HDMI / Pantalla Wi-Fi (Miracast) y Control Remoto Web (QR en puerto 4455 con token efímero por sesión).
-- **Audio y Color:** Audio Pro (cadena de voz limpia en 1 toque), Ruedas de color (LGG) y filtro GPU Quitar Fondo / Bokeh IA (con PBO doble asíncrono).
-- **Sistema y Seguridad:** Modo Directo Seguro (bloqueo táctil en vivo), Botón flotante de escenas, Diagnóstico de rendimiento/térmica (con gobernador térmico dinámico de bitrate en vivo), Respaldar / Restaurar configuración asíncrono (`.zip` con redacción automática de claves RTMP/SRT/PTZ) y Recuperar paneles en pantalla.
+- **Audio y Color:** Audio Pro (cadena de voz limpia en 1 toque) y Ruedas de color (LGG). *(El filtro GPU **Quitar Fondo / Bokeh IA** con MediaPipe GPU Delegate + PBO doble asíncrono se agrega desde **Filtros** en cualquier fuente de video).*
+- **Sistema y Seguridad:** Modo Directo Seguro (bloqueo táctil en vivo), Botón flotante de escenas, Diagnóstico de rendimiento/térmica, Respaldar / Restaurar configuración asíncrono (`.zip` con redacción automática de claves RTMP/SRT/PTZ) y Recuperar paneles en pantalla. *(Los codificadores MediaCodec aplican además un gobernador térmico dinámico de bitrate en niveles térmicos elevados).*
 
 ## Compilar y probar el port actual
 
@@ -44,7 +44,7 @@ Requiere Git, Android SDK 36, NDK `29.0.14206865`, JDK 21, Ninja y Gradle 8.13. 
 
 El APK queda en `android/app/build/outputs/apk/debug/app-debug.apk`. Instalar mediante `adb -s '<serial>' install -r <apk>` y abrir `org.obsandroid.port/.QtObsActivity`. En **Fuentes** se habilitan cámara/micrófono/pantalla; MediaProjection requiere consentimiento nuevo en el teléfono. Una vez habilitada pantalla + audio interno, `scripts/test-capture-device.ps1 -Serial '<serial>'` reproduce un tono y comprueba píxeles GPU y mezcla real. No transmite a ningún servidor.
 
-Cámara, pantalla, presentación y codificación disponen de rutas GPU con AHardwareBuffer y MediaCodec Surface. Navegador y VTuber usan entregas acotadas y conservan las copias CPU necesarias; las rutas y sus límites están descritos en el informe de rendimiento. GLES 3.2 y las extensiones sRGB requeridas se verifican al arrancar. No se presupone compatibilidad universal entre fabricantes.
+Cámara, pantalla, fuentes de navegador opacas (incluidos invitados individuales WebRTC), presentación y codificación disponen de rutas GPU zero-copy con `AHardwareBuffer` y MediaCodec Surface; USB UVC NV12 se entrega directo a libobs sin conversión CPU. Las fuentes de navegador con transparencia alfa (overlays y Sala Automática) y VTuber usan entregas acotadas por `AndroidRgbaFrame` (ver [informe de rendimiento](docs/VERIFICACION-RENDIMIENTO-2026-11-25.md) y [auditoría EGM v2](docs/AUDITORIA-EGM-2026-11-26.md)). GLES 3.2 y las extensiones sRGB requeridas se verifican al arrancar. No se presupone compatibilidad universal entre fabricantes.
 
 ## OMT en Android ARM64
 
@@ -64,7 +64,7 @@ La compilación opcional incorpora la fuente y la salida de [OMT para OBS](https
 
 - Para SRT con datos móviles, usa **Caller** hacia un receptor alcanzable. **Listener** requiere un puerto UDP entrante accesible, algo que CGNAT generalmente impide.
 - La salida RTMP desde **Transmitir desde libobs** permite AAC estéreo a 128–320 kbps en pasos de 32. Se valida el formato contra los codificadores AAC del teléfono antes de iniciar; si el teléfono no anuncia soporte para la tasa elegida, selecciona una menor. Una tasa mayor aumenta el uso de datos y no garantiza por sí sola una mejora audible.
-- Para Control Remoto, abre su diálogo QR desde Herramientas y conecta el navegador en la misma red al puerto TCP 4455. El diálogo permite volver a desactivar el acceso LAN. Usa una red de confianza, ya que el transporte es HTTP.
+- Para Control Remoto, abre **Herramientas → Salidas y Red → Control Remoto Web (QR)...** y conecta el navegador en la misma red al puerto TCP 4455 (token efímero por sesión). El diálogo permite volver a desactivar el acceso LAN. Usa una red Wi-Fi de confianza, ya que el transporte es HTTP.
 - Para descubrir NDI, el teléfono y los emisores deben compartir una red que permita mDNS en UDP 5353. Importa el runtime ARM64 por separado desde el selector de la aplicación.
 - Para enviar el Programa por NDI, abre **Herramientas → Salidas y Red → Salida NDI en red…**, asigna el nombre visible y pulsa **Iniciar salida**. La función transmite video RGBA y audio estéreo. El runtime ARM64 importado debe incluir `NDIlib_send_create`, `NDIlib_send_send_video_v2` y `NDIlib_send_send_audio_v2`; un runtime únicamente receptor no basta. La salida se detiene desde ese mismo diálogo.
 - Concede permisos de cámara, micrófono, USB y captura de pantalla al activar las fuentes correspondientes.

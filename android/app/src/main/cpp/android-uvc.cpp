@@ -209,27 +209,10 @@ struct UvcSession {
     uint64_t decoded_frames{0};
 
     void deliver_nv12(const uint8_t *nv12, int w, int h, uint64_t ts) {
-        if (!sws || sws_w != w || sws_h != h || sws_fmt != AV_PIX_FMT_NV12) {
-            if (sws) sws_freeContext(sws);
-            sws = sws_getContext(w, h, AV_PIX_FMT_NV12, w, h, AV_PIX_FMT_YUV420P,
-                                 SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-            sws_w = w; sws_h = h; sws_fmt = AV_PIX_FMT_NV12;
-            i420_buf.resize(size_t(w) * h * 3 / 2);
-        }
-        if (!sws) return;
-        const uint8_t *src[2] = {nv12, nv12 + size_t(w) * h};
-        int src_stride[2] = {w, w};
-        uint8_t *dst[3] = {
-            i420_buf.data(),
-            i420_buf.data() + size_t(w) * h,
-            i420_buf.data() + size_t(w) * h * 5 / 4
-        };
-        int dst_stride[3] = {w, w / 2, w / 2};
-        sws_scale(sws, src, src_stride, 0, h, dst, dst_stride);
-        android_uvc_deliver_i420(dst[0], dst[1], dst[2], uint32_t(w), uint32_t(w / 2), uint32_t(w / 2),
-                                 uint32_t(w), uint32_t(h), ts);
+        // Direct NV12 passthrough into libobs GPU shader (eliminates CPU sws_scale NV12->I420)
+        android_uvc_deliver_nv12(nv12, nv12 + size_t(w) * h, uint32_t(w), uint32_t(w), uint32_t(h), ts);
         if (++decoded_frames == 1 || (decoded_frames % 150) == 0) {
-            UVC_LOGI("UVC delivered NV12 frame #%llu (%dx%d)", (unsigned long long)decoded_frames, w, h);
+            UVC_LOGI("UVC delivered direct NV12 frame #%llu (%dx%d)", (unsigned long long)decoded_frames, w, h);
         }
     }
 

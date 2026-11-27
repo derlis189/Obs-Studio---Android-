@@ -146,6 +146,7 @@ int g_prog_w = 0;
 int g_prog_h = 0;
 bool g_prog_attached = false;
 int64_t g_prog_last_req_ms = 0;
+int64_t g_prog_last_copy_ms = 0;
 constexpr int kProgSnapW = 480;
 constexpr int kProgSnapH = 270;
 
@@ -185,9 +186,11 @@ void on_program_raw_video(void *, struct video_data *frame)
     bool idle = false;
     {
         std::lock_guard<std::mutex> lock(g_prog_mutex);
-        if (now_ms_steady() - g_prog_last_req_ms > 6000) {
+        const int64_t now_ms = now_ms_steady();
+        if (now_ms - g_prog_last_req_ms > 2500) {
             idle = true;
-        } else {
+        } else if (now_ms - g_prog_last_copy_ms >= 160) {
+            g_prog_last_copy_ms = now_ms;
             const int row_bytes = kProgSnapW * 4;
             const uint32_t stride = frame->linesize[0];
             if (stride < uint32_t(row_bytes)) return;

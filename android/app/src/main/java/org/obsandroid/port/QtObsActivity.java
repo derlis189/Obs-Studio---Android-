@@ -278,7 +278,7 @@ public final class QtObsActivity extends QtActivity {
                     else if (name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("softap")) label = "Hotspot";
                     else if (name.startsWith("rndis") || name.startsWith("ncm") || name.startsWith("usb") || name.startsWith("eth")) label = "USB/Ethernet";
                     else if (name.startsWith("tun") || name.startsWith("wg") || name.startsWith("tailscale") || name.startsWith("zt")) label = "VPN";
-                    else if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("pdp") || name.startsWith("wwan")) label = "Datos moviles";
+                    else if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("pdp") || name.startsWith("wwan")) label = "Datos móviles";
                     else continue;
 
                     java.util.Enumeration<java.net.InetAddress> addrs = nic.getInetAddresses();
@@ -305,7 +305,7 @@ public final class QtObsActivity extends QtActivity {
                         LinkProperties lp = cm.getLinkProperties(active);
                         if (caps != null && lp != null) {
                             String label = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ? "Wi-Fi"
-                                : caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "Datos moviles"
+                                : caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? "Datos móviles"
                                 : caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) ? "VPN"
                                 : caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ? "Ethernet/USB" : "Red";
                             for (LinkAddress la : lp.getLinkAddresses()) {
@@ -632,7 +632,7 @@ public final class QtObsActivity extends QtActivity {
                             QtObsActivity act = sInstance;
                             if (act != null && !act.isFinishing()) {
                                 act.runOnUiThread(() -> Toast.makeText(
-                                    appCtx, "Grabacion guardada en carpeta seleccionada", Toast.LENGTH_SHORT).show());
+                                    appCtx, "Grabación guardada en carpeta seleccionada", Toast.LENGTH_SHORT).show());
                             }
                             String posixTarget = translateTreeUriToPosix(treeUri);
                             if (posixTarget != null) {
@@ -1011,8 +1011,8 @@ public final class QtObsActivity extends QtActivity {
                 if (parts.length >= 2 && "OK".equals(parts[0])) {
                     boolean loaded = NativeBridge.reloadNdiRuntime(parts[1]);
                     final String msg = loaded
-                        ? "Runtime NDI (libndi.so) instalado y cargado correctamente. Cierra y reabre Propiedades para conectar."
-                        : "libndi.so copiado, pero dlopen() falló (verifica que sea Android arm64-v8a y contenga NDIlib_*).";
+                        ? "Biblioteca NDI (libndi.so) instalada y cargada correctamente. Cierra y reabre Propiedades para conectar."
+                        : "libndi.so copiado, pero no se pudo cargar (verifica que sea una biblioteca Android ARM64 válida de NDI).";
                     runOnUiThread(() -> {
                         if (!isFinishing() && !isDestroyed()) {
                             new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
@@ -1273,11 +1273,14 @@ public final class QtObsActivity extends QtActivity {
         if (act == null || act.isFinishing() || url == null || url.isEmpty()) return;
         act.runOnUiThread(() -> {
             try {
+                android.widget.ScrollView scroll = new android.widget.ScrollView(act);
                 LinearLayout box = new LinearLayout(act);
                 box.setOrientation(LinearLayout.VERTICAL);
                 box.setGravity(Gravity.CENTER_HORIZONTAL);
-                int pad = Math.round(18 * act.getResources().getDisplayMetrics().density);
+                float density = act.getResources().getDisplayMetrics().density;
+                int pad = Math.round(14 * density);
                 box.setPadding(pad, pad, pad, pad);
+                scroll.addView(box);
 
                 if (subtitle != null && !subtitle.isEmpty()) {
                     android.widget.TextView sub = new android.widget.TextView(act);
@@ -1290,8 +1293,10 @@ public final class QtObsActivity extends QtActivity {
                 android.graphics.Bitmap qr = QrCodeGenerator.generateBitmap(url, 560);
                 if (qr != null) {
                     android.widget.ImageView iv = new android.widget.ImageView(act);
+                    iv.setBackgroundColor(android.graphics.Color.WHITE);
+                    iv.setContentDescription("Código QR de invitación");
                     iv.setImageBitmap(qr);
-                    int sz = Math.round(240 * act.getResources().getDisplayMetrics().density);
+                    int sz = Math.round(200 * density);
                     box.addView(iv, new LinearLayout.LayoutParams(sz, sz));
                 }
 
@@ -1307,9 +1312,9 @@ public final class QtObsActivity extends QtActivity {
                     act.mActiveQrDialog.dismiss();
                     act.mActiveQrDialog = null;
                 }
-                AlertDialog dlg = new AlertDialog.Builder(act)
+                AlertDialog dlg = new AlertDialog.Builder(act, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                     .setTitle(title != null && !title.isEmpty() ? title : "Código QR")
-                    .setView(box)
+                    .setView(scroll)
                     .setPositiveButton("WhatsApp / Enviar", (d, w) ->
                         shareText(title, "¡Hola! Entra a la transmisión en vivo tocando este enlace (no necesitas instalar nada):\n" + url))
                     .setNeutralButton("Copiar enlace", (d, w) -> {

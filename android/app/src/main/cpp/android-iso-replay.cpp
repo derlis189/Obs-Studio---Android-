@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -113,6 +114,7 @@ std::mutex g_iso_mutex;
 std::vector<IsoTrack> g_iso_tracks;
 obs_encoder_t *g_iso_shared_aenc = nullptr;
 int64_t g_iso_start_ms = 0;
+std::atomic<bool> g_iso_stopping{false};
 
 void release_iso_track_cleanup(IsoTrack &tr, std::vector<std::string> *finished_out)
 {
@@ -766,13 +768,28 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_iso_start(con
 
 extern "C" __attribute__((visibility("default"))) void obs_android_iso_stop()
 {
-    std::vector<std::string> finished;
+    std::vector<IsoTrack> local_tracks;
+    obs_encoder_t *local_aenc = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_iso_mutex);
-        release_iso_tracks_parallel(g_iso_tracks, finished);
-        if (g_iso_shared_aenc) { obs_encoder_release(g_iso_shared_aenc); g_iso_shared_aenc = nullptr; }
+        local_tracks.swap(g_iso_tracks);
+        local_aenc = g_iso_shared_aenc;
+        g_iso_shared_aenc = nullptr;
         g_iso_start_ms = 0;
-        blog(LOG_INFO, "[android-iso] Stopped all ISO recording tracks");
+        if (!local_tracks.empty() || local_aenc) {
+            g_iso_stopping.store(true, std::memory_order_release);
+        }
+    }
+    std::vector<std::string> finished;
+    if (!local_tracks.empty()) {
+        release_iso_tracks_parallel(local_tracks, finished);
+    }
+    if (local_aenc) {
+        obs_encoder_release(local_aenc);
+    }
+    g_iso_stopping.store(false, std::memory_order_release);
+    if (!finished.empty()) {
+        blog(LOG_INFO, "[android-iso] Stopped all ISO recording tracks (%zu files)", finished.size());
     }
     for (const auto &p : finished) obs_android_on_recording_finished(p.c_str());
 }
@@ -781,6 +798,10 @@ extern "C" __attribute__((visibility("default"))) bool obs_android_iso_get_stats
 {
     if (!out_buf || out_cap == 0) return false;
     out_buf[0] = '\0';
+    if (g_iso_stopping.load(std::memory_order_acquire)) {
+        std::snprintf(out_buf, out_cap, "%s", "{\"active\":false,\"stopping\":true,\"elapsedSec\":0,\"tracks\":[]}");
+        return true;
+    }
     std::lock_guard<std::mutex> lock(g_iso_mutex);
     nlohmann::json j;
     bool any_active = false;

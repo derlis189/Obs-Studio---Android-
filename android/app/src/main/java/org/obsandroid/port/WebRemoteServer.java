@@ -198,17 +198,18 @@ public final class WebRemoteServer {
             scroll.addView(root);
 
             TextView subtitle = new TextView(activity);
-            subtitle.setText("Escanea el código QR desde otro teléfono, tablet o PC en la misma red Wi-Fi para controlar escenas, transmisión, grabación y audio en vivo:");
+            subtitle.setText("Escanea el código QR desde otro teléfono, tablet o PC en la misma red Wi-Fi para controlar escenas, transmisión, grabación y audio en vivo.\nUsa solo una red Wi-Fi de confianza (HTTP local).");
             subtitle.setTextSize(13f);
             subtitle.setTextColor(Color.parseColor("#D0D4DC"));
             root.addView(subtitle);
 
             ImageView qrView = new ImageView(activity);
             qrView.setBackgroundColor(Color.WHITE);
-            int qrPx = Math.round(210 * d);
+            qrView.setContentDescription("Código QR de Control Remoto Web");
+            int qrPx = Math.round(200 * d);
             LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(qrPx, qrPx);
-            qrLp.topMargin = Math.round(12 * d);
-            qrLp.bottomMargin = Math.round(10 * d);
+            qrLp.topMargin = Math.round(10 * d);
+            qrLp.bottomMargin = Math.round(8 * d);
             root.addView(qrView, qrLp);
 
             TextView urlText = new TextView(activity);
@@ -219,19 +220,31 @@ public final class WebRemoteServer {
             root.addView(urlText);
 
             Runnable refreshUi = () -> {
+                String lanIp = getLanIpAddress();
+                boolean hasLan = !"127.0.0.1".equals(lanIp);
                 String url = getRemoteUrl();
-                urlText.setText(sRunning ? url : "Servidor detenido");
-                Bitmap bmp = sRunning ? QrCodeGenerator.generateBitmap(url, 520) : null;
-                qrView.setImageBitmap(bmp);
+                if (!sRunning) {
+                    urlText.setText("Servidor detenido");
+                    urlText.setTextColor(Color.parseColor("#F87171"));
+                    qrView.setImageBitmap(null);
+                } else if (!hasLan) {
+                    urlText.setText("Sin conexión Wi-Fi/LAN detectada.\nConecta el teléfono a una red Wi-Fi y pulsa 'Nuevo QR'.");
+                    urlText.setTextColor(Color.parseColor("#FBBF24"));
+                    qrView.setImageBitmap(null);
+                } else {
+                    urlText.setText(url);
+                    urlText.setTextColor(Color.parseColor("#6EA8FE"));
+                    qrView.setImageBitmap(QrCodeGenerator.generateBitmap(url, 520));
+                }
             };
             refreshUi.run();
 
-            LinearLayout btnRow = new LinearLayout(activity);
-            btnRow.setOrientation(LinearLayout.HORIZONTAL);
-            btnRow.setGravity(Gravity.CENTER);
+            LinearLayout btnRow1 = new LinearLayout(activity);
+            btnRow1.setOrientation(LinearLayout.HORIZONTAL);
+            btnRow1.setGravity(Gravity.CENTER);
             LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            rowLp.topMargin = Math.round(12 * d);
+            rowLp.topMargin = Math.round(10 * d);
 
             Button copyBtn = new Button(activity);
             copyBtn.setText("Copiar enlace");
@@ -256,17 +269,21 @@ public final class WebRemoteServer {
             });
 
             Button regenBtn = new Button(activity);
-            regenBtn.setText("Nuevo QR");
+            regenBtn.setText("Nuevo QR / Actualizar IP");
             regenBtn.setOnClickListener(v -> {
                 regenerateToken();
                 refreshUi.run();
-                Toast.makeText(activity, "Clave y QR regenerados", Toast.LENGTH_SHORT).show();
+                Toast.makeText(activity, "Clave y QR actualizados", Toast.LENGTH_SHORT).show();
             });
 
-            btnRow.addView(copyBtn);
-            btnRow.addView(shareBtn);
-            btnRow.addView(regenBtn);
-            root.addView(btnRow, rowLp);
+            LinearLayout.LayoutParams halfLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            btnRow1.addView(copyBtn, halfLp);
+            btnRow1.addView(shareBtn, halfLp);
+            root.addView(btnRow1, rowLp);
+            LinearLayout.LayoutParams regenLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            regenLp.topMargin = Math.round(6 * d);
+            root.addView(regenBtn, regenLp);
 
             AlertDialog dlg = new AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setIcon(R.mipmap.ic_launcher)
@@ -276,6 +293,7 @@ public final class WebRemoteServer {
                 .setNeutralButton("Desactivar LAN", (dialog, button) -> {
                     stop();
                     ensureStarted(activity);
+                    Toast.makeText(activity, "Acceso LAN desactivado (solo modo local)", Toast.LENGTH_SHORT).show();
                 })
                 .create();
             dlg.setOnDismissListener(x -> {
@@ -412,7 +430,7 @@ public final class WebRemoteServer {
 
             if (!tokenMatches(sToken, authToken)) {
                 sendResponse(out, 401, "application/json; charset=utf-8",
-                    "{\"error\":\"Token invalido\"}".getBytes(StandardCharsets.UTF_8));
+                    "{\"error\":\"Token inválido\"}".getBytes(StandardCharsets.UTF_8));
                 return;
             }
 

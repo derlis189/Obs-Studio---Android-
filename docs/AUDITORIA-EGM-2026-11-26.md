@@ -128,18 +128,19 @@
 
 ---
 
-## 6. Plan de Remediación Recomendado (Sprints 5–7)
+## 6. Estado de Remediación (Sprints 5 y 6 Aplicados)
 
-1. **Sprint 5 — Cierre inmediato de P0 + P1 críticos (1–2 sesiones):**
-   - Corregir `OpenBackupRestoreDialog` (capturas por valor + bloqueo de `reject()` en ocupación) [**P0-1**].
-   - Corregir `reset_codec()` en rutas de error de `start_codec()` [**P0-2**].
-   - Hacer `surfaceZeroCopy` `volatile` + `ConcurrentHashMap` en `BrowserSourceManager` [**P1-1**].
-   - Drenar instancias GL en `android_browser_shutdown()` + tope `img_cache <= 4` [**P1-2**].
-   - Soltar `g_iso_mutex` antes del drenaje en `obs_android_iso_stop()` + guard de cierre para hilos detached [**P1-3**].
-   - Redactar host en `BrowserSourceManager.interact()`, advertencia Wi-Fi/HTTP en `WebRemoteServer` y aviso de claves en Restaurar [**P1-5**].
-   - Actualizar `README.md`, `docs/ARQUITECTURA.md`, `docs/DEPENDENCIAS.md` y `docs/LICENCIAS.md` [**P1-6**].
-2. **Sprint 6 — Pulido UX/A11y + Victorias rápidas TRIZ:**
-   - Tildes, eliminar jerga técnica (`≥48dp`, `GPU zero-copy`, `dlopen`), estado real de micrófono en Director Deck, `ScrollView` en QR horizontal de `QtObsActivity`, clamp de diálogos y botones táctiles ≥44–48dp.
-   - `android-uvc.cpp` NV12 directo, `BgSegmenterManager` `Delegate.GPU`, `PageAudioBridge` binario `ArrayBuffer`, y WebRemote 5 FPS sin `obs_add_raw_video_callback`.
-3. **Sprint 7 — Consolidación Arquitectónica v3:**
-   - Extraer `AndroidAhbTextureSink` + `JniAttachGuard` compartido, dividir `android-tools.cpp` en módulos temáticos, GPU `HardwareRenderer` para `LiveGraphicsManager`, `encode_texture2` RGBA directo + EGL sticky, y `AndroidSyncClock`.
+- **Sprint 5 — CERRADO al 100 %:**
+  - **P0-1 (Cerrado):** `OpenBackupRestoreDialog` migrado a lambdas con captura exclusiva por valor (`QPointer`, `QString`) + `BusyCloseGuard` bloqueando cierre/Atrás mientras corre el respaldo/restauración.
+  - **P0-2 (Cerrado):** `start_codec()` en `android-encoders.cpp` invoca `reset_codec()` en las 3 rutas de error (`color_format`, `configure`, `start`).
+  - **P1-1 (Cerrado):** `BrowserSourceManager` migrado a `ConcurrentHashMap` y `volatile boolean surfaceZeroCopy`.
+  - **P1-2 (Cerrado):** `android_browser_shutdown()` drena `clear_pending()` y `destroy_gl_resources()` de todas las instancias antes de borrar el programa OES; `img_cache` acotado a `<= 4`.
+  - **P1-3 (Cerrado):** `obs_android_iso_stop()` suelta `g_iso_mutex` antes del drenaje paralelo usando `g_iso_stopping` no bloqueante; todos los hilos detached de `android-tools.cpp` respetan `androidFrontendClosing`.
+  - **P1-4 (Parcial / Mejorado):** Factor térmico inicial aplicado al arrancar `start_codec_surface()` y reportado en `obs_android_encoder_stats()`.
+  - **P1-5 (Cerrado):** Título de `BrowserSourceManager.interact()` muestra solo el host (sin tokens) + botón Atrás; `WebRemoteServer` advierte falta de Wi-Fi (`127.0.0.1`), aviso HTTP local y Toast al desactivar LAN; Restaurar respaldo advierte explícitamente sobre claves redactadas.
+  - **P1-6 (Cerrado):** `README.md`, `docs/ARQUITECTURA.md`, `docs/DEPENDENCIAS.md` y `docs/LICENCIAS.md` alineados con el estado real actual.
+- **Sprint 6 — Victorias rápidas TRIZ + Pulido UX/A11y APLICADOS:**
+  - **TRIZ #3/#4:** `android-uvc.cpp` entrega `VIDEO_FORMAT_NV12` directo a `libobs` (cero `sws_scale` CPU), `BgSegmenterManager` habilita `Delegate.GPU` con fallback automático CPU, y `obs-session.cpp` limita las copias de vista WebRemote a ~6 FPS y 2,5 s de inactividad.
+  - **UX/A11y:** Corregidas tildes en SRT/Móvil/WebRemote/QtObsActivity, eliminada jerga técnica (`≥48dp`, `GPU zero-copy`, `Puente JNI`, `dlopen()`), botón de micrófono real en Director Deck (`SIN MICRÓFONO` si no hay fuente), QR horizontal con `ScrollView` en `QtObsActivity`, tamaños acotados a pantalla en 8 diálogos, botones táctiles más grandes en docks web y barra móvil, contadores/estados vacíos en ISO, Replay, Audio Pro, Respaldo y Director Deck.
+- **Sprint 7 — Hoja de ruta futura (v3):**
+  - Extraer `AndroidAhbTextureSink` + `JniAttachGuard` compartido, dividir `android-tools.cpp` en módulos temáticos, GPU `HardwareRenderer` para `LiveGraphicsManager`, `encode_texture2` RGBA directo + EGL sticky, Atlas WebRTC 2×2 + audio binario `WebMessage`, y `AndroidSyncClock` + gobernador térmico por tasa de píxeles en Tier 3.
