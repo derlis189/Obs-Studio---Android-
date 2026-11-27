@@ -21,6 +21,11 @@ $prefixPaths = if ($Frontend) { "$prefix;$qtAndroid" } else { $prefix }
 if ($Editor) {
     & (Join-Path $PSScriptRoot 'prepare-advanced-masks.ps1')
     & (Join-Path $PSScriptRoot 'prepare-stroke-glow-shadow.ps1')
+    & (Join-Path $PSScriptRoot 'prepare-composite-blur.ps1')
+}
+if ($Frontend) {
+    & (Join-Path $PSScriptRoot 'prepare-source-clone.ps1')
+    & (Join-Path $PSScriptRoot 'prepare-downstream-keyer.ps1')
 }
 $common = @('-S', $source, '-B', $build, '-G', 'Ninja',
     "-DCMAKE_MAKE_PROGRAM=$SdkRoot/cmake/3.22.1/bin/ninja.exe",
@@ -37,6 +42,11 @@ $common = @('-S', $source, '-B', $build, '-G', 'Ninja',
 if ($Editor) {
     $common += "-DOBS_ADVANCED_MASKS_SOURCE_DIR=$ProjectRoot/out/advanced-masks-src"
     $common += "-DOBS_STROKE_GLOW_SHADOW_SOURCE_DIR=$ProjectRoot/out/stroke-glow-shadow-src"
+    $common += "-DOBS_COMPOSITE_BLUR_SOURCE_DIR=$ProjectRoot/out/composite-blur-src"
+}
+if ($Frontend) {
+    $common += "-DOBS_SOURCE_CLONE_SOURCE_DIR=$ProjectRoot/out/source-clone-src"
+    $common += "-DOBS_DOWNSTREAM_KEYER_SOURCE_DIR=$ProjectRoot/out/downstream-keyer-src"
 }
 $result = Invoke-Recorded $cmake $common (Join-Path $logs 'libobs-configure.log')
 if ($result.exitCode) { throw "OBS configure failed: $($result.log)" }
@@ -46,6 +56,7 @@ if ($Streaming) { $targets += @('obs-outputs', 'obs-android-media-probe') }
 if ($Editor) { $targets += @('obs-filters', 'obs-ffmpeg', 'vlc-video') }
 if ($Editor) { $targets += 'obs-advanced-masks' }
 if ($Editor) { $targets += 'obs-stroke-glow-shadow' }
-if ($Frontend) { $targets += @('obs-frontend-api', 'obs-studio') }
+if ($Editor) { $targets += 'obs-composite-blur' }
+if ($Frontend) { $targets += @('obs-frontend-api', 'obs-studio', 'source-clone', 'downstream-keyer') }
 $result = Invoke-Recorded $cmake (@('--build', $build, '--target') + $targets + @('--parallel', '6')) (Join-Path $logs 'libobs-build.log')
 if ($result.exitCode) { throw "OBS compile/link failed: $($result.log)" }

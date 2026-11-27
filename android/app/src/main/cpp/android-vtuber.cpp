@@ -302,6 +302,8 @@ jmethodID g_mid_vt_destroy = nullptr;
 jmethodID g_mid_vt_visible = nullptr;
 jmethodID g_mid_vt_destroy_all = nullptr;
 jmethodID g_mid_vt_pick_cubism = nullptr;
+jmethodID g_mid_vt_gesture = nullptr;
+jmethodID g_mid_vt_expr = nullptr;
 std::atomic<int64_t> g_vt_seq{0};
 std::atomic<int> g_vt_active_count{0};
 bool g_vt_registered = false;
@@ -836,7 +838,104 @@ Java_org_obsandroid_port_NativeBridge_registerVtuberHost(JNIEnv *env, jclass, jc
     g_mid_vt_destroy = env->GetStaticMethodID(g_vt_host_class, "vtuberDestroy", "(J)V");
     g_mid_vt_destroy_all = env->GetStaticMethodID(g_vt_host_class, "vtuberDestroyAll", "()V");
     g_mid_vt_pick_cubism = env->GetStaticMethodID(g_vt_host_class, "pickLive2dCubismCore", "()V");
+    g_mid_vt_gesture = env->GetStaticMethodID(g_vt_host_class, "vtuberTriggerGesture", "(Ljava/lang/String;I)V");
+    g_mid_vt_expr = env->GetStaticMethodID(g_vt_host_class, "vtuberTriggerLive2dExpr", "(Ljava/lang/String;Z)V");
     if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+extern "C" __attribute__((visibility("default"))) void obs_android_vtuber_trigger_gesture(const char *gesture_id, int duration_ms)
+{
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_vt_mutex);
+        jvm = g_vt_jvm; cls = g_vt_host_class; mid = g_mid_vt_gesture;
+    }
+    if (!jvm || !cls || !mid) return;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return; detach = true; }
+    else if (st != JNI_OK) return;
+    jstring jGest = env->NewStringUTF(gesture_id ? gesture_id : "reset");
+    env->CallStaticVoidMethod(cls, mid, jGest, jint(duration_ms));
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(jGest);
+    if (detach) jvm->DetachCurrentThread();
+}
+
+extern "C" __attribute__((visibility("default"))) void obs_android_vtuber_trigger_live2d_expr(const char *expr_key, bool active)
+{
+    JavaVM *jvm = nullptr; jclass cls = nullptr; jmethodID mid = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_vt_mutex);
+        jvm = g_vt_jvm; cls = g_vt_host_class; mid = g_mid_vt_expr;
+    }
+    if (!jvm || !cls || !mid) return;
+    JNIEnv *env = nullptr; bool detach = false;
+    int st = jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) { if (jvm->AttachCurrentThread(&env, nullptr) != 0) return; detach = true; }
+    else if (st != JNI_OK) return;
+    jstring jKey = env->NewStringUTF(expr_key ? expr_key : "reset");
+    env->CallStaticVoidMethod(cls, mid, jKey, active ? JNI_TRUE : JNI_FALSE);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(jKey);
+    if (detach) jvm->DetachCurrentThread();
+}
+
+extern "C" __attribute__((visibility("default"))) void obs_android_vtuber_set_veado_state(int state_index)
+{
+    std::vector<obs_source_t *> sources;
+    {
+        std::lock_guard<std::mutex> lock(g_vt_mutex);
+        for (auto &kv : g_vt_instances) {
+            if (kv.second && kv.second->source) {
+                obs_source_t *ref = obs_source_get_ref(kv.second->source);
+                if (ref) sources.push_back(ref);
+            }
+        }
+    }
+    for (obs_source_t *src : sources) {
+        obs_data_t *s = obs_source_get_settings(src);
+        if (s) {
+            obs_data_set_int(s, "veadomini_state", state_index < 0 ? 0 : (state_index > 15 ? 15 : state_index));
+            obs_source_update(src, s);
+            obs_data_release(s);
+        }
+        obs_source_release(src);
+    }
+}
+
+extern "C" __attribute__((visibility("default"))) void obs_android_vtuber_set_framing(const char *framing)
+{
+    if (!framing || !*framing) return;
+    std::vector<obs_source_t *> sources;
+    {
+        std::lock_guard<std::mutex> lock(g_vt_mutex);
+        for (auto &kv : g_vt_instances) {
+            if (kv.second && kv.second->source) {
+                obs_source_t *ref = obs_source_get_ref(kv.second->source);
+                if (ref) sources.push_back(ref);
+            }
+        }
+    }
+    for (obs_source_t *src : sources) {
+        obs_data_t *s = obs_source_get_settings(src);
+        if (s) {
+            obs_data_set_string(s, "live2d_framing", framing);
+            if (std::strcmp(framing, "closeup") == 0) {
+                obs_data_set_double(s, "vrm_cam_dist", 0.72);
+                obs_data_set_double(s, "vrm_cam_y", 1.46);
+            } else if (std::strcmp(framing, "full") == 0) {
+                obs_data_set_double(s, "vrm_cam_dist", 2.35);
+                obs_data_set_double(s, "vrm_cam_y", 0.96);
+            } else {
+                obs_data_set_double(s, "vrm_cam_dist", 1.15);
+                obs_data_set_double(s, "vrm_cam_y", 1.38);
+            }
+            obs_source_update(src, s);
+            obs_data_release(s);
+        }
+        obs_source_release(src);
+    }
 }
 
 extern "C" JNIEXPORT jfloat JNICALL

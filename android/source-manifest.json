@@ -2,7 +2,7 @@
   "files": [
     {
       "path": "CMakeLists.txt",
-      "sha256Lf": "052f26376f0f870ffc6ca7219d45730b768f25927db3673dedd63f0d044ff115"
+      "sha256Lf": "12d5febb3cab2f9180ddbeb13b4df885d5b09540ac9ec5d3b67c11bcb8f12681"
     },
     {
       "path": "cmake/android/compilerconfig.cmake",
@@ -130,7 +130,7 @@
     },
     {
       "path": "frontend/utility/android-tools.cpp",
-      "sha256Lf": "f6718c74fa8d9cdef7600d4f779c8ba23b42d1d0511f039b564993dc13a42bbd"
+      "sha256Lf": "400e1a9aca2846faf18212563bb31bd085546adc9d45b0d865654fcacbb9f9b7"
     },
     {
       "path": "frontend/utility/audio-encoders.cpp",
@@ -342,7 +342,7 @@
     },
     {
       "path": "libobs/obs-core-modules-loader-android.c",
-      "sha256Lf": "f299a663342c20d8a1dc4c577687828b3112d70498d3e57a1100fc76a78ab40d"
+      "sha256Lf": "47c849be930b10da6a3a1296194b6bcf2a014437394395df80d643b6a3f24364"
     },
     {
       "path": "libobs/obs-display.c",

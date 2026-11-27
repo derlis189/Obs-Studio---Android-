@@ -1017,6 +1017,27 @@ public final class VtuberSourceManager {
         });
     }
 
+    public static void triggerQuickGesture(String gestureId, int durationMs) {
+        FaceTrackerManager.triggerGesture(gestureId, durationMs > 0 ? durationMs : 4000L);
+        if (gestureId == null || "reset".equalsIgnoreCase(gestureId)) {
+            triggerLive2dExpression("reset", false);
+        }
+    }
+
+    public static void triggerLive2dExpression(String exprKey, boolean active) {
+        final String safeKey = (exprKey == null ? "reset" : exprKey.replace("'", "").replace("\\", ""));
+        sMain.post(() -> {
+            for (VtuberInstance inst : sInstances.values()) {
+                if (inst != null && !inst.destroyed && inst.webView != null && inst.pageReady) {
+                    inst.webView.evaluateJavascript(
+                        "if(window.OBS_VTUBER && window.OBS_VTUBER.setManualExpression)window.OBS_VTUBER.setManualExpression('"
+                            + safeKey + "'," + (active ? "true" : "false") + ");",
+                        null);
+                }
+            }
+        });
+    }
+
     public static void destroyAll() {
         sMain.post(() -> {
             FaceTrackerManager.stopBackgroundFrontCamera();

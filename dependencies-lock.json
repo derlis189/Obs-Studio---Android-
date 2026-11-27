@@ -25,6 +25,9 @@
     { "name": "curl", "url": "https://github.com/curl/curl.git", "tag": "curl-8_11_1", "commit": "75a2079d5c28debb2eaa848ca9430f1fe0d7844c" },
     { "name": "nlohmann_json", "url": "https://github.com/nlohmann/json.git", "tag": "v3.11.3", "commit": "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03" },
     { "name": "obs-advanced-masks", "url": "https://github.com/FiniteSingularity/obs-advanced-masks.git", "tag": "v1.6.1", "commit": "8c888208162d9e271b10931ef29e45e871210ec0" },
-    { "name": "obs-stroke-glow-shadow", "url": "https://github.com/FiniteSingularity/obs-stroke-glow-shadow.git", "tag": "v1.6.1", "commit": "6742704be21538a66fe15142162e59dac6eee76e" }
+    { "name": "obs-stroke-glow-shadow", "url": "https://github.com/FiniteSingularity/obs-stroke-glow-shadow.git", "tag": "v1.6.1", "commit": "6742704be21538a66fe15142162e59dac6eee76e" },
+    { "name": "obs-composite-blur", "url": "https://github.com/FiniteSingularity/obs-composite-blur.git", "tag": "v1.6.1", "commit": "8483ccbf51ef633b59341904be02497a9b07dcef" },
+    { "name": "obs-source-clone", "url": "https://github.com/exeldro/obs-source-clone.git", "tag": "0.2.3", "commit": "e5ca9dd25229fdf1f1b8c6fa83762c0581c18c92" },
+    { "name": "obs-downstream-keyer", "url": "https://github.com/exeldro/obs-downstream-keyer.git", "tag": "0.4.5", "commit": "b3d1a8b337b83dc9d543f77cbffff237c9b429d0" }
   ]
 }

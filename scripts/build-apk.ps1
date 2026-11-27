@@ -46,6 +46,28 @@ if (Test-Path -LiteralPath $strokeGlowShadowBinary) {
     New-Item -ItemType Directory -Force -Path $strokeGlowShadowLicense | Out-Null
     Copy-Item -LiteralPath (Join-Path $strokeGlowShadowSource 'LICENSE') -Destination (Join-Path $strokeGlowShadowLicense 'LICENSE') -Force
 }
+foreach ($extraPlugin in @(
+    @{ Name = 'obs-composite-blur'; Src = 'out/composite-blur-src'; Lic = 'composite-blur' },
+    @{ Name = 'source-clone'; Src = 'out/source-clone-src'; Lic = 'source-clone' },
+    @{ Name = 'downstream-keyer'; Src = 'out/downstream-keyer-src'; Lic = 'downstream-keyer' }
+)) {
+    $pSrc = Join-Path $ProjectRoot $extraPlugin.Src
+    $pBin = Join-Path $ProjectRoot "out/libobs-arm64/plugins/$($extraPlugin.Name)/lib$($extraPlugin.Name).so"
+    if (Test-Path -LiteralPath $pBin) {
+        Copy-Item -LiteralPath $pBin -Destination (Join-Path $ProjectRoot 'out/android/jniLibs/arm64-v8a') -Force
+        $pData = Join-Path $ProjectRoot "android/app/src/main/assets/obs-modules/core/$($extraPlugin.Name)"
+        New-Item -ItemType Directory -Force -Path $pData | Out-Null
+        if (Test-Path -LiteralPath (Join-Path $pSrc 'data')) {
+            Copy-Item -Path (Join-Path $pSrc 'data/*') -Destination $pData -Recurse -Force
+        }
+        $pLicDir = Join-Path $ProjectRoot "android/app/src/main/assets/licenses/$($extraPlugin.Lic)"
+        New-Item -ItemType Directory -Force -Path $pLicDir | Out-Null
+        $pLicFile = Join-Path $pSrc 'LICENSE'
+        if (Test-Path -LiteralPath $pLicFile) {
+            Copy-Item -LiteralPath $pLicFile -Destination (Join-Path $pLicDir 'LICENSE') -Force
+        }
+    }
+}
 $libvlcBin = Join-Path $ProjectRoot 'out/deps/libvlc/extracted/jni/arm64-v8a/libvlc.so'
 if (Test-Path -LiteralPath $libvlcBin) {
     Copy-Item -LiteralPath $libvlcBin -Destination (Join-Path $ProjectRoot 'out/android/jniLibs/arm64-v8a/libvlc.so') -Force

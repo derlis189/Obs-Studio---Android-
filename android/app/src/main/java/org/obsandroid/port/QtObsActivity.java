@@ -528,6 +528,14 @@ public final class QtObsActivity extends QtActivity {
         VtuberSourceManager.destroyAll();
     }
 
+    public static void vtuberTriggerGesture(String gestureId, int durationMs) {
+        VtuberSourceManager.triggerQuickGesture(gestureId, durationMs);
+    }
+
+    public static void vtuberTriggerLive2dExpr(String exprKey, boolean active) {
+        VtuberSourceManager.triggerLive2dExpression(exprKey, active);
+    }
+
     public static void pickLive2dCubismCore() {
         QtObsActivity activity = sInstance;
         if (activity == null) return;

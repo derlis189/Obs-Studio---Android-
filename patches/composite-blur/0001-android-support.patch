@@ -1,0 +1,77 @@
+﻿diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e836fd3..1bcde26 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,5 +1,9 @@
+ cmake_minimum_required(VERSION 3.28...3.30)
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "Android")
++  list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/linux")
++endif()
++
+ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
+ 
+ project(${_name} VERSION ${_version})
+@@ -11,25 +15,27 @@ include(compilerconfig)
+ include(defaults)
+ include(helpers)
+ 
+-add_library(${CMAKE_PROJECT_NAME} MODULE)
++add_library(${PROJECT_NAME} MODULE)
+ 
+-find_package(libobs REQUIRED)
+-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
++if(NOT TARGET OBS::libobs)
++  find_package(libobs REQUIRED)
++endif()
++target_link_libraries(${PROJECT_NAME} PRIVATE OBS::libobs)
+ 
+ if(ENABLE_FRONTEND_API)
+   find_package(obs-frontend-api REQUIRED)
+-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
++  target_link_libraries(${PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
+ endif()
+ 
+ if(ENABLE_QT)
+   find_package(Qt6 COMPONENTS Widgets Core)
+-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
++  target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
+   target_compile_options(
+-    ${CMAKE_PROJECT_NAME}
++    ${PROJECT_NAME}
+     PRIVATE $<$<C_COMPILER_ID:Clang,AppleClang>:-Wno-quoted-include-in-framework-header -Wno-comma>
+   )
+   set_target_properties(
+-    ${CMAKE_PROJECT_NAME}
++    ${PROJECT_NAME}
+     PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
+   )
+ endif()
+@@ -57,4 +63,8 @@ target_sources(
+     src/version.h
+ )
+ 
+-set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
++set_target_properties_plugin(${PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
++
++if(ANDROID)
++  set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "lib")
++endif()
+diff --git a/cmake/common/osconfig.cmake b/cmake/common/osconfig.cmake
+index 87d435a..7f3dc96 100644
+--- a/cmake/common/osconfig.cmake
++++ b/cmake/common/osconfig.cmake
+@@ -2,7 +2,12 @@
+ 
+ include_guard(GLOBAL)
+ 
+-if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
++if(CMAKE_SYSTEM_NAME STREQUAL "Android")
++  set(CMAKE_C_EXTENSIONS FALSE)
++  set(CMAKE_CXX_EXTENSIONS FALSE)
++  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/linux")
++  set(OS_LINUX TRUE)
++elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+   set(CMAKE_C_EXTENSIONS FALSE)
+   set(CMAKE_CXX_EXTENSIONS FALSE)
+   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows")

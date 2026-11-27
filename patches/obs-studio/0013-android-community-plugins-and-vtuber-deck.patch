@@ -1,0 +1,273 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 00a67da98..8f0735be9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -53,11 +53,21 @@ if(OS_ANDROID)
+       endif()
+       add_subdirectory("${OBS_STROKE_GLOW_SHADOW_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/plugins/obs-stroke-glow-shadow")
+       target_enable(obs-stroke-glow-shadow)
++      if(OBS_COMPOSITE_BLUR_SOURCE_DIR AND EXISTS "${OBS_COMPOSITE_BLUR_SOURCE_DIR}/CMakeLists.txt")
++        add_subdirectory("${OBS_COMPOSITE_BLUR_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/plugins/obs-composite-blur")
++        target_enable(obs-composite-blur)
++      endif()
+     endif()
+   endif()
+   set_obs_core_modules()
+   if(ENABLE_FRONTEND)
+     add_subdirectory(frontend)
++    if(OBS_SOURCE_CLONE_SOURCE_DIR AND EXISTS "${OBS_SOURCE_CLONE_SOURCE_DIR}/CMakeLists.txt")
++      add_subdirectory("${OBS_SOURCE_CLONE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/plugins/source-clone")
++    endif()
++    if(OBS_DOWNSTREAM_KEYER_SOURCE_DIR AND EXISTS "${OBS_DOWNSTREAM_KEYER_SOURCE_DIR}/CMakeLists.txt")
++      add_subdirectory("${OBS_DOWNSTREAM_KEYER_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/plugins/downstream-keyer")
++    endif()
+   endif()
+   if(OBS_ANDROID_HARNESS_DIR)
+     add_subdirectory("${OBS_ANDROID_HARNESS_DIR}" android-native-tests)
+diff --git a/frontend/utility/android-tools.cpp b/frontend/utility/android-tools.cpp
+index c7843df6c..7e8ad80e4 100644
+--- a/frontend/utility/android-tools.cpp
++++ b/frontend/utility/android-tools.cpp
+@@ -9514,6 +9514,192 @@ static void OpenDirectorDeckDialog(QWidget *parent)
+ 	dlg.exec();
+ }
+ 
++// 7. VTuber Live Touch Control Deck (Gestures, Live2D Expressions, Framing & Veadotube States)
++static QWidget *CreateVtuberDeckWidget(QWidget *parent)
++{
++	auto *scroll = new QScrollArea(parent);
++	scroll->setWidgetResizable(true);
++	scroll->setFrameShape(QFrame::NoFrame);
++	auto *rootW = new QWidget(scroll);
++	scroll->setWidget(rootW);
++	auto *lay = new QVBoxLayout(rootW);
++	lay->setContentsMargins(8, 8, 8, 8);
++	lay->setSpacing(8);
++
++	auto *hdr = new QLabel(QStringLiteral("CONTROL VTUBER EN VIVO · Gestos, Expresiones y Encuadre"), rootW);
++	hdr->setStyleSheet(QStringLiteral(
++		"background:#0f172a; color:#38bdf8; font-weight:bold; padding:8px; border-radius:6px; font-size:12px;"));
++	hdr->setAlignment(Qt::AlignCenter);
++	lay->addWidget(hdr);
++
++	auto *statusLbl = new QLabel(QStringLiteral("Toca un gesto, expresión o encuadre para aplicarlo al instante."), rootW);
++	statusLbl->setWordWrap(true);
++	statusLbl->setStyleSheet(QStringLiteral("color:#94a3b8; font-size:11px;"));
++	lay->addWidget(statusLbl);
++
++	auto callGesture = [statusLbl](const char *id, const QString &label, int durationMs) {
++		if (void *jni = FindAndroidJni()) {
++			using Fn = void (*)(const char *, int);
++			if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_vtuber_trigger_gesture")))
++				fn(id, durationMs);
++		}
++		statusLbl->setText(QStringLiteral("Gesto activo: %1").arg(label));
++	};
++	auto callExpr = [statusLbl](const char *key, bool on, const QString &label) {
++		if (void *jni = FindAndroidJni()) {
++			using Fn = void (*)(const char *, bool);
++			if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_vtuber_trigger_live2d_expr")))
++				fn(key, on);
++		}
++		statusLbl->setText(QStringLiteral("Expresión Live2D: %1 (%2)").arg(label, on ? QStringLiteral("ON") : QStringLiteral("OFF")));
++	};
++	auto callFraming = [statusLbl](const char *framing, const QString &label) {
++		if (void *jni = FindAndroidJni()) {
++			using Fn = void (*)(const char *);
++			if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_vtuber_set_framing")))
++				fn(framing);
++		}
++		statusLbl->setText(QStringLiteral("Encuadre aplicado: %1").arg(label));
++	};
++	auto callVeadoState = [statusLbl](int idx) {
++		if (void *jni = FindAndroidJni()) {
++			using Fn = void (*)(int);
++			if (auto fn = reinterpret_cast<Fn>(dlsym(jni, "obs_android_vtuber_set_veado_state")))
++				fn(idx);
++		}
++		statusLbl->setText(QStringLiteral("Estado .veadomini activo: #%1").arg(idx));
++	};
++
++	const QString gestCss = QStringLiteral(
++		"QPushButton { background:#1e293b; color:#f8fafc; font-weight:bold; border:1px solid #334155; "
++		"border-radius:8px; padding:8px 6px; font-size:12px; min-height:44px; }"
++		"QPushButton:pressed { background:#2563eb; border-color:#60a5fa; }");
++	const QString toggleCss = QStringLiteral(
++		"QPushButton { background:#1e293b; color:#e2e8f0; font-weight:bold; border:1px solid #475569; "
++		"border-radius:8px; padding:8px 6px; font-size:12px; min-height:44px; }"
++		"QPushButton:checked { background:#7c3aed; color:#ffffff; border:2px solid #c4b5fd; }");
++
++	// Section 1: Quick Gestures (VRM / Live2D / Inochi2D)
++	auto *gBox = new QGroupBox(QStringLiteral("Gestos rápidos (1 toque)"), rootW);
++	auto *gGrid = new QGridLayout(gBox);
++	gGrid->setSpacing(6);
++	struct GestDef { const char *id; const char *label; int dur; };
++	const GestDef gestures[] = {
++		{"wave", "Saludar", 4500},
++		{"happy", "Feliz", 4500},
++		{"peace", "Victoria", 4500},
++		{"clap", "Aplaudir", 4500},
++		{"think", "Pensando", 5000},
++		{"dance", "Baile", 6000},
++	};
++	for (int i = 0; i < 6; ++i) {
++		auto *btn = new QPushButton(QString::fromUtf8(gestures[i].label), gBox);
++		btn->setStyleSheet(gestCss);
++		const char *gid = gestures[i].id;
++		const QString glbl = QString::fromUtf8(gestures[i].label);
++		const int gdur = gestures[i].dur;
++		QObject::connect(btn, &QPushButton::clicked, gBox, [callGesture, gid, glbl, gdur]() {
++			callGesture(gid, glbl, gdur);
++		});
++		gGrid->addWidget(btn, i / 3, i % 3);
++	}
++	lay->addWidget(gBox);
++
++	// Section 2: Live2D Expression Toggles (.cdi3.json auto-discovered)
++	auto *eBox = new QGroupBox(QStringLiteral("Expresiones Live2D (Toggle en vivo)"), rootW);
++	auto *eGrid = new QGridLayout(eBox);
++	eGrid->setSpacing(6);
++	struct ExprDef { const char *key; const char *label; };
++	const ExprDef exprs[] = {
++		{"happy", "Brillos / Feliz"},
++		{"star", "Ojos Estrella"},
++		{"gloom", "Gloom / Enojo"},
++		{"cry", "Lágrimas"},
++		{"coat", "Chaqueta / Coat"},
++	};
++	auto toggleBtns = std::make_shared<std::vector<QPushButton *>>();
++	for (int i = 0; i < 5; ++i) {
++		auto *btn = new QPushButton(QString::fromUtf8(exprs[i].label), eBox);
++		btn->setCheckable(true);
++		btn->setStyleSheet(toggleCss);
++		toggleBtns->push_back(btn);
++		const char *ekey = exprs[i].key;
++		const QString elbl = QString::fromUtf8(exprs[i].label);
++		QObject::connect(btn, &QPushButton::toggled, eBox, [callExpr, ekey, elbl](bool checked) {
++			callExpr(ekey, checked, elbl);
++		});
++		eGrid->addWidget(btn, i / 3, i % 3);
++	}
++	auto *btnReset = new QPushButton(QStringLiteral("Neutral / Reset"), eBox);
++	btnReset->setStyleSheet(QStringLiteral(
++		"QPushButton { background:#334155; color:#f8fafc; font-weight:bold; border:1px solid #64748b; "
++		"border-radius:8px; padding:8px 6px; font-size:12px; min-height:44px; }"
++		"QPushButton:pressed { background:#0284c7; }"));
++	QObject::connect(btnReset, &QPushButton::clicked, eBox, [callGesture, toggleBtns]() {
++		for (auto *b : *toggleBtns) {
++			b->blockSignals(true);
++			b->setChecked(false);
++			b->blockSignals(false);
++		}
++		callGesture("reset", QStringLiteral("Pose neutral"), 0);
++	});
++	eGrid->addWidget(btnReset, 1, 2);
++	lay->addWidget(eBox);
++
++	// Section 3: Quick Framing (Bust / Close-up / Full Body)
++	auto *fBox = new QGroupBox(QStringLiteral("Encuadre rápido (Live2D / VRM / Inochi2D)"), rootW);
++	auto *fRow = new QHBoxLayout(fBox);
++	fRow->setSpacing(6);
++	struct FrameDef { const char *id; const char *label; };
++	const FrameDef frames[] = {
++		{"bust", "Busto (sin pies)"},
++		{"closeup", "Primer plano"},
++		{"full", "Cuerpo completo"},
++	};
++	for (const auto &fr : frames) {
++		auto *btn = new QPushButton(QString::fromUtf8(fr.label), fBox);
++		btn->setStyleSheet(gestCss);
++		const char *fid = fr.id;
++		const QString flbl = QString::fromUtf8(fr.label);
++		QObject::connect(btn, &QPushButton::clicked, fBox, [callFraming, fid, flbl]() {
++			callFraming(fid, flbl);
++		});
++		fRow->addWidget(btn);
++	}
++	lay->addWidget(fBox);
++
++	// Section 4: Veadotube Mini (.veadomini) Quick States
++	auto *vBox = new QGroupBox(QStringLiteral("Estados .veadomini (PNGTuber)"), rootW);
++	auto *vRow = new QHBoxLayout(vBox);
++	vRow->setSpacing(6);
++	for (int s = 0; s < 6; ++s) {
++		auto *btn = new QPushButton(QStringLiteral("#%1").arg(s), vBox);
++		btn->setStyleSheet(gestCss);
++		QObject::connect(btn, &QPushButton::clicked, vBox, [callVeadoState, s]() {
++			callVeadoState(s);
++		});
++		vRow->addWidget(btn);
++	}
++	lay->addWidget(vBox);
++	lay->addStretch(1);
++	return scroll;
++}
++
++static void OpenVtuberDeckDialog(QWidget *parent)
++{
++	QDialog dlg(parent);
++	dlg.setWindowTitle(QStringLiteral("Control VTuber en Vivo — Gestos y Expresiones"));
++	auto *lay = new QVBoxLayout(&dlg);
++	lay->addWidget(CreateVtuberDeckWidget(&dlg), 1);
++	auto *btnClose = new QPushButton(QStringLiteral("Cerrar"), &dlg);
++	btnClose->setMinimumHeight(48);
++	QObject::connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
++	lay->addWidget(btnClose);
++	QScreen *scr = (parent && parent->screen()) ? parent->screen() : QGuiApplication::primaryScreen();
++	dlg.resize(QSize(520, 560).boundedTo(scr ? scr->availableGeometry().size() : QSize(520, 560)));
++	dlg.exec();
++}
++
+ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ {
+     QMenu *menuProd = nullptr;
+@@ -9585,6 +9771,8 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 
+         auto *directorAct = menuProd->addAction(QStringLiteral("Director Deck (Control táctil en vivo)..."));
+         QObject::connect(directorAct, &QAction::triggered, mainWindow, [mainWindow] { OpenDirectorDeckDialog(mainWindow); });
++        auto *vtuberDeckAct = menuProd->addAction(QStringLiteral("Control VTuber en Vivo (Gestos y Expresiones)..."));
++        QObject::connect(vtuberDeckAct, &QAction::triggered, mainWindow, [mainWindow] { OpenVtuberDeckDialog(mainWindow); });
+         auto *webrtcAct = menuProd->addAction(QStringLiteral("Llamadas e Invitados en Vivo (WebRTC)..."));
+         QObject::connect(webrtcAct, &QAction::triggered, mainWindow, [mainWindow] { OpenWebRtcGuestsDialog(mainWindow); });
+         auto *advTitlesAct = menuProd->addAction(QStringLiteral("Generador Avanzado de Títulos Animados..."));
+@@ -9718,6 +9906,7 @@ void InstallAndroidToolsAndRemote(QWidget *mainWindow, QMenu *toolsMenu)
+ 
+ 		// Register independent control dock panels (accessible in Paneles / Docks menu)
+ 		obs_frontend_add_dock_by_id("obs_android_dock_director", "Control: Director Deck", CreateDirectorDeckWidget(mainWindow));
++		obs_frontend_add_dock_by_id("obs_android_dock_vtuber", "Control: VTuber en Vivo", CreateVtuberDeckWidget(mainWindow));
+ 		obs_frontend_add_dock_by_id("obs_android_dock_vertical", "Vertical 9:16", CreateVerticalDockWidget(mainWindow));
+ 		obs_frontend_add_dock_by_id("obs_android_dock_scoreboard", "Control: Marcador", CreateScoreboardDockWidget());
+ 		obs_frontend_add_dock_by_id("obs_android_dock_lowerthird", "Control: Lower Third", CreateLowerThirdDockWidget());
+diff --git a/libobs/obs-core-modules-loader-android.c b/libobs/obs-core-modules-loader-android.c
+index 6378e8eb0..6fb286488 100644
+--- a/libobs/obs-core-modules-loader-android.c
++++ b/libobs/obs-core-modules-loader-android.c
+@@ -61,4 +61,28 @@ void load_core_modules(obs_find_module_callback2_t callback, void *data)
+         bfree(switcher_data);
+     }
+     bfree(switcher_bin);
++
++    static const char *const extra_plugins[] = {
++        "source-clone",
++        "downstream-keyer",
++    };
++    for (unsigned int i = 0; i < sizeof(extra_plugins) / sizeof(extra_plugins[0]); ++i) {
++        struct dstr rel = {0};
++        dstr_printf(&rel, "lib%s.so", extra_plugins[i]);
++        char *p_bin = obs_android_join_path(obs_android_libraries_path(), rel.array);
++        if (p_bin && os_file_exists(p_bin)) {
++            dstr_printf(&rel, "obs-modules/core/%s", extra_plugins[i]);
++            char *p_data = obs_android_join_path(obs_android_files_path(), rel.array);
++            struct obs_module_info2 p_info = {
++                .bin_path = p_bin,
++                .data_path = p_data ? p_data : "",
++                .type = OBS_MODULE_TYPE_CORE,
++                .name = extra_plugins[i]
++            };
++            callback(data, &p_info);
++            bfree(p_data);
++        }
++        bfree(p_bin);
++        dstr_free(&rel);
++    }
+ }

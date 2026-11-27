@@ -12,6 +12,8 @@ El menú **Herramientas** está organizado en 4 categorías:
 
 - **Producción en Vivo:**
   - **Director Deck (Control táctil en vivo):** switcher en vivo de un toque con cuadrícula de escenas (Programa verde / Vista previa ámbar), Transición/Corte, Transmitir, Grabar, Replay 15s (0.5x), Título al aire, Silenciar Micrófono y telemetría térmica/batería.
+  - **Control VTuber en Vivo (Gestos y Expresiones):** panel táctil (dock independiente y diálogo) para disparar gestos 1 toque, activar toggles Live2D (`.cdi3.json`), cambiar encuadre (`Busto sin pies` / `Primer plano` / `Cuerpo completo`) y estados `.veadomini`.
+  - **Plugins de producción integrados (ARM64/GLES 3.2):** `obs-composite-blur` (desenfoque GPU Gaussian/Kawase/Tilt-Shift/Pixelate), `obs-source-clone` (clonar fuentes con filtros independientes), `obs-downstream-keyer` (capas DSK siempre encima de todas las escenas), `obs-advanced-masks`, `obs-stroke-glow-shadow`, `OMT` y `Advanced Scene Switcher`.
   - **Llamadas e Invitados en Vivo (WebRTC):** sala automática en 1 toque (QR / WhatsApp, conserva fondo transparente) o invitados individuales con captura **GPU zero-copy (`HardwareBuffer` → `EGLImageKHR`)** y disposiciones automáticas (`Pantalla completa`, `Lado a lado 640×720`, `Cuadrícula 2×2`, `PIP`).
   - **Generador Avanzado de Títulos Animados:** motor 30 FPS en GPU (`AndroidRgbaFrame`) con 8 plantillas, 7 animaciones de entrada, 4 de salida, selectores de color visuales (`QColorDialog`), shimmer, ticker y presets.
   - **Control de Gráficos:** Marcador Deportivo, Lower Third, Cronómetro/Temporizador, Biblia RV1909 offline y fuente **Fecha, Hora y Clima** (Open-Meteo, 6 diseños, auto-tamaño horizontal/vertical).

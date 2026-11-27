@@ -27,6 +27,9 @@ El APK final deberá ir acompañado de su código fuente correspondiente, parche
 | androidx.webkit:webkit 1.14.0 | Apache-2.0 (`android/app/build.gradle.kts`) |
 | obs-advanced-masks v1.6.1 | GPL-2.0-or-later (revisión fijada en `dependencies-lock.json`) |
 | obs-stroke-glow-shadow v1.6.1 | GPL-2.0-or-later (revisión fijada en `dependencies-lock.json`) |
+| obs-composite-blur v1.6.1 | GPL-2.0-or-later (revisión fijada en `dependencies-lock.json`) |
+| obs-source-clone 0.2.3 | GPL-2.0-or-later (revisión fijada en `dependencies-lock.json`) |
+| obs-downstream-keyer 0.4.5 | GPL-2.0-or-later (revisión fijada en `dependencies-lock.json`) |
 | Three.js, PixiJS, `@pixiv/three-vrm` y `@pixiv/three-vrm-animation` 3.1.2 | MIT; avisos de las versiones y archivos incluidos en los assets (`vtuber/lib/`) |
 | MediaPipe Tasks Vision 0.10.35 | Apache-2.0; aviso incluido en `android/app/src/main/assets/licenses/mediapipe/` |
 | MediaPipe Selfie Segmenter, Face Landmarker y Hand Landmarker | Modelos Apache-2.0, SHA-256 y procedencia registrados en `android/app/src/main/assets/licenses/mediapipe/NOTICE.txt` |
