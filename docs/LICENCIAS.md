@@ -27,9 +27,10 @@ El APK final deberá ir acompañado de su código fuente correspondiente, parche
 | androidx.webkit:webkit 1.14.0 | Apache-2.0 (`android/app/build.gradle.kts`) |
 | obs-advanced-masks v1.6.1 | GPL-2.0-or-later (revisión fijada en `dependencies-lock.json`) |
 | obs-stroke-glow-shadow v1.6.1 | GPL-2.0-or-later (revisión fijada en `dependencies-lock.json`) |
-| Three.js, PixiJS y bibliotecas VTuber | Avisos de las versiones y archivos incluidos en los assets |
+| Three.js, PixiJS, `@pixiv/three-vrm` y `@pixiv/three-vrm-animation` 3.1.2 | MIT; avisos de las versiones y archivos incluidos en los assets (`vtuber/lib/`) |
 | MediaPipe Tasks Vision 0.10.35 | Apache-2.0; aviso incluido en `android/app/src/main/assets/licenses/mediapipe/` |
-| MediaPipe Selfie Segmenter Landscape | Modelo Apache-2.0, SHA-256 y procedencia registrados en `android/app/src/main/assets/licenses/mediapipe/NOTICE.txt` |
+| MediaPipe Selfie Segmenter, Face Landmarker y Hand Landmarker | Modelos Apache-2.0, SHA-256 y procedencia registrados en `android/app/src/main/assets/licenses/mediapipe/NOTICE.txt` |
+| Inochi2D (compatibilidad de lectura `.inp` / `.inx`) | Lector propio implementado en JavaScript/Canvas2D para el formato abierto Inochi2D; no se redistribuye código de terceros de Inochi2D |
 | Biblia RV1909 | Texto Reina-Valera 1909. Verificar la procedencia de la transcripción y sus avisos antes de publicar |
 | Open-Meteo (API externa opcional) | Datos meteorológicos bajo CC BY 4.0 cuando el usuario habilita clima automático en la fuente Fecha, Hora y Clima |
 | VDO.Ninja (servicio externo opcional) | Utilizado únicamente como URL remota configurable en el navegador integrado para llamadas WebRTC; no se redistribuye código fuente de VDO.Ninja |

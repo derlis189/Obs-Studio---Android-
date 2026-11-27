@@ -1,8 +1,21 @@
-MediaPipe Selfie Segmenter (Landscape)
+MediaPipe Models & Tasks Vision Runtime (Apache License, Version 2.0)
 
-File: models/selfie_segmenter_landscape.tflite
-Upstream: https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/1/selfie_segmenter_landscape.tflite
-SHA-256: 490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e
-Model card: https://huggingface.co/litert-community/MediaPipe-ImageSegmenter-Selfie-Landscape
-License: Apache License, Version 2.0 (see LICENSE-2.0.txt)
-Runtime: MediaPipe Tasks Vision 0.10.35 (Apache-2.0); on-device LiteRT inference.
+1. MediaPipe Selfie Segmenter (Landscape)
+   File: models/selfie_segmenter_landscape.tflite
+   Upstream: https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/1/selfie_segmenter_landscape.tflite
+   SHA-256: 490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e
+   License: Apache License, Version 2.0 (see LICENSE-2.0.txt)
+
+2. MediaPipe Face Landmarker (52 ARKit Blendshapes + Face Transformation Matrix)
+   File: models/face_landmarker.task
+   Upstream: https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+   SHA-256: 64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff
+   License: Apache License, Version 2.0 (see LICENSE-2.0.txt)
+
+3. MediaPipe Hand Landmarker (2 Hands x 21 Landmarks)
+   File: models/hand_landmarker.task
+   Upstream: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
+   SHA-256: fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1
+   License: Apache License, Version 2.0 (see LICENSE-2.0.txt)
+
+Runtime: MediaPipe Tasks Vision 0.10.35 (Apache-2.0); on-device LiteRT inference with GPU delegate and CPU fallback.

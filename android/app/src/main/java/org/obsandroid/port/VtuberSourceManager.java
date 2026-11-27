@@ -12,6 +12,7 @@ import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -107,20 +108,12 @@ public final class VtuberSourceManager {
             public void run() {
                 if (destroyed || !visible || "png".equals(mode) || webView == null) return;
                 if (pageReady) {
-                    FaceTrackerManager.TrackingState ts = FaceTrackerManager.getState();
                     float mic = NativeBridge.getMicLevel();
-                    long now = System.currentTimeMillis();
-                    boolean vmcExpressionFresh = ts.vmcActive && now - ts.lastVmcMs < 1200;
-                    float happy = vmcExpressionFresh ? ts.happy : 0f;
-                    float sad = vmcExpressionFresh ? ts.sad : 0f;
-                    float angry = vmcExpressionFresh ? ts.angry : 0f;
-                    float surprised = vmcExpressionFresh ? ts.surprised : 0f;
-                    String js = String.format(Locale.US,
-                        "if(window.OBS_VTUBER)window.OBS_VTUBER.updateTracking(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f);",
-                        ts.yaw, ts.pitch, ts.roll, ts.eyeL, ts.eyeR, ts.mouthOpen, happy,
-                        ts.faceX, ts.faceY, mic, ts.faceDetected ? "true" : "false",
-                        ts.handL, ts.handR, ts.waveOsc, sad, angry, surprised);
-                    webView.evaluateJavascript(js + "if(window.OBS_VTUBER)window.OBS_VTUBER.setRenderBudget(" + Math.min(fps, thermalFpsCap) + ");", null);
+                    String payload = FaceTrackerManager.buildWebTrackingPayloadJson(mic);
+                    webView.evaluateJavascript(
+                        "if(window.OBS_VTUBER){window.OBS_VTUBER.updateTrackingV2(" + payload
+                            + ");window.OBS_VTUBER.setRenderBudget(" + Math.min(fps, thermalFpsCap) + ");}",
+                        null);
                 }
                 long delay = Math.max(16L, 1000L / Math.max(1, Math.min(thermalFpsCap, fps)));
                 sMain.postDelayed(this, delay);
@@ -177,12 +170,13 @@ public final class VtuberSourceManager {
                     if (veadoAutoEmotion) {
                         int targetState = veadoStateIndex;
                         float targetScore = 0.56f;
-                        boolean vmcEmotionFresh = ts.vmcActive && nowMs - ts.lastVmcMs < 1200;
-                        float happy = vmcEmotionFresh ? ts.happy : 0f;
+                        boolean emotionFresh = (ts.vmcActive && nowMs - ts.lastVmcMs < 1500)
+                            || (ts.mpFaceActive && nowMs - ts.lastMpFaceMs < 1200);
+                        float happy = emotionFresh ? ts.happy : 0f;
                         if (happy > targetScore) { targetScore = happy; targetState = veadoHappyState; }
-                        if (vmcEmotionFresh && ts.sad > targetScore) { targetScore = ts.sad; targetState = veadoSadState; }
-                        if (vmcEmotionFresh && ts.angry > targetScore) { targetScore = ts.angry; targetState = veadoAngryState; }
-                        if (vmcEmotionFresh && ts.surprised > targetScore) { targetScore = ts.surprised; targetState = veadoSurprisedState; }
+                        if (emotionFresh && ts.sad > targetScore) { targetScore = ts.sad; targetState = veadoSadState; }
+                        if (emotionFresh && ts.angry > targetScore) { targetScore = ts.angry; targetState = veadoAngryState; }
+                        if (emotionFresh && ts.surprised > targetScore) { targetScore = ts.surprised; targetState = veadoSurprisedState; }
                         if (targetState < 0 || targetState >= veadoAvatar.states.size()) targetState = veadoStateIndex;
                         long now = System.currentTimeMillis();
                         if (targetState != veadoShownState) {
@@ -620,7 +614,8 @@ public final class VtuberSourceManager {
     private static void updateHeadlessFaceTracking(Context ctx) {
         boolean needBgFace = false;
         for (VtuberInstance inst : sInstances.values()) {
-            if (inst != null && !inst.destroyed && inst.visible && inst.faceTracking && !"png".equals(inst.mode)) {
+            if (inst != null && !inst.destroyed && inst.visible && inst.faceTracking
+                    && (!"png".equals(inst.mode) || inst.veadoAutoEmotion)) {
                 needBgFace = true;
                 break;
             }
@@ -663,6 +658,9 @@ public final class VtuberSourceManager {
             String mode = "png";
             String veadoFile = "", pIdle = "", pTalk = "", pBlink = "", pBlinkTalk = "";
             String resolvedJson = configJson;
+            boolean useZeroCopy = (Build.VERSION.SDK_INT >= 29);
+            boolean enableVtsApi = true;
+            boolean wantHands = true;
             try {
                 JSONObject obj = new JSONObject(configJson);
                 mode = obj.optString("mode", "png");
@@ -678,6 +676,9 @@ public final class VtuberSourceManager {
                 inst.bounce = obj.optBoolean("bounce", true);
                 inst.lipSync = obj.optBoolean("lipSync", true);
                 inst.faceTracking = obj.optBoolean("faceTracking", true);
+                wantHands = obj.optBoolean("handTracking", true);
+                enableVtsApi = obj.optBoolean("vtsApi", true);
+                useZeroCopy = (Build.VERSION.SDK_INT >= 29) && obj.optBoolean("zeroCopy", true);
                 inst.voiceThreshold = (float) obj.optDouble("voiceThreshold", 0.04);
                 inst.veadoStateIndex = obj.optInt("veadoState", 0);
                 inst.veadoAutoEmotion = obj.optBoolean("veadoAutoEmotion", false);
@@ -694,11 +695,19 @@ public final class VtuberSourceManager {
                 obj.put("width", inst.width);
                 obj.put("height", inst.height);
                 obj.put("fps", inst.fps);
+                obj.put("zeroCopy", useZeroCopy);
                 obj.put("vrmFile", toLoopbackFileUrl(activity, obj.optString("vrmFile", "")));
+                obj.put("vrmaFile", toLoopbackFileUrl(activity, obj.optString("vrmaFile", "")));
                 obj.put("live2dFile", prepareLive2dModelPath(activity, obj.optString("live2dFile", "")));
+                obj.put("inochiFile", toLoopbackFileUrl(activity, obj.optString("inochiFile", "")));
                 resolvedJson = obj.toString();
             } catch (Exception e) {
                 Log.w(TAG, "Config parse failed", e);
+            }
+
+            MediaPipeVtuberTracker.setHandTrackingWanted(wantHands);
+            if (enableVtsApi) {
+                VtsApiServer.ensureStarted();
             }
 
             inst.mode = mode;
@@ -741,14 +750,16 @@ public final class VtuberSourceManager {
                 return;
             }
 
-            // Accelerated private window: capture WebGL without JS readPixels/HTTP frame uploads.
+            // Accelerated private window: GPU Zero-Copy HardwareBuffer side-by-side alpha-pack (API 29+)
+            // with automatic WebMessage/PBO fallback when disabled or on older APIs.
             sMain.removeCallbacks(inst.nativeTick);
             updateHeadlessFaceTracking(activity);
             inst.pendingConfigJson = resolvedJson;
             final VtuberInstance target = inst;
             String pageUrl = WebRemoteServer.getLocalLoopbackBase() + "/vtuber/index.html?id=" + inst.id
-                + "&transport=bridge#localToken=" + WebRemoteServer.getLocalToken();
-            BrowserSourceManager.createVtuber(inst.id, pageUrl, inst.width, inst.height, inst.fps, view -> {
+                + "&transport=bridge" + (useZeroCopy ? "&zc=1" : "")
+                + "#localToken=" + WebRemoteServer.getLocalToken();
+            BrowserSourceManager.createVtuber(inst.id, pageUrl, inst.width, inst.height, inst.fps, useZeroCopy, view -> {
                 if (target.destroyed || "png".equals(target.mode)) return;
                 target.webView = view;
                 target.pageReady = true;
@@ -802,6 +813,8 @@ public final class VtuberSourceManager {
     public static void destroyAll() {
         sMain.post(() -> {
             FaceTrackerManager.stopBackgroundFrontCamera();
+            VtsApiServer.stop();
+            MediaPipeVtuberTracker.shutdown();
             for (Long id : sInstances.keySet().toArray(new Long[0])) destroy(id);
             if (sHost != null) {
                 ViewGroup p = (ViewGroup) sHost.getParent();

@@ -5,6 +5,7 @@
 <style>
   html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent !important; }
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; background: transparent !important; }
+  #cout { position: fixed; inset: 0; width: 100%; height: 100%; display: none; background: #000 !important; z-index: 10; }
 </style>
 <script type="importmap">
 {
@@ -12,7 +13,8 @@
     "three": "/vtuber/lib/three.module.min.js",
     "three/addons/loaders/GLTFLoader.js": "/vtuber/lib/GLTFLoader.js",
     "three/addons/utils/BufferGeometryUtils.js": "/vtuber/lib/BufferGeometryUtils.js",
-    "@pixiv/three-vrm": "/vtuber/lib/three-vrm.module.min.js"
+    "@pixiv/three-vrm": "/vtuber/lib/three-vrm.module.min.js",
+    "@pixiv/three-vrm-animation": "/vtuber/lib/three-vrm-animation.module.min.js"
   }
 }
 </script>
@@ -28,42 +30,54 @@ window.addEventListener('unhandledrejection', (e) => console.error('VTuberPromis
 <canvas id="c2d"></canvas>
 <canvas id="cgl" style="display:none"></canvas>
 <canvas id="cl2d" style="display:none"></canvas>
+<canvas id="cout"></canvas>
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 
 const params = new URLSearchParams(location.search);
 const instanceId = params.get('id') || '0';
+const zeroCopyAlphaPack = params.get('zc') === '1';
 
 const c2d = document.getElementById('c2d');
-const ctx2d = c2d.getContext('2d', { willReadFrequently: true });
+const ctx2d = c2d.getContext('2d', { willReadFrequently: !zeroCopyAlphaPack });
 const cgl = document.getElementById('cgl');
 const cl2d = document.getElementById('cl2d');
+const cout = document.getElementById('cout');
 
 let cfg = {
   mode: 'vrm',
   bounce: true, voiceThreshold: 0.04,
-  vrmFile: '', camDist: 1.15, camY: 1.38,
-  live2dFile: '', faceTracking: true, headSensitivity: 1.0, handTracking: true, lipSync: true,
+  vrmFile: '', vrmaFile: '', vrmaLoop: true, camDist: 1.15, camY: 1.38,
+  live2dFile: '', inochiFile: '', gesture: '',
+  faceTracking: true, headSensitivity: 1.0, handTracking: true, lipSync: true,
+  vtsApi: true, zeroCopy: zeroCopyAlphaPack,
   quality: 'high', width: 768, height: 768, fps: 30
 };
 
 const track = {
   yaw: 0, pitch: 0, roll: 0, eyeL: 1, eyeR: 1,
-  mouthOpen: 0, happy: 0, sad: 0, angry: 0, surprised: 0,
-  faceX: 0, faceY: 0, mic: 0, faceDetected: false,
-  handL: 0, handR: 0, waveOsc: 0
+  lookX: 0, lookY: 0, browL: 0, browR: 0, cheekPuff: 0,
+  mouthOpen: 0, mA: 0, mI: 0, mU: 0, mE: 0, mO: 0,
+  happy: 0, sad: 0, angry: 0, surprised: 0,
+  faceX: 0, faceY: 0, mic: 0, faceDetected: false, mp: false, vmc: false,
+  handL: 0, handR: 0, handLX: 0.25, handLY: 0.75, handRX: 0.75, handRY: 0.75,
+  curlL: 0, curlR: 0, gestL: 0, gestR: 0, waveOsc: 0, gesture: '',
+  bones: null
 };
 
 let bounceY = 0, bounceVel = 0, wasTalking = false;
 let blinkTimer = 0, blinkDur = 0;
 let vrmWaveL = 0, vrmWaveR = 0, live2dWaveBlend = 0;
 
-// Three.js / VRM state
+// Three.js / VRM / VRMA state
 let renderer = null, scene = null, camera = null, currentVrm = null, demoHead = null;
 let loadedVrmUrl = '';
+let vrmaMixer = null, vrmaAction = null, loadedVrmaUrl = '', pendingVrmaData = null;
 const clock = new THREE.Clock();
+const tmpQuat = new THREE.Quaternion();
 
 // Live2D Pixi state
 let pixiApp = null, live2dModel = null, loadedLive2dUrl = '';
@@ -77,9 +91,103 @@ if (window.PIXI && window.PIXI.settings) {
   window.PIXI.settings.SCALE_MODE = window.PIXI.SCALE_MODES ? window.PIXI.SCALE_MODES.LINEAR : 1;
   window.PIXI.settings.ANISOTROPIC_LEVEL = 4;
 }
-console.log('VTuber init: pixi=' + !!window.PIXI + ' cubismCore=' + !!window.Live2DCubismCore + ' pixiLive2d=' + !!(window.PIXI && window.PIXI.live2d));
 
-// Frame upload state (1 in-flight loopback POST at a time)
+// Inochi2D (.inp / .inx) open-source 2D puppet state
+let inochiModel = null, loadedInochiUrl = '', inochiLoadSeq = 0;
+
+// GPU Zero-Copy Side-by-Side Alpha Pack compositor (#cout: 2W x H, left=RGB, right=Alpha)
+let zcGl = null, zcProg = null, zcTex = null, zcVao = null;
+function initZeroCopyPacker() {
+  if (!zeroCopyAlphaPack || zcGl) return;
+  const gl = cout.getContext('webgl2', {
+    alpha: false, antialias: false, depth: false, stencil: false,
+    premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance'
+  });
+  if (!gl) {
+    console.warn('Zero-copy alpha-pack WebGL2 unavailable');
+    return;
+  }
+  const vsSrc = `#version 300 es
+    out vec2 v_uv;
+    void main() {
+      vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+      gl_Position = vec4(p, 0.0, 1.0);
+      v_uv = p * 0.5 + 0.5;
+    }`;
+  const fsSrc = `#version 300 es
+    precision mediump float;
+    in vec2 v_uv;
+    uniform sampler2D u_src;
+    out vec4 outColor;
+    void main() {
+      if (v_uv.x < 0.5) {
+        vec4 c = texture(u_src, vec2(v_uv.x * 2.0, v_uv.y));
+        outColor = vec4(c.rgb, 1.0);
+      } else {
+        float a = texture(u_src, vec2((v_uv.x - 0.5) * 2.0, v_uv.y)).a;
+        outColor = vec4(a, a, a, 1.0);
+      }
+    }`;
+  const compile = (type, src) => {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      console.error('ZC shader error:', gl.getShaderInfoLog(sh));
+      gl.deleteShader(sh);
+      return null;
+    }
+    return sh;
+  };
+  const vs = compile(gl.VERTEX_SHADER, vsSrc);
+  const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+  if (!vs || !fs) return;
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error('ZC link error:', gl.getProgramInfoLog(prog));
+    return;
+  }
+  zcGl = gl;
+  zcProg = prog;
+  zcVao = gl.createVertexArray();
+  zcTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, zcTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  cout.style.display = 'block';
+  console.log('VTuber GPU Zero-Copy side-by-side alpha-pack ready');
+}
+
+function packZeroCopyCanvas(srcCanvas, w, h) {
+  initZeroCopyPacker();
+  if (!zcGl || !zcProg || !srcCanvas) return;
+  const outW = w * 2;
+  if (cout.width !== outW || cout.height !== h) {
+    cout.width = outW;
+    cout.height = h;
+  }
+  const gl = zcGl;
+  gl.viewport(0, 0, outW, h);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, zcTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, srcCanvas);
+  gl.useProgram(zcProg);
+  gl.bindVertexArray(zcVao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+console.log('VTuber Pro v2 init: zc=' + zeroCopyAlphaPack + ' pixi=' + !!window.PIXI + ' cubismCore=' + !!window.Live2DCubismCore);
+
+// Legacy fallback frame upload state (used only when zeroCopyAlphaPack is false)
 let glPixelBuf = null;
 let frameInFlight = false;
 let lastPushMs = 0;
@@ -128,7 +236,8 @@ function asyncReadPixels(gl, w, h) {
 }
 
 function getRenderSize() {
-  const w = Math.max(128, Math.min(1280, cfg.width || window.innerWidth || 768));
+  const defaultW = zeroCopyAlphaPack ? Math.max(128, Math.floor((window.innerWidth || 1536) / 2)) : (window.innerWidth || 768);
+  const w = Math.max(128, Math.min(1280, cfg.width || defaultW || 768));
   const h = Math.max(128, Math.min(1280, cfg.height || window.innerHeight || 768));
   return [w, h];
 }
@@ -144,13 +253,17 @@ function resizeAll() {
     pixiApp.renderer.resize(w, h);
     fitLive2dModel();
   }
+  if (zeroCopyAlphaPack && (cout.width !== w * 2 || cout.height !== h)) {
+    cout.width = w * 2;
+    cout.height = h;
+  }
 }
 
 function ensureThree() {
   if (renderer) return;
   const [w, h] = getRenderSize();
   renderer = new THREE.WebGLRenderer({
-    canvas: cgl, alpha: true, antialias: true, preserveDrawingBuffer: true, powerPreference: 'high-performance'
+    canvas: cgl, alpha: true, antialias: true, preserveDrawingBuffer: !zeroCopyAlphaPack, powerPreference: 'high-performance'
   });
   renderer.setClearColor(0x000000, 0);
   renderer.setPixelRatio(1);
@@ -211,11 +324,65 @@ function buildProcedural3DAvatar() {
   return root;
 }
 
+function bindVrmaClip() {
+  if (!currentVrm || !pendingVrmaData) {
+    if (vrmaAction) { vrmaAction.stop(); vrmaAction = null; }
+    vrmaMixer = null;
+    return;
+  }
+  try {
+    vrmaMixer = new THREE.AnimationMixer(currentVrm.scene);
+    const clip = createVRMAnimationClip(pendingVrmaData, currentVrm);
+    vrmaAction = vrmaMixer.clipAction(clip);
+    vrmaAction.setLoop(cfg.vrmaLoop === false ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
+    vrmaAction.clampWhenFinished = true;
+    vrmaAction.reset().play();
+    console.log('VRMA animation bound: ' + loadedVrmaUrl + ' duration=' + clip.duration.toFixed(2) + 's');
+  } catch (e) {
+    console.warn('VRMA clip bind failed:', e);
+    vrmaMixer = null;
+    vrmaAction = null;
+  }
+}
+
+async function loadVrmaAnimation(url) {
+  if (!url) {
+    loadedVrmaUrl = '';
+    pendingVrmaData = null;
+    if (vrmaAction) { vrmaAction.stop(); vrmaAction = null; }
+    vrmaMixer = null;
+    return;
+  }
+  if (url === loadedVrmaUrl && pendingVrmaData) {
+    if (vrmaAction) vrmaAction.setLoop(cfg.vrmaLoop === false ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
+    return;
+  }
+  loadedVrmaUrl = url;
+  try {
+    const loader = new GLTFLoader();
+    loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+    const gltf = await loader.loadAsync(url);
+    const anims = gltf.userData && gltf.userData.vrmAnimations;
+    if (anims && anims.length > 0) {
+      pendingVrmaData = anims[0];
+      bindVrmaClip();
+    } else {
+      console.warn('No VRMAnimation found in ' + url);
+      pendingVrmaData = null;
+    }
+  } catch (e) {
+    console.warn('VRMA load failed:', e);
+    loadedVrmaUrl = '';
+    pendingVrmaData = null;
+  }
+}
+
 async function loadVrmModel(url) {
   ensureThree();
   if (!url) {
     if (currentVrm) { scene.remove(currentVrm.scene); VRMUtils.deepDispose(currentVrm.scene); currentVrm = null; }
     loadedVrmUrl = '';
+    vrmaMixer = null; vrmaAction = null;
     if (demoHead) demoHead.visible = true;
     return;
   }
@@ -249,6 +416,7 @@ async function loadVrmModel(url) {
     currentVrm = vrm;
     scene.add(vrm.scene);
     if (demoHead) demoHead.visible = false;
+    if (pendingVrmaData) bindVrmaClip();
     console.log('Loaded VRM model successfully: ' + url + ' aniso=' + maxAniso);
   } catch (e) {
     console.warn('VRM load failed (note: .vroid must be exported as .vrm in VRoid Studio):', e);
@@ -256,6 +424,41 @@ async function loadVrmModel(url) {
   }
 }
 
+// ---------- VRM Finger / Gesture / VMC Bone Helpers ----------
+const VMC_TO_VRM_BONE = {
+  Hips: 'hips', Spine: 'spine', Chest: 'chest', UpperChest: 'upperChest',
+  Neck: 'neck', Head: 'head',
+  LeftShoulder: 'leftShoulder', RightShoulder: 'rightShoulder',
+  LeftUpperArm: 'leftUpperArm', RightUpperArm: 'rightUpperArm',
+  LeftLowerArm: 'leftLowerArm', RightLowerArm: 'rightLowerArm',
+  LeftHand: 'leftHand', RightHand: 'rightHand'
+};
+
+function applyVrmFingers(hum, side, curl, gesture) {
+  const s = side === 'L' ? 1 : -1;
+  const pfx = side === 'L' ? 'left' : 'right';
+  const fingers = ['Index', 'Middle', 'Ring', 'Little'];
+  for (let i = 0; i < fingers.length; ++i) {
+    let fCurl = curl;
+    if (gesture === 3) { // peace ✌️: index + middle open, ring + pinky curled
+      fCurl = (i < 2) ? 0.05 : 1.0;
+    } else if (gesture === 4) { // point ☝️: index open, others curled
+      fCurl = (i === 0) ? 0.05 : 1.0;
+    } else if (gesture === 2) { // fist ✊
+      fCurl = 1.0;
+    } else if (gesture === 1) { // open ✋
+      fCurl = 0.05;
+    }
+    const prox = hum?.getNormalizedBoneNode(pfx + fingers[i] + 'Proximal');
+    const inter = hum?.getNormalizedBoneNode(pfx + fingers[i] + 'Intermediate');
+    if (prox) prox.rotation.z = s * fCurl * 1.15;
+    if (inter) inter.rotation.z = s * fCurl * 1.05;
+  }
+  const thumb = hum?.getNormalizedBoneNode(pfx + 'ThumbProximal');
+  if (thumb) thumb.rotation.y = -s * (gesture === 2 ? 0.65 : curl * 0.45);
+}
+
+// ---------- Live2D ----------
 function loadScript(src) {
   return new Promise((resolve) => {
     const s = document.createElement('script');
@@ -330,9 +533,12 @@ async function discoverLive2dWaveParams(model3Url) {
         else if (nm.includes('right') || idLow.includes('armr') || idLow.includes('handr')) info.armRIds.push(id);
       }
     }
-    console.log('Live2D wave params discovered: toggle=' + info.toggleIds.join(',') + ' swing=' + info.swingIds.join(','));
   } catch (e) {}
   return info;
+}
+
+function getActiveGesture() {
+  return (track.gesture && track.gesture.length > 0) ? track.gesture : (cfg.gesture || '');
 }
 
 function applyLive2dParams(model) {
@@ -344,46 +550,56 @@ function applyLive2dParams(model) {
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const sens = Math.max(0.4, Math.min(2.5, Number(cfg.headSensitivity) || 1.0));
   const handOn = cfg.handTracking !== false;
-  const targetWave = handOn ? Math.max(track.handL || 0, track.handR || 0) : 0;
+  const actGest = getActiveGesture();
+  const gestWave = (actGest === 'wave' || actGest === 'peace') ? 1.0 : 0;
+  const targetWave = Math.max(handOn ? Math.max(track.handL || 0, track.handR || 0) : 0, gestWave);
   live2dWaveBlend += (targetWave - live2dWaveBlend) * (targetWave > live2dWaveBlend ? 0.25 : 0.12);
   if (live2dWaveBlend < 0.005) live2dWaveBlend = 0;
 
   const waveSwing = Math.sin(t * 7.8) * 0.72 + clamp(track.waveOsc || 0, -1, 1) * 0.28;
-  const yaw = clamp(track.yaw * sens, -30, 30);
-  const pitch = clamp(track.pitch * sens, -30, 30);
-  const roll = clamp(track.roll * sens + live2dWaveBlend * 7.0, -30, 30);
-  const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.75), 0, 1);
+  const danceX = actGest === 'dance' ? Math.sin(t * 3.8) * 14 : 0;
+  const danceZ = actGest === 'dance' ? Math.sin(t * 3.8) * 11 : 0;
+  const thinkRoll = actGest === 'think' ? -14 : 0;
+  const yaw = clamp(track.yaw * sens + danceX, -30, 30);
+  const pitch = clamp(track.pitch * sens + (actGest === 'think' ? 8 : 0), -30, 30);
+  const roll = clamp(track.roll * sens + live2dWaveBlend * 7.0 + danceZ + thinkRoll, -30, 30);
+  const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.75, actGest === 'happy' ? 1 : 0), 0, 1);
   const sad = clamp(track.sad || 0, 0, 1);
   const angry = clamp(track.angry || 0, 0, 1);
   const surprised = clamp(track.surprised || 0, 0, 1);
+
+  const eyeBallX = (track.mp || track.vmc) ? clamp(track.lookX, -1, 1) : clamp(yaw / 24, -1, 1);
+  const eyeBallY = (track.mp || track.vmc) ? clamp(track.lookY, -1, 1) : clamp(pitch / 24, -1, 1);
+  const browL = (track.mp || track.vmc) ? clamp(track.browL, -1, 1) : clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1);
+  const browR = (track.mp || track.vmc) ? clamp(track.browR, -1, 1) : clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1);
+  const mouthForm = clamp(smile + (track.mI + track.mE) * 0.35 - (track.mU + track.mO) * 0.45 - sad * 0.7 - angry * 0.5, -1, 1);
 
   try {
     core.setParameterValueById('ParamAngleX', yaw);
     core.setParameterValueById('ParamAngleY', pitch);
     core.setParameterValueById('ParamAngleZ', roll);
-    core.setParameterValueById('ParamBodyAngleX', clamp(yaw * 0.42 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8, -10, 10));
+    core.setParameterValueById('ParamBodyAngleX', clamp(yaw * 0.42 + sway * 2.0 + waveSwing * live2dWaveBlend * 2.8 + danceX * 0.4, -10, 10));
     core.setParameterValueById('ParamBodyAngleY', clamp(pitch * 0.34, -10, 10));
-    core.setParameterValueById('ParamBodyAngleZ', clamp(roll * 0.38 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5, -10, 10));
+    core.setParameterValueById('ParamBodyAngleZ', clamp(roll * 0.38 + Math.sin(t * 0.7) * 1.4 + waveSwing * live2dWaveBlend * 3.5 + danceZ * 0.5, -10, 10));
     core.setParameterValueById('ParamEyeLOpen', curAutoBlink ? 0 : clamp(track.eyeL, 0, 1));
     core.setParameterValueById('ParamEyeROpen', curAutoBlink ? 0 : clamp(track.eyeR, 0, 1));
     core.setParameterValueById('ParamEyeLSmile', smile);
     core.setParameterValueById('ParamEyeRSmile', smile);
-    core.setParameterValueById('ParamEyeBallX', clamp(yaw / 24, -1, 1));
-    core.setParameterValueById('ParamEyeBallY', clamp(pitch / 24, -1, 1));
+    core.setParameterValueById('ParamEyeBallX', eyeBallX);
+    core.setParameterValueById('ParamEyeBallY', eyeBallY);
     core.setParameterValueById('ParamMouthOpenY', clamp(Math.max(curMouthVal, surprised * 0.85), 0, 1));
-    core.setParameterValueById('ParamMouthForm', clamp(smile - sad * 0.7 - angry * 0.5, -1, 1));
-    core.setParameterValueById('ParamBrowLY', clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1));
-    core.setParameterValueById('ParamBrowRY', clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1));
+    core.setParameterValueById('ParamMouthForm', mouthForm);
+    core.setParameterValueById('ParamBrowLY', browL);
+    core.setParameterValueById('ParamBrowRY', browR);
     core.setParameterValueById('ParamBrowLForm', clamp(smile - angry * 0.8, -1, 1));
     core.setParameterValueById('ParamBrowRForm', clamp(smile - angry * 0.8, -1, 1));
-    core.setParameterValueById('ParamCheek', clamp(live2dWaveBlend * 0.55, 0, 1));
+    core.setParameterValueById('ParamCheek', clamp(Math.max(live2dWaveBlend * 0.55, track.cheekPuff || 0, smile * 0.45), 0, 1));
     core.setParameterValueById('ParamBreath', breath);
 
-    // Live hand-wave parameters (auto-discovered from .cdi3.json + standard Live2D arm/hand params)
     for (const id of live2dWaveInfo.toggleIds) core.setParameterValueById(id, live2dWaveBlend);
     for (const id of live2dWaveInfo.swingIds) core.setParameterValueById(id, waveSwing * 30 * live2dWaveBlend);
-    const hL = handOn ? clamp(track.handL || 0, 0, 1) : 0;
-    const hR = handOn ? clamp(track.handR || 0, 0, 1) : 0;
+    const hL = Math.max(handOn ? clamp(track.handL || 0, 0, 1) : 0, actGest === 'clap' ? 1 : 0);
+    const hR = Math.max(handOn ? clamp(track.handR || 0, 0, 1) : 0, (actGest === 'wave' || actGest === 'clap' || actGest === 'peace') ? 1 : 0);
     for (const id of live2dWaveInfo.armLIds) core.setParameterValueById(id, hL * (1 + waveSwing * 0.25));
     for (const id of live2dWaveInfo.armRIds) core.setParameterValueById(id, hR * (1 + waveSwing * 0.25));
     for (const id of ['ParamArmLA', 'ParamArmL', 'ParamHandL']) core.setParameterValueById(id, hL * 10);
@@ -411,14 +627,14 @@ async function loadLive2dModel(url) {
       backgroundAlpha: 0,
       clearBeforeRender: true,
       autoStart: false,
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: !zeroCopyAlphaPack,
       antialias: true,
       powerPreference: 'high-performance',
       resolution: 1,
       width: w,
       height: h
     });
-    console.log('VTuber PixiJS WebGL ready ' + w + 'x' + h + ' gl=' + !!(pixiApp.renderer && pixiApp.renderer.gl));
+    console.log('VTuber PixiJS WebGL ready ' + w + 'x' + h);
   }
   try {
     console.log('Loading Live2D model: ' + url);
@@ -435,22 +651,185 @@ async function loadLive2dModel(url) {
     live2dModel = model;
     pixiApp.stage.addChild(model);
     fitLive2dModel();
-    console.log('Loaded Live2D model successfully: ' + url + ' size=' +
-      (model.internalModel ? (model.internalModel.width + 'x' + model.internalModel.height) : 'n/a'));
+    console.log('Loaded Live2D model successfully: ' + url);
   } catch (e) {
     loadedLive2dUrl = '';
     console.error('Live2D load failed:', e && e.stack ? e.stack : e);
   }
 }
 
+// ---------- Inochi2D (.inp / .inx) Open-Source 2D Rigged Puppet Loader & Renderer ----------
+async function loadInochi2dModel(url) {
+  const seq = ++inochiLoadSeq;
+  if (!url) {
+    if (inochiModel && inochiModel.bitmaps) {
+      for (const b of inochiModel.bitmaps) if (b && b.close) b.close();
+    }
+    inochiModel = null;
+    loadedInochiUrl = '';
+    return;
+  }
+  if (url === loadedInochiUrl && inochiModel) return;
+  loadedInochiUrl = url;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const buf = await resp.arrayBuffer();
+    if (seq !== inochiLoadSeq) return;
+    const u8 = new Uint8Array(buf);
+    const dv = new DataView(buf);
+    // Verify TRNSRTS\0 magic (8 bytes)
+    const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3], u8[4], u8[5], u8[6], u8[7]);
+    if (magic !== 'TRNSRTS\0') throw new Error('Invalid Inochi2D magic: ' + magic);
+    const jsonLen = dv.getUint32(8, false);
+    const jsonText = new TextDecoder('utf-8').decode(u8.subarray(12, 12 + jsonLen));
+    const puppet = JSON.parse(jsonText);
+
+    // Parse TEX_SECT section
+    let off = 12 + jsonLen;
+    const bitmaps = [];
+    if (off + 12 <= u8.length) {
+      const secTag = String.fromCharCode(...u8.subarray(off, off + 8));
+      if (secTag === 'TEX_SECT') {
+        off += 8;
+        const texCount = dv.getUint32(off, false);
+        off += 4;
+        for (let i = 0; i < texCount && off + 5 <= u8.length; ++i) {
+          const tLen = dv.getUint32(off, false);
+          const tFmt = u8[off + 4];
+          off += 5;
+          if (off + tLen > u8.length) break;
+          const mime = (tFmt === 1) ? 'image/tga' : (tFmt === 2 ? 'image/webp' : 'image/png');
+          const blob = new Blob([u8.subarray(off, off + tLen)], { type: mime });
+          off += tLen;
+          try {
+            bitmaps.push(await createImageBitmap(blob));
+          } catch (_) {
+            bitmaps.push(null);
+          }
+        }
+      }
+    }
+    if (seq !== inochiLoadSeq) {
+      for (const b of bitmaps) if (b && b.close) b.close();
+      return;
+    }
+
+    // Flatten node tree into renderable Part list with cumulative parent transforms
+    const parts = [];
+    let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+    function walk(node, parentX, parentY, parentRot, parentSx, parentSy, parentZ) {
+      if (!node || node.enabled === false) return;
+      const tr = node.transform || {};
+      const trans = tr.trans || [0, 0, 0];
+      const rot = tr.rot || [0, 0, 0];
+      const scale = tr.scale || [1, 1];
+      const wx = parentX + (trans[0] || 0) * parentSx;
+      const wy = parentY + (trans[1] || 0) * parentSy;
+      const wRot = parentRot + (rot[2] || 0);
+      const wSx = parentSx * (scale[0] !== undefined ? scale[0] : 1);
+      const wSy = parentSy * (scale[1] !== undefined ? scale[1] : 1);
+      const wZ = parentZ + (node.zsort || 0);
+
+      if (node.type === 'Part' && Array.isArray(node.textures) && node.textures.length > 0) {
+        const texIdx = node.textures[0];
+        const bmp = bitmaps[texIdx];
+        if (bmp) {
+          const nm = String(node.name || '').toLowerCase();
+          const opacity = node.opacity !== undefined ? Number(node.opacity) : 1.0;
+          const bw = bmp.width * Math.abs(wSx);
+          const bh = bmp.height * Math.abs(wSy);
+          minX = Math.min(minX, wx - bw * 0.5);
+          maxX = Math.max(maxX, wx + bw * 0.5);
+          minY = Math.min(minY, wy - bh * 0.5);
+          maxY = Math.max(maxY, wy + bh * 0.5);
+          parts.push({
+            name: nm, bmp, wx, wy, wRot, wSx, wSy, wZ, opacity,
+            isEye: nm.includes('eye') || nm.includes('iris') || nm.includes('pupil') || nm.includes('ojo'),
+            isMouth: nm.includes('mouth') || nm.includes('lip') || nm.includes('boca'),
+            isHair: nm.includes('hair') || nm.includes('bang') || nm.includes('pelo') || nm.includes('ponytail'),
+            isHead: nm.includes('head') || nm.includes('face') || nm.includes('eye') || nm.includes('mouth') || nm.includes('brow') || nm.includes('hair') || nm.includes('ear') || nm.includes('nose')
+          });
+        }
+      }
+      if (Array.isArray(node.children)) {
+        for (const ch of node.children) walk(ch, wx, wy, wRot, wSx, wSy, wZ);
+      }
+    }
+    walk(puppet.nodes, 0, 0, 0, 1, 1, 0);
+    // Inochi2D draws higher zSort behind lower zSort
+    parts.sort((a, b) => b.wZ - a.wZ);
+    if (inochiModel && inochiModel.bitmaps) {
+      for (const b of inochiModel.bitmaps) if (b && b.close) b.close();
+    }
+    inochiModel = {
+      name: (puppet.meta && puppet.meta.name) || 'Inochi2D',
+      bitmaps, parts,
+      cx: (minX + maxX) * 0.5,
+      cy: (minY + maxY) * 0.5,
+      bw: Math.max(64, maxX - minX),
+      bh: Math.max(64, maxY - minY)
+    };
+    console.log('Loaded Inochi2D puppet: ' + inochiModel.name + ' parts=' + parts.length + ' textures=' + bitmaps.length);
+  } catch (e) {
+    loadedInochiUrl = '';
+    inochiModel = null;
+    console.error('Inochi2D load failed:', e);
+  }
+}
+
+function drawInochi2dAvatar(w, h, talking, blink) {
+  if (!inochiModel || !inochiModel.parts.length) {
+    draw2DRiggedAvatar(w, h, talking, blink);
+    return;
+  }
+  ctx2d.clearRect(0, 0, w, h);
+  ctx2d.save();
+  const t = clock.elapsedTime;
+  const sens = Math.max(0.4, Math.min(2.5, Number(cfg.headSensitivity) || 1.0));
+  const actGest = getActiveGesture();
+  const danceX = actGest === 'dance' ? Math.sin(t * 3.8) * 18 : 0;
+  const danceRot = actGest === 'dance' ? Math.sin(t * 3.8) * 0.10 : 0;
+  const scale = Math.min((w * 0.90) / inochiModel.bw, (h * 0.90) / inochiModel.bh);
+  const breathY = Math.sin(t * 2.1) * 4;
+  ctx2d.translate(w * 0.5 + danceX + track.faceX * w * 0.03, h * 0.52 + breathY - bounceY * 0.25);
+  ctx2d.rotate((track.roll * sens * Math.PI) / 180 * 0.35 + danceRot);
+  ctx2d.scale(scale, scale);
+  ctx2d.translate(-inochiModel.cx, -inochiModel.cy);
+
+  const headDx = track.yaw * sens * 1.1;
+  const headDy = -track.pitch * sens * 0.9;
+  const hairSwing = Math.sin(t * 2.6) * 0.035 + (track.roll * 0.002);
+  const eyeScale = blink ? 0.08 : Math.max(0.1, (track.eyeL + track.eyeR) * 0.5);
+
+  for (const p of inochiModel.parts) {
+    ctx2d.save();
+    ctx2d.globalAlpha = Math.max(0, Math.min(1, p.opacity));
+    const px = p.wx + (p.isHead ? headDx : headDx * 0.22);
+    const py = p.wy + (p.isHead ? headDy : headDy * 0.15);
+    ctx2d.translate(px, py);
+    ctx2d.rotate(p.wRot + (p.isHair ? hairSwing : 0));
+    let sx = p.wSx, sy = p.wSy;
+    if (p.isEye) sy *= eyeScale;
+    if (p.isMouth) sy *= (0.75 + curMouthVal * 0.95);
+    ctx2d.scale(sx, sy);
+    ctx2d.drawImage(p.bmp, -p.bmp.width * 0.5, -p.bmp.height * 0.5);
+    ctx2d.restore();
+  }
+  ctx2d.restore();
+}
+
 function draw2DRiggedAvatar(w, h, talking, blink) {
   ctx2d.clearRect(0, 0, w, h);
   ctx2d.save();
-  const cx = w * 0.5 + track.faceX * w * 0.04;
+  const t = clock.elapsedTime;
+  const actGest = getActiveGesture();
+  const danceX = actGest === 'dance' ? Math.sin(t * 3.8) * w * 0.04 : 0;
+  const cx = w * 0.5 + track.faceX * w * 0.04 + danceX;
   const cy = h * 0.54 + track.faceY * h * 0.03 - bounceY;
   const s = Math.min(w, h) * 0.34;
   ctx2d.translate(cx, cy);
-  ctx2d.rotate((track.roll * Math.PI) / 180 * 0.65);
+  ctx2d.rotate((track.roll * Math.PI) / 180 * 0.65 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0));
 
   ctx2d.fillStyle = '#1e293b';
   ctx2d.beginPath();
@@ -481,7 +860,7 @@ function draw2DRiggedAvatar(w, h, talking, blink) {
     ctx2d.fill();
     ctx2d.fillStyle = '#ffffff';
     ctx2d.beginPath();
-    ctx2d.arc(s * 0.04, -s * 0.05, s * 0.042, 0, Math.PI * 2);
+    ctx2d.arc(s * 0.04 + track.lookX * s * 0.04, -s * 0.05 - track.lookY * s * 0.04, s * 0.042, 0, Math.PI * 2);
     ctx2d.fill();
     ctx2d.restore();
   });
@@ -500,6 +879,7 @@ function draw2DRiggedAvatar(w, h, talking, blink) {
 }
 
 function pushCurrentFrame(activeGl) {
+  if (zeroCopyAlphaPack) return; // HardwareBuffer side-by-side alpha-pack handles capture in GPU!
   if (frameInFlight) return;
   const now = performance.now();
   const minInterval = 1000 / Math.max(10, Math.min(60, cfg.fps || 30));
@@ -565,7 +945,7 @@ function animate(now) {
   blinkTimer -= dt;
   if (blinkTimer <= 0) { blinkTimer = 2.5 + Math.random() * 3.0; blinkDur = 0.13; }
   if (blinkDur > 0) blinkDur -= dt;
-  const autoBlink = blinkDur > 0;
+  const autoBlink = (!track.mp && !track.vmc) && (blinkDur > 0);
 
   if (cfg.bounce) {
     if (talking && !wasTalking) bounceVel = 240;
@@ -577,19 +957,18 @@ function animate(now) {
   }
   wasTalking = talking;
 
-  const mouthVal = Math.max(
-    cfg.lipSync ? Math.min(1, track.mic / Math.max(0.02, cfg.voiceThreshold * 3.2)) : 0,
-    track.mouthOpen
-  );
+  const micMouth = cfg.lipSync ? Math.min(1, track.mic / Math.max(0.02, cfg.voiceThreshold * 3.2)) : 0;
+  const mouthVal = Math.max(micMouth, track.mouthOpen);
 
   curAutoBlink = autoBlink;
   curMouthVal = mouthVal;
 
   let activeGl = null;
+  let activeCanvas = c2d;
   if (cfg.mode === 'vrm') {
     c2d.style.display = 'none';
     cl2d.style.display = 'none';
-    cgl.style.display = 'block';
+    cgl.style.display = zeroCopyAlphaPack ? 'none' : 'block';
     ensureThree();
     camera.position.set(0, cfg.camY, cfg.camDist);
     camera.lookAt(0, cfg.camY - 0.03, 0);
@@ -609,68 +988,145 @@ function animate(now) {
       const breath = Math.sin(t * 2.1);
       const sway = Math.sin(t * 0.9);
       const handOn = cfg.handTracking !== false;
-      const tgtL = handOn ? clamp(track.handL || 0, 0, 1) : 0;
-      const tgtR = handOn ? clamp(track.handR || 0, 0, 1) : 0;
-      vrmWaveL += (tgtL - vrmWaveL) * (tgtL > vrmWaveL ? 0.22 : 0.12);
-      vrmWaveR += (tgtR - vrmWaveR) * (tgtR > vrmWaveR ? 0.22 : 0.12);
-      const maxWave = Math.max(vrmWaveL, vrmWaveR);
-      const waveOsc = Math.sin(t * 7.6) * 0.68 + clamp(track.waveOsc || 0, -1, 1) * 0.32;
+      const actGest = getActiveGesture();
+
+      // If a .vrma clip is loaded, advance AnimationMixer first (face/expressions still layer on top)
+      const hasVrma = !!(vrmaMixer && vrmaAction);
+      if (hasVrma) {
+        vrmaMixer.update(dt);
+      }
 
       const hum = currentVrm.humanoid;
-      const head = hum?.getNormalizedBoneNode('head');
-      const neck = hum?.getNormalizedBoneNode('neck');
-      const spine = hum?.getNormalizedBoneNode('spine');
-      const chest = hum?.getNormalizedBoneNode('chest') || hum?.getNormalizedBoneNode('upperChest');
-      const lShoulder = hum?.getNormalizedBoneNode('leftShoulder');
-      const rShoulder = hum?.getNormalizedBoneNode('rightShoulder');
-      const lUpper = hum?.getNormalizedBoneNode('leftUpperArm');
-      const rUpper = hum?.getNormalizedBoneNode('rightUpperArm');
-      const lLower = hum?.getNormalizedBoneNode('leftLowerArm');
-      const rLower = hum?.getNormalizedBoneNode('rightLowerArm');
-      const lHand = hum?.getNormalizedBoneNode('leftHand');
-      const rHand = hum?.getNormalizedBoneNode('rightHand');
+      const hasVmcBones = !!(track.vmc && track.bones && Object.keys(track.bones).length > 1);
 
-      // Blend from natural relaxed A-pose into raised greeting hand wave
-      if (lShoulder) lShoulder.rotation.set(0, 0, lerp(0.05 - breath * 0.012, -0.18, vrmWaveL));
-      if (rShoulder) rShoulder.rotation.set(0, 0, lerp(-0.05 + breath * 0.012, 0.18, vrmWaveR));
-      if (lUpper) lUpper.rotation.set(
-        lerp(0.08, -0.35, vrmWaveL),
-        lerp(0.06, -0.18, vrmWaveL),
-        lerp(1.22 - breath * 0.025, -0.32, vrmWaveL)
-      );
-      if (rUpper) rUpper.rotation.set(
-        lerp(0.08, -0.35, vrmWaveR),
-        lerp(-0.06, 0.18, vrmWaveR),
-        lerp(-1.22 + breath * 0.025, 0.32, vrmWaveR)
-      );
-      if (lLower) lLower.rotation.set(
-        lerp(0.05, -0.22, vrmWaveL),
-        lerp(0.14, 0.05, vrmWaveL),
-        lerp(0.10, -1.35 - waveOsc * 0.42, vrmWaveL)
-      );
-      if (rLower) rLower.rotation.set(
-        lerp(0.05, -0.22, vrmWaveR),
-        lerp(-0.14, -0.05, vrmWaveR),
-        lerp(-0.10, 1.35 + waveOsc * 0.42, vrmWaveR)
-      );
-      if (lHand) lHand.rotation.set(0, 0, -waveOsc * 0.28 * vrmWaveL);
-      if (rHand) rHand.rotation.set(0, 0, waveOsc * 0.28 * vrmWaveR);
+      if (!hasVrma && hasVmcBones) {
+        // Full VMC skeleton bone streaming
+        for (const [vmcName, q] of Object.entries(track.bones)) {
+          const vrmBone = VMC_TO_VRM_BONE[vmcName];
+          if (!vrmBone || !Array.isArray(q) || q.length < 4) continue;
+          const node = hum?.getNormalizedBoneNode(vrmBone);
+          if (!node) continue;
+          tmpQuat.set(-q[0], -q[1], q[2], q[3]).normalize();
+          node.quaternion.slerp(tmpQuat, 0.45);
+        }
+      } else if (!hasVrma) {
+        // Kalidokit-style IK + MediaPipe Hand Landmarker + 6 Procedural Gestures
+        let tgtL = handOn ? clamp(track.handL || 0, 0, 1) : 0;
+        let tgtR = handOn ? clamp(track.handR || 0, 0, 1) : 0;
+        if (actGest === 'wave') tgtR = 1.0;
+        else if (actGest === 'peace') tgtR = 1.0;
+        else if (actGest === 'clap') { tgtL = 1.0; tgtR = 1.0; }
+        else if (actGest === 'think') tgtR = 1.0;
 
-      if (chest) chest.rotation.set(breath * 0.022, sway * 0.018, 0);
-      if (head) head.rotation.set(pitchR * 0.65, yawR * 0.65, -rollR * 0.65 + (vrmWaveR - vrmWaveL) * 0.10);
-      if (neck) neck.rotation.set(pitchR * 0.25, yawR * 0.25, -rollR * 0.25);
-      if (spine) spine.rotation.set(pitchR * 0.10 + breath * 0.012, yawR * 0.10 + sway * 0.015, -rollR * 0.08);
+        vrmWaveL += (tgtL - vrmWaveL) * (tgtL > vrmWaveL ? 0.24 : 0.14);
+        vrmWaveR += (tgtR - vrmWaveR) * (tgtR > vrmWaveR ? 0.24 : 0.14);
+        const waveOsc = Math.sin(t * 7.6) * 0.68 + clamp(track.waveOsc || 0, -1, 1) * 0.32;
+
+        const head = hum?.getNormalizedBoneNode('head');
+        const neck = hum?.getNormalizedBoneNode('neck');
+        const spine = hum?.getNormalizedBoneNode('spine');
+        const chest = hum?.getNormalizedBoneNode('chest') || hum?.getNormalizedBoneNode('upperChest');
+        const lShoulder = hum?.getNormalizedBoneNode('leftShoulder');
+        const rShoulder = hum?.getNormalizedBoneNode('rightShoulder');
+        const lUpper = hum?.getNormalizedBoneNode('leftUpperArm');
+        const rUpper = hum?.getNormalizedBoneNode('rightUpperArm');
+        const lLower = hum?.getNormalizedBoneNode('leftLowerArm');
+        const rLower = hum?.getNormalizedBoneNode('rightLowerArm');
+        const lHand = hum?.getNormalizedBoneNode('leftHand');
+        const rHand = hum?.getNormalizedBoneNode('rightHand');
+
+        // Hand position IK elevation from MediaPipe wrist Y (0=top, 1=bottom)
+        const liftL = clamp((0.88 - (track.handLY || 0.75)) * 1.6, 0, 1);
+        const liftR = clamp((0.88 - (track.handRY || 0.75)) * 1.6, 0, 1);
+        const spreadL = clamp(((track.handLX || 0.25) - 0.5) * 1.4, -0.6, 0.6);
+        const spreadR = clamp(((track.handRX || 0.75) - 0.5) * 1.4, -0.6, 0.6);
+
+        if (lShoulder) lShoulder.rotation.set(0, 0, lerp(0.05 - breath * 0.012, -0.18, vrmWaveL));
+        if (rShoulder) rShoulder.rotation.set(0, 0, lerp(-0.05 + breath * 0.012, 0.18, vrmWaveR));
+
+        if (actGest === 'clap') {
+          const cl = Math.abs(Math.sin(t * 8.5));
+          if (lUpper) lUpper.rotation.set(-0.55, 0.35 + cl * 0.18, 0.45);
+          if (rUpper) rUpper.rotation.set(-0.55, -0.35 - cl * 0.18, -0.45);
+          if (lLower) lLower.rotation.set(-0.25, 0.85 + cl * 0.30, -0.40);
+          if (rLower) rLower.rotation.set(-0.25, -0.85 - cl * 0.30, 0.40);
+        } else if (actGest === 'think') {
+          if (lUpper) lUpper.rotation.set(0.08, 0.06, 1.22);
+          if (lLower) lLower.rotation.set(0.05, 0.14, 0.10);
+          if (rUpper) rUpper.rotation.set(-0.65, -0.25, -0.35);
+          if (rLower) rLower.rotation.set(-0.35, -0.45, 1.65);
+        } else if (actGest === 'dance') {
+          const d = Math.sin(t * 3.8);
+          if (lUpper) lUpper.rotation.set(-0.25, 0.12, 0.65 + d * 0.45);
+          if (rUpper) rUpper.rotation.set(-0.25, -0.12, -0.65 + d * 0.45);
+          if (lLower) lLower.rotation.set(-0.20, 0.35, -0.65 - d * 0.35);
+          if (rLower) rLower.rotation.set(-0.20, -0.35, 0.65 - d * 0.35);
+        } else {
+          if (lUpper) lUpper.rotation.set(
+            lerp(0.08, -0.35 - liftL * 0.25, vrmWaveL),
+            lerp(0.06, -0.18 + spreadL * 0.35, vrmWaveL),
+            lerp(1.22 - breath * 0.025, -0.32 + (1 - liftL) * 0.45, vrmWaveL)
+          );
+          if (rUpper) rUpper.rotation.set(
+            lerp(0.08, -0.35 - liftR * 0.25, vrmWaveR),
+            lerp(-0.06, 0.18 + spreadR * 0.35, vrmWaveR),
+            lerp(-1.22 + breath * 0.025, 0.32 - (1 - liftR) * 0.45, vrmWaveR)
+          );
+          const oscL = (actGest === 'peace') ? 0 : waveOsc * 0.42;
+          const oscR = (actGest === 'peace') ? 0 : waveOsc * 0.42;
+          if (lLower) lLower.rotation.set(
+            lerp(0.05, -0.22, vrmWaveL),
+            lerp(0.14, 0.05, vrmWaveL),
+            lerp(0.10, -1.35 - oscL, vrmWaveL)
+          );
+          if (rLower) rLower.rotation.set(
+            lerp(0.05, -0.22, vrmWaveR),
+            lerp(-0.14, -0.05, vrmWaveR),
+            lerp(-0.10, 1.35 + oscR, vrmWaveR)
+          );
+          if (lHand) lHand.rotation.set(0, 0, -oscL * 0.65 * vrmWaveL);
+          if (rHand) rHand.rotation.set(0, 0, oscR * 0.65 * vrmWaveR);
+        }
+
+        // Apply finger curls & hand gestures (peace / fist / point / open)
+        applyVrmFingers(hum, 'L', track.curlL || 0, track.gestL || 0);
+        applyVrmFingers(hum, 'R', track.curlR || 0, actGest === 'peace' ? 3 : (track.gestR || 0));
+
+        const danceRoll = actGest === 'dance' ? Math.sin(t * 3.8) * 0.14 : 0;
+        const thinkTilt = actGest === 'think' ? -0.18 : 0;
+        if (chest) chest.rotation.set(breath * 0.022, sway * 0.018 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), danceRoll * 0.5);
+        if (head) head.rotation.set(pitchR * 0.65 + (actGest === 'think' ? 0.12 : 0), yawR * 0.65, -rollR * 0.65 + (vrmWaveR - vrmWaveL) * 0.10 + thinkTilt);
+        if (neck) neck.rotation.set(pitchR * 0.25, yawR * 0.25, -rollR * 0.25);
+        if (spine) spine.rotation.set(pitchR * 0.10 + breath * 0.012, yawR * 0.10 + sway * 0.015, -rollR * 0.08 + danceRoll * 0.4);
+      }
+
       currentVrm.scene.position.x = 0;
 
+      // Full 52-ARKit-driven VRM Expressions + 5-vowel visemes + Eye Gaze
       const em = currentVrm.expressionManager;
       if (em) {
-        em.setValue('aa', mouthVal);
-        em.setValue('blinkLeft', autoBlink ? 1 : (1 - track.eyeL));
-        em.setValue('blinkRight', autoBlink ? 1 : (1 - track.eyeR));
-        em.setValue('happy', Math.min(1, Math.max(track.happy, maxWave * 0.65)));
-        em.setValue('sad', Math.max(0, Math.min(1, track.sad || 0)));
-        em.setValue('angry', Math.max(0, Math.min(1, track.angry || 0)));
-        em.setValue('surprised', Math.max(0, Math.min(1, track.surprised || 0)));
+        const maxWave = Math.max(vrmWaveL, vrmWaveR);
+        const gestHappy = (actGest === 'happy' || actGest === 'peace' || actGest === 'clap') ? 0.95 : 0;
+        if (track.mp || track.vmc) {
+          em.setValue('aa', Math.max(track.mA, micMouth * 0.85));
+          em.setValue('ih', track.mI);
+          em.setValue('ou', track.mU);
+          em.setValue('ee', track.mE);
+          em.setValue('oh', track.mO);
+          em.setValue('lookLeft', clamp(-track.lookX, 0, 1));
+          em.setValue('lookRight', clamp(track.lookX, 0, 1));
+          em.setValue('lookUp', clamp(track.lookY, 0, 1));
+          em.setValue('lookDown', clamp(-track.lookY, 0, 1));
+        } else {
+          em.setValue('aa', mouthVal);
+          em.setValue('ih', 0); em.setValue('ou', 0); em.setValue('ee', 0); em.setValue('oh', 0);
+        }
+        em.setValue('blinkLeft', autoBlink ? 1 : clamp(1 - track.eyeL, 0, 1));
+        em.setValue('blinkRight', autoBlink ? 1 : clamp(1 - track.eyeR, 0, 1));
+        em.setValue('happy', clamp(Math.max(track.happy, maxWave * 0.55, gestHappy), 0, 1));
+        em.setValue('sad', clamp(track.sad || 0, 0, 1));
+        em.setValue('angry', clamp(track.angry || 0, 0, 1));
+        em.setValue('surprised', clamp(track.surprised || 0, 0, 1));
       }
       currentVrm.update(dt);
     } else if (demoHead) {
@@ -682,10 +1138,11 @@ function animate(now) {
     }
     renderer.render(scene, camera);
     activeGl = renderer.getContext();
+    activeCanvas = cgl;
   } else if (cfg.mode === 'live2d' && live2dModel && pixiApp) {
     c2d.style.display = 'none';
     cgl.style.display = 'none';
-    cl2d.style.display = 'block';
+    cl2d.style.display = zeroCopyAlphaPack ? 'none' : 'block';
     if (live2dModel.internalModel && live2dModel.internalModel.focusController) {
       const sens = Math.max(0.4, Math.min(2.5, Number(cfg.headSensitivity) || 1.0));
       const fx = Math.max(-1, Math.min(1, (track.yaw * sens) / 30));
@@ -695,15 +1152,28 @@ function animate(now) {
     live2dModel.update(dt * 1000);
     pixiApp.render();
     activeGl = pixiApp.renderer && pixiApp.renderer.gl ? pixiApp.renderer.gl : null;
+    activeCanvas = cl2d;
+  } else if (cfg.mode === 'inochi2d') {
+    cgl.style.display = 'none';
+    cl2d.style.display = 'none';
+    c2d.style.display = zeroCopyAlphaPack ? 'none' : 'block';
+    drawInochi2dAvatar(w, h, talking, autoBlink);
+    activeGl = null;
+    activeCanvas = c2d;
   } else {
     cgl.style.display = 'none';
     cl2d.style.display = 'none';
-    c2d.style.display = 'block';
+    c2d.style.display = zeroCopyAlphaPack ? 'none' : 'block';
     draw2DRiggedAvatar(w, h, talking, autoBlink);
     activeGl = null;
+    activeCanvas = c2d;
   }
 
-  pushCurrentFrame(activeGl);
+  if (zeroCopyAlphaPack) {
+    packZeroCopyCanvas(activeCanvas, w, h);
+  } else {
+    pushCurrentFrame(activeGl);
+  }
 }
 
 window.OBS_VTUBER = {
@@ -711,8 +1181,57 @@ window.OBS_VTUBER = {
   setConfig(next) {
     cfg = Object.assign(cfg, next || {});
     resizeAll();
-    if (cfg.mode === 'vrm') loadVrmModel(cfg.vrmFile);
-    if (cfg.mode === 'live2d') loadLive2dModel(cfg.live2dFile);
+    if (cfg.mode === 'vrm') {
+      loadVrmModel(cfg.vrmFile);
+      loadVrmaAnimation(cfg.vrmaFile);
+    } else if (cfg.mode === 'live2d') {
+      loadLive2dModel(cfg.live2dFile);
+    } else if (cfg.mode === 'inochi2d') {
+      loadInochi2dModel(cfg.inochiFile);
+    }
+  },
+  updateTrackingV2(data) {
+    if (!data || typeof data !== 'object') return;
+    const smooth = (c, t, f = 0.28) => c + ((t || 0) - c) * f;
+    track.yaw = data.yaw || 0;
+    track.pitch = data.pitch || 0;
+    track.roll = data.roll || 0;
+    track.eyeL = data.eyeL !== undefined ? data.eyeL : 1;
+    track.eyeR = data.eyeR !== undefined ? data.eyeR : 1;
+    track.lookX = smooth(track.lookX, data.lookX, 0.35);
+    track.lookY = smooth(track.lookY, data.lookY, 0.35);
+    track.browL = smooth(track.browL, data.browL, 0.30);
+    track.browR = smooth(track.browR, data.browR, 0.30);
+    track.cheekPuff = smooth(track.cheekPuff, data.cheekPuff, 0.30);
+    track.mouthOpen = data.mouthOpen || 0;
+    track.mA = smooth(track.mA, data.mA, 0.45);
+    track.mI = smooth(track.mI, data.mI, 0.45);
+    track.mU = smooth(track.mU, data.mU, 0.45);
+    track.mE = smooth(track.mE, data.mE, 0.45);
+    track.mO = smooth(track.mO, data.mO, 0.45);
+    track.happy = smooth(track.happy, data.happy, 0.26);
+    track.sad = smooth(track.sad, data.sad, 0.26);
+    track.angry = smooth(track.angry, data.angry, 0.26);
+    track.surprised = smooth(track.surprised, data.surprised, 0.28);
+    track.faceX = data.faceX || 0;
+    track.faceY = data.faceY || 0;
+    track.mic = data.mic || 0;
+    track.faceDetected = !!data.detected;
+    track.mp = !!data.mp;
+    track.vmc = !!data.vmc;
+    track.handL = data.handL || 0;
+    track.handR = data.handR || 0;
+    track.handLX = smooth(track.handLX, data.handLX !== undefined ? data.handLX : 0.25, 0.32);
+    track.handLY = smooth(track.handLY, data.handLY !== undefined ? data.handLY : 0.75, 0.32);
+    track.handRX = smooth(track.handRX, data.handRX !== undefined ? data.handRX : 0.75, 0.32);
+    track.handRY = smooth(track.handRY, data.handRY !== undefined ? data.handRY : 0.75, 0.32);
+    track.curlL = smooth(track.curlL, data.curlL || 0, 0.35);
+    track.curlR = smooth(track.curlR, data.curlR || 0, 0.35);
+    track.gestL = data.gestL || 0;
+    track.gestR = data.gestR || 0;
+    track.waveOsc = data.waveOsc || 0;
+    track.gesture = data.gesture || '';
+    track.bones = data.bones || null;
   },
   updateTracking(yaw, pitch, roll, eyeL, eyeR, mouthOpen, happy, faceX, faceY, mic, detected, handL, handR, waveOsc, sad, angry, surprised) {
     track.yaw = yaw; track.pitch = pitch; track.roll = roll;
@@ -733,6 +1252,7 @@ window.OBS_VTUBER = {
 if (window.__OBS_VTUBER_PENDING_CFG) {
   window.OBS_VTUBER.setConfig(window.__OBS_VTUBER_PENDING_CFG);
 }
+if (zeroCopyAlphaPack) initZeroCopyPacker();
 resizeAll();
 requestAnimationFrame(animate);
 </script>

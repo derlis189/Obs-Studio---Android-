@@ -97,6 +97,7 @@ public final class BrowserSourceManager {
         int surfaceWidth;
         int surfaceHeight;
         volatile boolean surfaceZeroCopy;
+        volatile boolean vtuberAlphaPack;
         volatile boolean capturePending;
         volatile long capturedFrames;
         final BrowserFrameGate frameGate = new BrowserFrameGate();
@@ -137,7 +138,7 @@ public final class BrowserSourceManager {
             this.id = id;
         }
 
-        boolean captureActive() { return id > 0 && (visible || interacting); }
+        boolean captureActive() { return (id > 0 || vtuberAlphaPack) && (visible || interacting); }
 
         void markFrameChanged() {
             frameGate.changed();
@@ -211,24 +212,26 @@ public final class BrowserSourceManager {
         }
 
         boolean wantsZeroCopy() {
-            return id > 0 && !transparent && !interacting && Build.VERSION.SDK_INT >= 29;
+            return Build.VERSION.SDK_INT >= 29 && !interacting && ((id > 0 && !transparent) || (id < 0 && vtuberAlphaPack));
         }
 
         void ensurePresentation(Activity activity) {
             if (interacting || destroyed) return;
             boolean wantZc = wantsZeroCopy();
+            int surfW = (id < 0 && vtuberAlphaPack && wantZc) ? Math.min(2560, width * 2) : width;
+            int surfH = height;
             if (presentation != null && presentation.isShowing() &&
-                    surfaceWidth == width && surfaceHeight == height && surfaceZeroCopy == wantZc) return;
+                    surfaceWidth == surfW && surfaceHeight == surfH && surfaceZeroCopy == wantZc) return;
             releasePresentation();
             try {
                 // Chromium's supported offscreen path: an actual accelerated window
-                // on a private display. For opaque sources (e.g. WebRTC video guests),
-                // use HardwareBuffer zero-copy GPU textures instead of PixelCopy.
+                // on a private display. For opaque sources (e.g. WebRTC video guests) and
+                // alpha-packed VTuber WebGL2, use HardwareBuffer zero-copy GPU textures.
                 ImageReader createdReader = null;
                 boolean actualZc = false;
                 if (wantZc && Build.VERSION.SDK_INT >= 29) {
                     try {
-                        createdReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3,
+                        createdReader = ImageReader.newInstance(surfW, surfH, PixelFormat.RGBA_8888, 3,
                             HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE | HardwareBuffer.USAGE_GPU_COLOR_OUTPUT);
                         actualZc = true;
                     } catch (Throwable ignored) {
@@ -237,7 +240,8 @@ public final class BrowserSourceManager {
                     }
                 }
                 if (createdReader == null) {
-                    createdReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
+                    surfW = width;
+                    createdReader = ImageReader.newInstance(surfW, surfH, PixelFormat.RGBA_8888, 3);
                 }
                 displayReader = createdReader;
                 surfaceZeroCopy = actualZc;
@@ -261,7 +265,11 @@ public final class BrowserSourceManager {
                                 nextCaptureAtMs = now + baseInterval;
                                 boolean accepted = false;
                                 try {
-                                    accepted = NativeBridge.pushBrowserHardwareBuffer(id, hb, image.getWidth(), image.getHeight());
+                                    if (id < 0 && vtuberAlphaPack) {
+                                        accepted = NativeBridge.pushVtuberHardwareBuffer(-id, hb, width, height, true);
+                                    } else {
+                                        accepted = NativeBridge.pushBrowserHardwareBuffer(id, hb, image.getWidth(), image.getHeight());
+                                    }
                                 } finally {
                                     hb.close();
                                 }
@@ -269,8 +277,8 @@ public final class BrowserSourceManager {
                                     ++capturedFrames;
                                     if (capturedFrames == 1 || now - lastCaptureReportMs >= 10000) {
                                         lastCaptureReportMs = now;
-                                        Log.i(TAG, "Zero-copy GPU browser frames id=" + id + " frames=" + capturedFrames
-                                            + " cap=" + Math.min(effFps, sThermalFpsCap));
+                                        Log.i(TAG, "Zero-copy GPU " + (id < 0 ? "vtuber" : "browser") + " frames id=" + id
+                                            + " frames=" + capturedFrames + " cap=" + Math.min(effFps, sThermalFpsCap));
                                     }
                                     return;
                                 }
@@ -282,7 +290,7 @@ public final class BrowserSourceManager {
                     }
                 }, captureHandlerFor(id));
                 DisplayManager manager = (DisplayManager) activity.getSystemService(Context.DISPLAY_SERVICE);
-                virtualDisplay = manager.createVirtualDisplay("OBS Browser " + id, width, height,
+                virtualDisplay = manager.createVirtualDisplay("OBS Browser " + id, surfW, surfH,
                     activity.getResources().getDisplayMetrics().densityDpi, displayReader.getSurface(),
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY |
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION);
@@ -301,13 +309,13 @@ public final class BrowserSourceManager {
                 presentationRoot = new FrameLayout(presentation.getContext());
                 ViewGroup parent = (ViewGroup) webView.getParent();
                 if (parent != null) parent.removeView(webView);
-                presentationRoot.addView(webView, new FrameLayout.LayoutParams(width, height));
+                presentationRoot.addView(webView, new FrameLayout.LayoutParams(surfW, surfH));
                 presentation.setContentView(presentationRoot);
                 presentation.show();
-                window.setLayout(width, height);
-                surfaceWidth = width;
-                surfaceHeight = height;
-                Log.i(TAG, "Hardware browser window ready id=" + id + " " + width + "x" + height + " zeroCopy=" + actualZc);
+                window.setLayout(surfW, surfH);
+                surfaceWidth = surfW;
+                surfaceHeight = surfH;
+                Log.i(TAG, "Hardware browser window ready id=" + id + " " + surfW + "x" + surfH + " zeroCopy=" + actualZc);
                 if (!actualZc) frameGate.changed();
             } catch (RuntimeException failure) {
                 releasePresentation();
@@ -325,14 +333,16 @@ public final class BrowserSourceManager {
 
         void layoutOffscreen() {
             if (webView == null || interacting) return;
+            int lw = (id < 0 && vtuberAlphaPack && surfaceZeroCopy) ? Math.min(2560, width * 2) : width;
+            int lh = height;
             ViewGroup.LayoutParams lp = webView.getLayoutParams();
-            if (lp == null || lp.width != width || lp.height != height) {
-                webView.setLayoutParams(new FrameLayout.LayoutParams(width, height));
+            if (lp == null || lp.width != lw || lp.height != lh) {
+                webView.setLayoutParams(new FrameLayout.LayoutParams(lw, lh));
             }
-            int wSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY);
-            int hSpec = View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY);
+            int wSpec = View.MeasureSpec.makeMeasureSpec(lw, View.MeasureSpec.EXACTLY);
+            int hSpec = View.MeasureSpec.makeMeasureSpec(lh, View.MeasureSpec.EXACTLY);
             webView.measure(wSpec, hSpec);
-            webView.layout(0, 0, width, height);
+            webView.layout(0, 0, lw, lh);
         }
 
         void injectCustomCss() {
@@ -615,13 +625,26 @@ public final class BrowserSourceManager {
     }
 
     // Negative IDs reserve an independent namespace for the local VTuber renderer.
-    static void createVtuber(long id, String url, int width, int height, int fps,
+    static void createVtuber(long id, String url, int width, int height, int fps, boolean zeroCopyAlphaPack,
                              java.util.function.Consumer<WebView> ready) {
-        createOrUpdate(-id, url, width, height, fps, true, "", true, true, false);
+        sMain.post(() -> {
+            BrowserInstance existing = sInstances.get(-id);
+            if (existing != null) existing.vtuberAlphaPack = zeroCopyAlphaPack;
+        });
+        createOrUpdate(-id, url, width, height, fps, !zeroCopyAlphaPack, "", true, true, false);
         sMain.post(() -> {
             BrowserInstance inst = sInstances.get(-id);
             if (inst == null || inst.destroyed) return;
+            boolean changed = inst.vtuberAlphaPack != zeroCopyAlphaPack;
+            inst.vtuberAlphaPack = zeroCopyAlphaPack;
             inst.onPageReady = () -> ready.accept(inst.webView);
+            if (changed) {
+                QtObsActivity activity = QtObsActivity.getActiveInstance();
+                if (activity != null && !activity.isFinishing()) {
+                    inst.ensurePresentation(activity);
+                    inst.layoutOffscreen();
+                }
+            }
         });
     }
 

@@ -26,6 +26,9 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -38,20 +41,39 @@ public final class FaceTrackerManager {
         public volatile float roll;     // -40..+40 deg
         public volatile float eyeL = 1.0f; // 0=closed, 1=open
         public volatile float eyeR = 1.0f;
+        public volatile float lookX;       // -1..+1 eye gaze horizontal
+        public volatile float lookY;       // -1..+1 eye gaze vertical
+        public volatile float browL;       // -1..+1 left eyebrow
+        public volatile float browR;       // -1..+1 right eyebrow
+        public volatile float cheekPuff;   // 0..1
         public volatile float mouthOpen;   // 0..1
+        public volatile float mouthA, mouthI, mouthU, mouthE, mouthO; // 5-vowel visemes
         public volatile float happy;       // 0..1
-        public volatile float sad;         // 0..1, available from VMC blend shapes
-        public volatile float angry;       // 0..1, available from VMC blend shapes
-        public volatile float surprised;   // 0..1, available from VMC blend shapes
+        public volatile float sad;         // 0..1
+        public volatile float angry;       // 0..1
+        public volatile float surprised;   // 0..1
         public volatile float faceX;       // -1..1
         public volatile float faceY;       // -1..1
         public volatile float handL;       // 0..1 left hand raised / waving
         public volatile float handR;       // 0..1 right hand raised / waving
+        public volatile float handLX = 0.25f, handLY = 0.75f;
+        public volatile float handRX = 0.75f, handRY = 0.75f;
+        public volatile float fingerCurlL, fingerCurlR; // 0=open, 1=fist
+        public volatile int handGestureL, handGestureR; // 0=none,1=open,2=fist,3=peace,4=point
         public volatile float waveOsc;     // -1..+1 live hand wave oscillation
+        public volatile String activeGesture = "";
+        public volatile long activeGestureUntilMs = 0L;
         public volatile boolean faceDetected;
         public volatile long lastUpdateMs;
+        public volatile boolean mpFaceActive;
+        public volatile long lastMpFaceMs;
+        public volatile boolean mpHandsActive;
+        public volatile long lastMpHandsMs;
         public volatile boolean vmcActive;
         public volatile long lastVmcMs;
+        // Full 52 ARKit / VMC blendshapes & full humanoid VMC bone quaternions [qx, qy, qz, qw]
+        public final ConcurrentHashMap<String, Float> blendshapes = new ConcurrentHashMap<>();
+        public final ConcurrentHashMap<String, float[]> vmcBones = new ConcurrentHashMap<>();
     }
 
     private static final TrackingState sState = new TrackingState();
@@ -215,8 +237,9 @@ public final class FaceTrackerManager {
     public static void onCamera2Faces(Face[] faces, Rect activeArray, int displayRelRot, boolean front) {
         if (faces == null || faces.length == 0 || activeArray == null) return;
         long now = System.currentTimeMillis();
-        // If external VMC/OSC tracker is actively streaming within last 1.5s, prefer VMC precision
+        // Prefer external VMC/OSC or on-device MediaPipe 52-blendshape precision when active
         if (sState.vmcActive && (now - sState.lastVmcMs) < 1500L) return;
+        if (sState.mpFaceActive && (now - sState.lastMpFaceMs) < 900L) return;
 
         Face best = faces[0];
         int bestArea = 0;
@@ -290,8 +313,12 @@ public final class FaceTrackerManager {
 
     public static void onFrontCameraYuv(Image img, boolean front) {
         if (img == null) return;
+        // Run MediaPipe Face Landmarker (52 ARKit blendshapes) + Hand Landmarker asynchronously first
+        boolean mpSubmitted = MediaPipeVtuberTracker.submitYuvFrame(img, front, sState);
         long now = System.currentTimeMillis();
-        if (now - sLastHandAnalyzeMs < 60L) return; // ~16 Hz hand-wave tracker (<0.25 ms CPU)
+        // Skip legacy skin-motion heuristic when MediaPipe Hand Landmarker is actively tracking
+        if (mpSubmitted && sState.mpHandsActive && (now - sState.lastMpHandsMs) < 1200L) return;
+        if (now - sLastHandAnalyzeMs < 60L) return; // ~16 Hz fallback hand-wave tracker (<0.25 ms CPU)
         sLastHandAnalyzeMs = now;
         try {
             Image.Plane[] planes = img.getPlanes();
@@ -505,15 +532,21 @@ public final class FaceTrackerManager {
             StringBuilder name = new StringBuilder();
             p = readPaddedString(data, p, end, name);
             if (p + 4 <= end) {
-                float val = ByteBuffer.wrap(data, p, 4).order(ByteOrder.BIG_ENDIAN).getFloat();
-                String k = name.toString().toLowerCase();
-                if (k.equals("a") || k.equals("aa") || k.equals("jawopen")) sState.mouthOpen = Math.max(0f, Math.min(1f, val));
-                else if (k.equals("blink_l") || k.equals("blinkleft") || k.equals("eyeblinkleft")) sState.eyeL = 1f - Math.max(0f, Math.min(1f, val));
-                else if (k.equals("blink_r") || k.equals("blinkright") || k.equals("eyeblinkright")) sState.eyeR = 1f - Math.max(0f, Math.min(1f, val));
-                else if (k.equals("joy") || k.equals("happy") || k.equals("fun")) sState.happy = Math.max(0f, Math.min(1f, val));
-                else if (k.equals("sorrow") || k.equals("sad") || k.equals("sadness")) sState.sad = Math.max(0f, Math.min(1f, val));
-                else if (k.equals("angry") || k.equals("anger")) sState.angry = Math.max(0f, Math.min(1f, val));
-                else if (k.equals("surprised") || k.equals("surprise")) sState.surprised = Math.max(0f, Math.min(1f, val));
+                float val = Math.max(0f, Math.min(1f, ByteBuffer.wrap(data, p, 4).order(ByteOrder.BIG_ENDIAN).getFloat()));
+                String rawName = name.toString();
+                sState.blendshapes.put(rawName, val);
+                String k = rawName.toLowerCase(Locale.US);
+                if (k.equals("a") || k.equals("aa") || k.equals("jawopen")) { sState.mouthOpen = val; sState.mouthA = val; }
+                else if (k.equals("i") || k.equals("ih")) sState.mouthI = val;
+                else if (k.equals("u") || k.equals("ou")) sState.mouthU = val;
+                else if (k.equals("e") || k.equals("ee")) sState.mouthE = val;
+                else if (k.equals("o") || k.equals("oh")) sState.mouthO = val;
+                else if (k.equals("blink_l") || k.equals("blinkleft") || k.equals("eyeblinkleft")) sState.eyeL = 1f - val;
+                else if (k.equals("blink_r") || k.equals("blinkright") || k.equals("eyeblinkright")) sState.eyeR = 1f - val;
+                else if (k.equals("joy") || k.equals("happy") || k.equals("fun")) sState.happy = val;
+                else if (k.equals("sorrow") || k.equals("sad") || k.equals("sadness")) sState.sad = val;
+                else if (k.equals("angry") || k.equals("anger")) sState.angry = val;
+                else if (k.equals("surprised") || k.equals("surprise")) sState.surprised = val;
                 sState.vmcActive = true;
                 sState.faceDetected = true;
                 sState.lastVmcMs = System.currentTimeMillis();
@@ -521,27 +554,111 @@ public final class FaceTrackerManager {
         } else if ("/VMC/Ext/Bone/Pos".equals(address) && tagStr.startsWith(",sfffffff")) {
             StringBuilder bone = new StringBuilder();
             p = readPaddedString(data, p, end, bone);
-            if ("Head".equalsIgnoreCase(bone.toString()) && p + 28 <= end) {
+            if (p + 28 <= end) {
                 ByteBuffer bb = ByteBuffer.wrap(data, p, 28).order(ByteOrder.BIG_ENDIAN);
                 bb.getFloat(); bb.getFloat(); bb.getFloat(); // px, py, pz
                 float qx = bb.getFloat(), qy = bb.getFloat(), qz = bb.getFloat(), qw = bb.getFloat();
-                // Quaternion to Euler degrees
-                double sinp = 2.0 * (qw * qx + qy * qz);
-                double cosp = 1.0 - 2.0 * (qx * qx + qy * qy);
-                double pitchRad = Math.atan2(sinp, cosp);
-                double siny = 2.0 * (qw * qy - qz * qx);
-                double yawRad = Math.abs(siny) >= 1.0 ? Math.copySign(Math.PI / 2.0, siny) : Math.asin(siny);
-                double sinr = 2.0 * (qw * qz + qx * qy);
-                double cosr = 1.0 - 2.0 * (qy * qy + qz * qz);
-                double rollRad = Math.atan2(sinr, cosr);
-                sState.pitch = (float) Math.toDegrees(pitchRad);
-                sState.yaw = (float) Math.toDegrees(yawRad);
-                sState.roll = (float) Math.toDegrees(rollRad);
+                String boneName = bone.toString();
+                // Store full humanoid skeleton bone quaternion for VRM/IK consumers
+                if (!boneName.isEmpty() && sState.vmcBones.size() < 64) {
+                    sState.vmcBones.put(boneName, new float[]{qx, qy, qz, qw});
+                }
+                if ("Head".equalsIgnoreCase(boneName)) {
+                    double sinp = 2.0 * (qw * qx + qy * qz);
+                    double cosp = 1.0 - 2.0 * (qx * qx + qy * qy);
+                    double pitchRad = Math.atan2(sinp, cosp);
+                    double siny = 2.0 * (qw * qy - qz * qx);
+                    double yawRad = Math.abs(siny) >= 1.0 ? Math.copySign(Math.PI / 2.0, siny) : Math.asin(siny);
+                    double sinr = 2.0 * (qw * qz + qx * qy);
+                    double cosr = 1.0 - 2.0 * (qy * qy + qz * qz);
+                    double rollRad = Math.atan2(sinr, cosr);
+                    sState.pitch = (float) Math.toDegrees(pitchRad);
+                    sState.yaw = (float) Math.toDegrees(yawRad);
+                    sState.roll = (float) Math.toDegrees(rollRad);
+                }
                 sState.vmcActive = true;
                 sState.faceDetected = true;
                 sState.lastVmcMs = System.currentTimeMillis();
             }
         }
+    }
+
+    public static void triggerGesture(String gestureId, long durationMs) {
+        if (gestureId == null || "reset".equalsIgnoreCase(gestureId)) {
+            sState.activeGesture = "";
+            sState.activeGestureUntilMs = 0L;
+            return;
+        }
+        sState.activeGesture = gestureId.toLowerCase(Locale.US);
+        sState.activeGestureUntilMs = System.currentTimeMillis() + Math.max(500L, durationMs);
+    }
+
+    public static void injectVtsParameter(String paramId, float value) {
+        long now = System.currentTimeMillis();
+        switch (paramId) {
+            case "FaceAngleX": sState.yaw = Math.max(-45f, Math.min(45f, value)); break;
+            case "FaceAngleY": sState.pitch = Math.max(-35f, Math.min(35f, value)); break;
+            case "FaceAngleZ": sState.roll = Math.max(-40f, Math.min(40f, value)); break;
+            case "MouthOpen": sState.mouthOpen = Math.max(0f, Math.min(1f, value)); sState.mouthA = sState.mouthOpen; break;
+            case "MouthSmile": sState.happy = Math.max(0f, Math.min(1f, value)); break;
+            case "EyeOpenLeft": sState.eyeL = Math.max(0f, Math.min(1f, value)); break;
+            case "EyeOpenRight": sState.eyeR = Math.max(0f, Math.min(1f, value)); break;
+            case "Brows": sState.browL = sState.browR = Math.max(-1f, Math.min(1f, value)); break;
+            case "CheekPuff": sState.cheekPuff = Math.max(0f, Math.min(1f, value)); break;
+            case "HandLeft": sState.handL = Math.max(0f, Math.min(1f, value)); break;
+            case "HandRight": sState.handR = Math.max(0f, Math.min(1f, value)); break;
+            default:
+                sState.blendshapes.put(paramId, Math.max(0f, Math.min(1f, value)));
+                break;
+        }
+        sState.vmcActive = true;
+        sState.faceDetected = true;
+        sState.lastVmcMs = now;
+    }
+
+    public static String buildWebTrackingPayloadJson(float mic) {
+        TrackingState ts = sState;
+        long now = System.currentTimeMillis();
+        boolean vmcFresh = ts.vmcActive && (now - ts.lastVmcMs) < 1500L;
+        boolean mpFresh = ts.mpFaceActive && (now - ts.lastMpFaceMs) < 1200L;
+        boolean exprFresh = vmcFresh || mpFresh;
+        String gesture = (ts.activeGestureUntilMs > now && ts.activeGesture != null) ? ts.activeGesture : "";
+
+        StringBuilder sb = new StringBuilder(512);
+        sb.append(String.format(Locale.US,
+            "{\"yaw\":%.2f,\"pitch\":%.2f,\"roll\":%.2f,\"eyeL\":%.3f,\"eyeR\":%.3f,"
+            + "\"lookX\":%.3f,\"lookY\":%.3f,\"browL\":%.3f,\"browR\":%.3f,\"cheekPuff\":%.3f,"
+            + "\"mouthOpen\":%.3f,\"mA\":%.3f,\"mI\":%.3f,\"mU\":%.3f,\"mE\":%.3f,\"mO\":%.3f,"
+            + "\"happy\":%.3f,\"sad\":%.3f,\"angry\":%.3f,\"surprised\":%.3f,"
+            + "\"faceX\":%.3f,\"faceY\":%.3f,\"mic\":%.4f,\"detected\":%s,\"mp\":%s,\"vmc\":%s,"
+            + "\"handL\":%.3f,\"handR\":%.3f,\"handLX\":%.3f,\"handLY\":%.3f,\"handRX\":%.3f,\"handRY\":%.3f,"
+            + "\"curlL\":%.3f,\"curlR\":%.3f,\"gestL\":%d,\"gestR\":%d,\"waveOsc\":%.3f,\"gesture\":\"%s\"",
+            ts.yaw, ts.pitch, ts.roll, ts.eyeL, ts.eyeR,
+            exprFresh ? ts.lookX : 0f, exprFresh ? ts.lookY : 0f,
+            exprFresh ? ts.browL : 0f, exprFresh ? ts.browR : 0f, exprFresh ? ts.cheekPuff : 0f,
+            ts.mouthOpen, exprFresh ? ts.mouthA : ts.mouthOpen, exprFresh ? ts.mouthI : 0f,
+            exprFresh ? ts.mouthU : 0f, exprFresh ? ts.mouthE : 0f, exprFresh ? ts.mouthO : 0f,
+            exprFresh ? ts.happy : 0f, exprFresh ? ts.sad : 0f, exprFresh ? ts.angry : 0f, exprFresh ? ts.surprised : 0f,
+            ts.faceX, ts.faceY, mic, ts.faceDetected ? "true" : "false",
+            mpFresh ? "true" : "false", vmcFresh ? "true" : "false",
+            ts.handL, ts.handR, ts.handLX, ts.handLY, ts.handRX, ts.handRY,
+            ts.fingerCurlL, ts.fingerCurlR, ts.handGestureL, ts.handGestureR, ts.waveOsc, gesture));
+
+        if (vmcFresh && !ts.vmcBones.isEmpty()) {
+            sb.append(",\"bones\":{");
+            boolean first = true;
+            for (Map.Entry<String, float[]> e : ts.vmcBones.entrySet()) {
+                float[] q = e.getValue();
+                if (q == null || q.length < 4) continue;
+                if (!first) sb.append(',');
+                first = false;
+                sb.append('"').append(e.getKey().replace("\"", "")).append("\":[")
+                  .append(String.format(Locale.US, "%.4f,%.4f,%.4f,%.4f", q[0], q[1], q[2], q[3])).append(']');
+            }
+            sb.append('}');
+        }
+        sb.append('}');
+        return sb.toString();
     }
 
     private FaceTrackerManager() {}
