@@ -70,6 +70,13 @@ const track = {
 let bounceY = 0, bounceVel = 0, wasTalking = false;
 let blinkTimer = 0, blinkDur = 0;
 let vrmWaveL = 0, vrmWaveR = 0, live2dWaveBlend = 0;
+// Per-frame dt-independent continuous damping for silky-smooth 30/60 FPS avatar motion
+const sm = {
+  yaw: 0, pitch: 0, roll: 0,
+  bodyYaw: 0, bodyPitch: 0, bodyRoll: 0,
+  eyeL: 1, eyeR: 1, lookX: 0, lookY: 0,
+  mouth: 0, mA: 0, mI: 0, mU: 0, mE: 0, mO: 0
+};
 
 // Three.js / VRM / VRMA state
 let renderer = null, scene = null, camera = null, currentVrm = null, demoHead = null;
@@ -590,9 +597,9 @@ function applyLive2dParams(model) {
   const danceX = actGest === 'dance' ? Math.sin(t * 3.8) * 14 : 0;
   const danceZ = actGest === 'dance' ? Math.sin(t * 3.8) * 11 : 0;
   const thinkRoll = actGest === 'think' ? -14 : 0;
-  const yaw = clamp(track.yaw * sens + danceX, -30, 30);
-  const pitch = clamp(track.pitch * sens + (actGest === 'think' ? 8 : 0), -30, 30);
-  const roll = clamp(track.roll * sens + live2dWaveBlend * 7.0 + danceZ + thinkRoll, -30, 30);
+  const yaw = clamp(sm.yaw * sens + danceX, -30, 30);
+  const pitch = clamp(sm.pitch * sens + (actGest === 'think' ? 8 : 0), -30, 30);
+  const roll = clamp(sm.roll * sens + live2dWaveBlend * 7.0 + danceZ + thinkRoll, -30, 30);
   const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.75, actGest === 'happy' ? 1 : 0), 0, 1);
   const sad = clamp(track.sad || 0, 0, 1);
   const angry = clamp(track.angry || 0, 0, 1);
@@ -1013,8 +1020,27 @@ function animate(now) {
   const micMouth = cfg.lipSync ? Math.min(1, track.mic / Math.max(0.02, cfg.voiceThreshold * 3.2)) : 0;
   const mouthVal = Math.max(micMouth, track.mouthOpen);
 
+  // Frame-rate-independent exponential damping (interpolates 15-20Hz tracker smoothly at 30-60 FPS)
+  const damp = (cur, tgt, speed) => cur + (tgt - cur) * (1 - Math.exp(-dt * speed));
+  sm.yaw = damp(sm.yaw, track.yaw, 9.5);
+  sm.pitch = damp(sm.pitch, track.pitch, 9.5);
+  sm.roll = damp(sm.roll, track.roll, 8.5);
+  sm.bodyYaw = damp(sm.bodyYaw, sm.yaw, 5.5);
+  sm.bodyPitch = damp(sm.bodyPitch, sm.pitch, 5.5);
+  sm.bodyRoll = damp(sm.bodyRoll, sm.roll, 5.0);
+  sm.eyeL = damp(sm.eyeL, track.eyeL, 20.0);
+  sm.eyeR = damp(sm.eyeR, track.eyeR, 20.0);
+  sm.lookX = damp(sm.lookX, track.lookX, 14.0);
+  sm.lookY = damp(sm.lookY, track.lookY, 14.0);
+  sm.mouth = damp(sm.mouth, mouthVal, 18.0);
+  sm.mA = damp(sm.mA, Math.max(track.mA, micMouth * 0.85), 18.0);
+  sm.mI = damp(sm.mI, track.mI, 16.0);
+  sm.mU = damp(sm.mU, track.mU, 16.0);
+  sm.mE = damp(sm.mE, track.mE, 16.0);
+  sm.mO = damp(sm.mO, track.mO, 16.0);
+
   curAutoBlink = autoBlink;
-  curMouthVal = mouthVal;
+  curMouthVal = sm.mouth;
 
   let activeGl = null;
   let activeCanvas = c2d;
@@ -1038,12 +1064,15 @@ function animate(now) {
     const sens = Math.max(0.4, Math.min(2.5, Number(cfg.headSensitivity) || 1.0));
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const lerp = (a, b, f) => a + (b - a) * f;
-    const yawDeg = clamp(track.yaw * sens, -40, 40);
-    const pitchDeg = clamp(track.pitch * sens, -30, 30);
-    const rollDeg = clamp(track.roll * sens, -35, 35);
+    const yawDeg = clamp(sm.yaw * sens, -38, 38);
+    const pitchDeg = clamp(sm.pitch * sens, -28, 28);
+    const rollDeg = clamp(sm.roll * sens, -32, 32);
     const yawR = (yawDeg * Math.PI) / 180;
     const pitchR = (pitchDeg * Math.PI) / 180;
     const rollR = (rollDeg * Math.PI) / 180;
+    const bYawR = (clamp(sm.bodyYaw * sens, -38, 38) * Math.PI) / 180;
+    const bPitchR = (clamp(sm.bodyPitch * sens, -28, 28) * Math.PI) / 180;
+    const bRollR = (clamp(sm.bodyRoll * sens, -32, 32) * Math.PI) / 180;
 
     if (currentVrm) {
       const t = clock.elapsedTime;
@@ -1159,10 +1188,10 @@ function animate(now) {
 
         const danceRoll = actGest === 'dance' ? Math.sin(t * 3.8) * 0.14 : 0;
         const thinkTilt = actGest === 'think' ? -0.18 : 0;
-        if (chest) chest.rotation.set(breath * 0.022, sway * 0.018 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), danceRoll * 0.5);
-        if (head) head.rotation.set(pitchR * 0.65 + (actGest === 'think' ? 0.12 : 0), yawR * 0.65, -rollR * 0.65 + (vrmWaveR - vrmWaveL) * 0.10 + thinkTilt);
-        if (neck) neck.rotation.set(pitchR * 0.25, yawR * 0.25, -rollR * 0.25);
-        if (spine) spine.rotation.set(pitchR * 0.10 + breath * 0.012, yawR * 0.10 + sway * 0.015, -rollR * 0.08 + danceRoll * 0.4);
+        if (chest) chest.rotation.set(breath * 0.022 + bPitchR * 0.08, sway * 0.018 + bYawR * 0.10 + (actGest === 'dance' ? Math.sin(t * 3.8) * 0.12 : 0), -bRollR * 0.08 + danceRoll * 0.5);
+        if (head) head.rotation.set(pitchR * 0.62 + (actGest === 'think' ? 0.12 : 0), yawR * 0.62, -rollR * 0.62 + (vrmWaveR - vrmWaveL) * 0.08 + thinkTilt);
+        if (neck) neck.rotation.set(bPitchR * 0.24, bYawR * 0.24, -bRollR * 0.24);
+        if (spine) spine.rotation.set(bPitchR * 0.08 + breath * 0.012, bYawR * 0.08 + sway * 0.015, -bRollR * 0.06 + danceRoll * 0.4);
       }
 
       currentVrm.scene.position.x = 0;
@@ -1173,21 +1202,21 @@ function animate(now) {
         const maxWave = Math.max(vrmWaveL, vrmWaveR);
         const gestHappy = (actGest === 'happy' || actGest === 'peace' || actGest === 'clap') ? 0.95 : 0;
         if (track.mp || track.vmc) {
-          em.setValue('aa', Math.max(track.mA, micMouth * 0.85));
-          em.setValue('ih', track.mI);
-          em.setValue('ou', track.mU);
-          em.setValue('ee', track.mE);
-          em.setValue('oh', track.mO);
-          em.setValue('lookLeft', clamp(-track.lookX, 0, 1));
-          em.setValue('lookRight', clamp(track.lookX, 0, 1));
-          em.setValue('lookUp', clamp(track.lookY, 0, 1));
-          em.setValue('lookDown', clamp(-track.lookY, 0, 1));
+          em.setValue('aa', sm.mA);
+          em.setValue('ih', sm.mI);
+          em.setValue('ou', sm.mU);
+          em.setValue('ee', sm.mE);
+          em.setValue('oh', sm.mO);
+          em.setValue('lookLeft', clamp(-sm.lookX, 0, 1));
+          em.setValue('lookRight', clamp(sm.lookX, 0, 1));
+          em.setValue('lookUp', clamp(sm.lookY, 0, 1));
+          em.setValue('lookDown', clamp(-sm.lookY, 0, 1));
         } else {
-          em.setValue('aa', mouthVal);
+          em.setValue('aa', sm.mouth);
           em.setValue('ih', 0); em.setValue('ou', 0); em.setValue('ee', 0); em.setValue('oh', 0);
         }
-        em.setValue('blinkLeft', autoBlink ? 1 : clamp(1 - track.eyeL, 0, 1));
-        em.setValue('blinkRight', autoBlink ? 1 : clamp(1 - track.eyeR, 0, 1));
+        em.setValue('blinkLeft', autoBlink ? 1 : clamp(1 - sm.eyeL, 0, 1));
+        em.setValue('blinkRight', autoBlink ? 1 : clamp(1 - sm.eyeR, 0, 1));
         em.setValue('happy', clamp(Math.max(track.happy, maxWave * 0.55, gestHappy), 0, 1));
         em.setValue('sad', clamp(track.sad || 0, 0, 1));
         em.setValue('angry', clamp(track.angry || 0, 0, 1));

@@ -393,10 +393,10 @@ final class MediaPipeVtuberTracker {
             }
         }
 
-        // Smooth ARKit -> high-level tracking channels
+        // Smooth ARKit -> high-level tracking channels (mirrored selfie orientation)
         st.eyeL = 1f - clamp01(blinkL * 1.15f);
         st.eyeR = 1f - clamp01(blinkR * 1.15f);
-        st.lookX = Math.max(-1f, Math.min(1f, ((lookOutL - lookInL) + (lookInR - lookOutR)) * 0.85f));
+        st.lookX = Math.max(-1f, Math.min(1f, ((lookInL - lookOutL) + (lookOutR - lookInR)) * 0.85f));
         st.lookY = Math.max(-1f, Math.min(1f, ((lookUpL + lookUpR) - (lookDownL + lookDownR)) * 0.75f));
 
         // 5-vowel viseme decomposition from ARKit mouth blendshapes (Kalidokit-inspired)
@@ -431,17 +431,18 @@ final class MediaPipeVtuberTracker {
                 if (r22 > 0.25) {
                     double sy = Math.sqrt(r00 * r00 + r10 * r10);
                     double pitchDeg = Math.toDegrees(Math.atan2(-r21, r22));
-                    double yawDeg = Math.toDegrees(Math.atan2(-r20, Math.max(1e-4, sy)));
-                    double rollDeg = Math.toDegrees(Math.atan2(-r10, r00));
+                    // Invert yaw & roll to match mirrored selfie view on VRM/Live2D/Inochi2D
+                    double yawDeg = Math.toDegrees(Math.atan2(r20, Math.max(1e-4, sy)));
+                    double rollDeg = Math.toDegrees(Math.atan2(r10, r00));
                     if (Math.abs(yawDeg) < 60.0 && Math.abs(pitchDeg) < 50.0 && Math.abs(rollDeg) < 55.0) {
                         float rawYaw = Math.max(-35f, Math.min(35f, (float) yawDeg));
                         float rawPitch = Math.max(-25f, Math.min(25f, (float) pitchDeg));
                         float rawRoll = Math.max(-30f, Math.min(30f, (float) rollDeg));
-                        // Gentle exponential smoothing for rock-solid head tracking
-                        float a = 0.28f;
-                        st.yaw = st.yaw + (rawYaw - st.yaw) * a;
-                        st.pitch = st.pitch + (rawPitch - st.pitch) * a;
-                        st.roll = st.roll + (rawRoll - st.roll) * a;
+                        // Micro-deadzone + responsive EMA; per-frame 60 FPS damping happens in WebGL
+                        float a = 0.34f;
+                        if (Math.abs(rawYaw - st.yaw) > 0.4f) st.yaw = st.yaw + (rawYaw - st.yaw) * a;
+                        if (Math.abs(rawPitch - st.pitch) > 0.4f) st.pitch = st.pitch + (rawPitch - st.pitch) * a;
+                        if (Math.abs(rawRoll - st.roll) > 0.4f) st.roll = st.roll + (rawRoll - st.roll) * a;
                     }
                 }
             }
