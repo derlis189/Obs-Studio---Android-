@@ -250,8 +250,8 @@ void blit_vtuber_ahb(VtuberHwState &hw, AHardwareBuffer *ahb, int w, int h, bool
     glActiveTexture(GL_TEXTURE0);
     glGetIntegerv(GL_TEXTURE_BINDING_EXTERNAL_OES, &prev_oes);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, hw.oes_tex);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     g_vt_oes.image_target_tex2d(GL_TEXTURE_EXTERNAL_OES, img);
@@ -678,7 +678,7 @@ void vtuber_set_visible_jni(void *data, jboolean visible)
     if (detach) jvm->DetachCurrentThread();
 }
 
-void vtuber_video_render(void *data, gs_effect_t *)
+void vtuber_video_render(void *data, gs_effect_t *effect)
 {
     auto *holder = static_cast<std::shared_ptr<VtuberInstance> *>(data);
     if (!holder || !*holder) return;
@@ -699,12 +699,17 @@ void vtuber_video_render(void *data, gs_effect_t *)
             blit_vtuber_ahb(inst->hw, ahb, w, h, sbs, inst->id);
             AHardwareBuffer_release(ahb);
         }
-        if (inst->hw.obs_tex) {
-            gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+        if (inst->hw.obs_tex && inst->hw.tex_w > 0 && inst->hw.tex_h > 0) {
+            gs_effect_t *eff = effect ? effect : obs_get_base_effect(OBS_EFFECT_DEFAULT);
+            const bool linear_srgb = gs_get_linear_srgb();
             const bool prev_srgb = gs_framebuffer_srgb_enabled();
-            gs_enable_framebuffer_srgb(true);
-            gs_effect_set_texture_srgb(gs_effect_get_param_by_name(effect, "image"), inst->hw.obs_tex);
-            while (gs_effect_loop(effect, "Draw")) {
+            gs_enable_framebuffer_srgb(linear_srgb);
+            gs_eparam_t *param = gs_effect_get_param_by_name(eff, "image");
+            if (linear_srgb)
+                gs_effect_set_texture_srgb(param, inst->hw.obs_tex);
+            else
+                gs_effect_set_texture(param, inst->hw.obs_tex);
+            while (gs_effect_loop(eff, "Draw")) {
                 gs_draw_sprite(inst->hw.obs_tex, 0, inst->hw.tex_w, inst->hw.tex_h);
             }
             gs_enable_framebuffer_srgb(prev_srgb);

@@ -290,8 +290,11 @@ public final class BrowserSourceManager {
                     }
                 }, captureHandlerFor(id));
                 DisplayManager manager = (DisplayManager) activity.getSystemService(Context.DISPLAY_SERVICE);
+                int displayDpi = (id < 0)
+                    ? DisplayMetrics.DENSITY_DEFAULT
+                    : activity.getResources().getDisplayMetrics().densityDpi;
                 virtualDisplay = manager.createVirtualDisplay("OBS Browser " + id, surfW, surfH,
-                    activity.getResources().getDisplayMetrics().densityDpi, displayReader.getSurface(),
+                    displayDpi, displayReader.getSurface(),
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY |
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION);
                 if (virtualDisplay == null) throw new IllegalStateException("VirtualDisplay no disponible");
@@ -460,10 +463,13 @@ public final class BrowserSourceManager {
         settings.setAllowFileAccessFromFileURLs(false);
         settings.setAllowUniversalAccessFromFileURLs(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        settings.setUseWideViewPort(true);
+        settings.setUseWideViewPort(inst.id > 0);
         settings.setLoadWithOverviewMode(false);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
+        if (inst.id < 0) {
+            wv.setInitialScale(100);
+        }
         String ua = settings.getUserAgentString();
         if (ua != null) {
             ua = ua.replace("Mobile ", "").replace("; wv", "") + " OBS/31.0";
@@ -570,6 +576,12 @@ public final class BrowserSourceManager {
 
     public static void createOrUpdate(long id, String url, int width, int height, int fps,
                                       boolean transparent, String customCss, boolean visible, boolean pausePageWhenHidden, boolean captureAudio) {
+        createOrUpdateInternal(id, url, width, height, fps, transparent, customCss, visible, pausePageWhenHidden, captureAudio, false, null);
+    }
+
+    private static void createOrUpdateInternal(long id, String url, int width, int height, int fps,
+                                               boolean transparent, String customCss, boolean visible, boolean pausePageWhenHidden,
+                                               boolean captureAudio, boolean vtuberAlphaPack, java.util.function.Consumer<WebView> ready) {
         sMain.post(() -> {
             QtObsActivity activity = QtObsActivity.getActiveInstance();
             if (activity == null || activity.isFinishing()) return;
@@ -582,6 +594,11 @@ public final class BrowserSourceManager {
             inst.width = Math.max(64, Math.min(3840, width));
             inst.height = Math.max(64, Math.min(2160, height));
             inst.fps = Math.max(1, Math.min(60, fps));
+            inst.vtuberAlphaPack = vtuberAlphaPack;
+            if (ready != null) {
+                final BrowserInstance targetInst = inst;
+                inst.onPageReady = () -> ready.accept(targetInst.webView);
+            }
             boolean audioChanged = inst.captureAudio != captureAudio;
             inst.captureAudio = captureAudio;
             inst.transparent = transparent;
@@ -627,25 +644,7 @@ public final class BrowserSourceManager {
     // Negative IDs reserve an independent namespace for the local VTuber renderer.
     static void createVtuber(long id, String url, int width, int height, int fps, boolean zeroCopyAlphaPack,
                              java.util.function.Consumer<WebView> ready) {
-        sMain.post(() -> {
-            BrowserInstance existing = sInstances.get(-id);
-            if (existing != null) existing.vtuberAlphaPack = zeroCopyAlphaPack;
-        });
-        createOrUpdate(-id, url, width, height, fps, !zeroCopyAlphaPack, "", true, true, false);
-        sMain.post(() -> {
-            BrowserInstance inst = sInstances.get(-id);
-            if (inst == null || inst.destroyed) return;
-            boolean changed = inst.vtuberAlphaPack != zeroCopyAlphaPack;
-            inst.vtuberAlphaPack = zeroCopyAlphaPack;
-            inst.onPageReady = () -> ready.accept(inst.webView);
-            if (changed) {
-                QtObsActivity activity = QtObsActivity.getActiveInstance();
-                if (activity != null && !activity.isFinishing()) {
-                    inst.ensurePresentation(activity);
-                    inst.layoutOffscreen();
-                }
-            }
-        });
+        createOrUpdateInternal(-id, url, width, height, fps, !zeroCopyAlphaPack, "", true, true, false, zeroCopyAlphaPack, ready);
     }
 
     public static void setVisible(long id, boolean visible) {
