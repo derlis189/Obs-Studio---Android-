@@ -40,6 +40,9 @@ public final class FaceTrackerManager {
         public volatile float eyeR = 1.0f;
         public volatile float mouthOpen;   // 0..1
         public volatile float happy;       // 0..1
+        public volatile float sad;         // 0..1, available from VMC blend shapes
+        public volatile float angry;       // 0..1, available from VMC blend shapes
+        public volatile float surprised;   // 0..1, available from VMC blend shapes
         public volatile float faceX;       // -1..1
         public volatile float faceY;       // -1..1
         public volatile float handL;       // 0..1 left hand raised / waving
@@ -508,6 +511,9 @@ public final class FaceTrackerManager {
                 else if (k.equals("blink_l") || k.equals("blinkleft") || k.equals("eyeblinkleft")) sState.eyeL = 1f - Math.max(0f, Math.min(1f, val));
                 else if (k.equals("blink_r") || k.equals("blinkright") || k.equals("eyeblinkright")) sState.eyeR = 1f - Math.max(0f, Math.min(1f, val));
                 else if (k.equals("joy") || k.equals("happy") || k.equals("fun")) sState.happy = Math.max(0f, Math.min(1f, val));
+                else if (k.equals("sorrow") || k.equals("sad") || k.equals("sadness")) sState.sad = Math.max(0f, Math.min(1f, val));
+                else if (k.equals("angry") || k.equals("anger")) sState.angry = Math.max(0f, Math.min(1f, val));
+                else if (k.equals("surprised") || k.equals("surprise")) sState.surprised = Math.max(0f, Math.min(1f, val));
                 sState.vmcActive = true;
                 sState.faceDetected = true;
                 sState.lastVmcMs = System.currentTimeMillis();

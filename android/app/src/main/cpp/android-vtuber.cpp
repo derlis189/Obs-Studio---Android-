@@ -34,6 +34,7 @@ struct VtuberInstance {
     int width{720};
     int height{720};
     int fps{30};
+    bool veado_auto_emotion{};
     std::string config_json;
 };
 
@@ -97,6 +98,11 @@ void vtuber_get_defaults(obs_data_t *s)
     obs_data_set_default_string(s, "vt_mode", "png");
     obs_data_set_default_string(s, "veadomini_file", "");
     obs_data_set_default_int(s, "veadomini_state", 0);
+    obs_data_set_default_bool(s, "veadomini_auto_emotion", false);
+    obs_data_set_default_int(s, "veadomini_happy_state", 1);
+    obs_data_set_default_int(s, "veadomini_sad_state", 2);
+    obs_data_set_default_int(s, "veadomini_angry_state", 3);
+    obs_data_set_default_int(s, "veadomini_surprised_state", 4);
     obs_data_set_default_string(s, "png_idle", "");
     obs_data_set_default_string(s, "png_talk", "");
     obs_data_set_default_string(s, "png_blink", "");
@@ -124,7 +130,9 @@ bool on_vt_mode_modified(obs_properties_t *props, obs_property_t *, obs_data_t *
     bool is_l2d = m && std::strcmp(m, "live2d") == 0;
     bool is_vrm = m && std::strcmp(m, "vrm") == 0;
 
-    for (const char *k : {"veadomini_file", "veadomini_state", "png_idle", "png_talk", "png_blink", "png_blink_talk", "png_bounce"}) {
+    for (const char *k : {"veadomini_file", "veadomini_state", "veadomini_auto_emotion", "veadomini_emotion_info", "veadomini_happy_state",
+                          "veadomini_sad_state", "veadomini_angry_state", "veadomini_surprised_state",
+                          "png_idle", "png_talk", "png_blink", "png_blink_talk", "png_bounce"}) {
         if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, is_png);
     }
     for (const char *k : {"live2d_info", "install_cubism", "live2d_file"}) {
@@ -132,6 +140,16 @@ bool on_vt_mode_modified(obs_properties_t *props, obs_property_t *, obs_data_t *
     }
     for (const char *k : {"vrm_info", "vrm_file", "vrm_cam_dist", "vrm_cam_y"}) {
         if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, is_vrm);
+    }
+    return true;
+}
+
+bool on_veado_auto_modified(obs_properties_t *props, obs_property_t *, obs_data_t *s)
+{
+    bool enabled = obs_data_get_bool(s, "veadomini_auto_emotion");
+    for (const char *k : {"veadomini_emotion_info", "veadomini_happy_state", "veadomini_sad_state",
+                          "veadomini_angry_state", "veadomini_surprised_state"}) {
+        if (auto *p = obs_properties_get(props, k)) obs_property_set_visible(p, enabled);
     }
     return true;
 }
@@ -165,6 +183,16 @@ obs_properties_t *vtuber_get_properties(void *data)
 
     obs_properties_add_path(props, "veadomini_file", "Archivo .veadomini (Veadotube Mini)", OBS_PATH_FILE, "Todos los archivos (*);;Veadotube Mini (*.veadomini *.zip)", nullptr);
     obs_properties_add_int(props, "veadomini_state", "Estado / Expresión (.veadomini, 0=principal)", 0, 15, 1);
+    obs_properties_add_bool(props, "veadomini_auto_emotion", "Cambiar estado automáticamente con expresiones VMC");
+    obs_properties_add_text(props, "veadomini_emotion_info",
+        "Las expresiones se reciben por VMC/OSC UDP (puerto 39539). Sin un tracker que envíe alegría, tristeza, enojo o sorpresa, se usa el estado principal seleccionado arriba.",
+        OBS_TEXT_INFO);
+    obs_properties_add_int(props, "veadomini_happy_state", "Estado para alegría (índice .veadomini)", 0, 15, 1);
+    obs_properties_add_int(props, "veadomini_sad_state", "Estado para tristeza (índice .veadomini)", 0, 15, 1);
+    obs_properties_add_int(props, "veadomini_angry_state", "Estado para enojo (índice .veadomini)", 0, 15, 1);
+    obs_properties_add_int(props, "veadomini_surprised_state", "Estado para sorpresa (índice .veadomini)", 0, 15, 1);
+    if (auto *autoEmotion = obs_properties_get(props, "veadomini_auto_emotion"))
+        obs_property_set_modified_callback(autoEmotion, on_veado_auto_modified);
     obs_properties_add_path(props, "png_idle", "PNG Reposo (si no usas .veadomini)", OBS_PATH_FILE, "Todos los archivos (*);;Imágenes (*.png *.webp *.gif)", nullptr);
     obs_properties_add_path(props, "png_talk", "PNG Hablando (boca abierta)", OBS_PATH_FILE, "Todos los archivos (*);;Imágenes (*.png *.webp *.gif)", nullptr);
     obs_properties_add_path(props, "png_blink", "PNG Parpadeo (opcional)", OBS_PATH_FILE, "Todos los archivos (*);;Imágenes (*.png *.webp *.gif)", nullptr);
@@ -201,7 +229,14 @@ obs_properties_t *vtuber_get_properties(void *data)
     if (inst) {
         obs_data_t *tmp = obs_data_create();
         obs_data_set_string(tmp, "vt_mode", inst->mode.c_str());
+        obs_data_set_bool(tmp, "veadomini_auto_emotion", inst->veado_auto_emotion);
         on_vt_mode_modified(props, mode, tmp);
+        on_veado_auto_modified(props, nullptr, tmp);
+        obs_data_release(tmp);
+    } else {
+        obs_data_t *tmp = obs_data_create();
+        obs_data_set_bool(tmp, "veadomini_auto_emotion", false);
+        on_veado_auto_modified(props, nullptr, tmp);
         obs_data_release(tmp);
     }
     return props;
@@ -210,6 +245,7 @@ obs_properties_t *vtuber_get_properties(void *data)
 void build_config_json(VtuberInstance *inst, obs_data_t *s)
 {
     const char *m = obs_data_get_string(s, "vt_mode");
+    inst->veado_auto_emotion = obs_data_get_bool(s, "veadomini_auto_emotion");
     inst->mode = (m && *m) ? m : "png";
     inst->width = int(obs_data_get_int(s, "width"));
     inst->height = int(obs_data_get_int(s, "height"));
@@ -223,6 +259,11 @@ void build_config_json(VtuberInstance *inst, obs_data_t *s)
        << "\"mode\":\"" << json_escape(inst->mode.c_str()) << "\","
        << "\"veadominiFile\":\"" << json_escape(obs_data_get_string(s, "veadomini_file")) << "\","
        << "\"veadoState\":" << obs_data_get_int(s, "veadomini_state") << ","
+       << "\"veadoAutoEmotion\":" << (obs_data_get_bool(s, "veadomini_auto_emotion") ? "true" : "false") << ","
+       << "\"veadoHappyState\":" << obs_data_get_int(s, "veadomini_happy_state") << ","
+       << "\"veadoSadState\":" << obs_data_get_int(s, "veadomini_sad_state") << ","
+       << "\"veadoAngryState\":" << obs_data_get_int(s, "veadomini_angry_state") << ","
+       << "\"veadoSurprisedState\":" << obs_data_get_int(s, "veadomini_surprised_state") << ","
        << "\"pngIdle\":\"" << json_escape(obs_data_get_string(s, "png_idle")) << "\","
        << "\"pngTalk\":\"" << json_escape(obs_data_get_string(s, "png_talk")) << "\","
        << "\"pngBlink\":\"" << json_escape(obs_data_get_string(s, "png_blink")) << "\","

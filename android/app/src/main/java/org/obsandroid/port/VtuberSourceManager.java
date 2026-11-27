@@ -82,6 +82,10 @@ public final class VtuberSourceManager {
         boolean pageReady = false;
         boolean visible = true;
         String pendingConfigJson = "{}";
+        boolean veadoAutoEmotion = false;
+        int veadoHappyState = 1, veadoSadState = 2, veadoAngryState = 3, veadoSurprisedState = 4;
+        int veadoShownState = -1, veadoCandidateState = -1;
+        long veadoCandidateSinceMs = 0;
         final Object webGlBufLock = new Object();
         ByteBuffer webGlRgba;
         int webGlW = 0, webGlH = 0;
@@ -105,11 +109,17 @@ public final class VtuberSourceManager {
                 if (pageReady) {
                     FaceTrackerManager.TrackingState ts = FaceTrackerManager.getState();
                     float mic = NativeBridge.getMicLevel();
+                    long now = System.currentTimeMillis();
+                    boolean vmcExpressionFresh = ts.vmcActive && now - ts.lastVmcMs < 1200;
+                    float happy = vmcExpressionFresh ? ts.happy : 0f;
+                    float sad = vmcExpressionFresh ? ts.sad : 0f;
+                    float angry = vmcExpressionFresh ? ts.angry : 0f;
+                    float surprised = vmcExpressionFresh ? ts.surprised : 0f;
                     String js = String.format(Locale.US,
-                        "if(window.OBS_VTUBER)window.OBS_VTUBER.updateTracking(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%s,%.3f,%.3f,%.3f);",
-                        ts.yaw, ts.pitch, ts.roll, ts.eyeL, ts.eyeR, ts.mouthOpen, ts.happy,
+                        "if(window.OBS_VTUBER)window.OBS_VTUBER.updateTracking(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f);",
+                        ts.yaw, ts.pitch, ts.roll, ts.eyeL, ts.eyeR, ts.mouthOpen, happy,
                         ts.faceX, ts.faceY, mic, ts.faceDetected ? "true" : "false",
-                        ts.handL, ts.handR, ts.waveOsc);
+                        ts.handL, ts.handR, ts.waveOsc, sad, angry, surprised);
                     webView.evaluateJavascript(js + "if(window.OBS_VTUBER)window.OBS_VTUBER.setRenderBudget(" + Math.min(fps, thermalFpsCap) + ");", null);
                 }
                 long delay = Math.max(16L, 1000L / Math.max(1, Math.min(thermalFpsCap, fps)));
@@ -163,7 +173,36 @@ public final class VtuberSourceManager {
                 // Pick active Bitmap (.veadomini state first, then individual PNGs)
                 Bitmap idleB = bmpIdle, talkB = bmpTalk, blinkB = bmpBlink, blinkTalkB = bmpBlinkTalk;
                 if (veadoAvatar != null && !veadoAvatar.states.isEmpty()) {
-                    VeadominiParser.AvatarState st = veadoAvatar.getState(veadoStateIndex);
+                    int selectedState = Math.max(0, Math.min(veadoStateIndex, veadoAvatar.states.size() - 1));
+                    if (veadoAutoEmotion) {
+                        int targetState = veadoStateIndex;
+                        float targetScore = 0.56f;
+                        boolean vmcEmotionFresh = ts.vmcActive && nowMs - ts.lastVmcMs < 1200;
+                        float happy = vmcEmotionFresh ? ts.happy : 0f;
+                        if (happy > targetScore) { targetScore = happy; targetState = veadoHappyState; }
+                        if (vmcEmotionFresh && ts.sad > targetScore) { targetScore = ts.sad; targetState = veadoSadState; }
+                        if (vmcEmotionFresh && ts.angry > targetScore) { targetScore = ts.angry; targetState = veadoAngryState; }
+                        if (vmcEmotionFresh && ts.surprised > targetScore) { targetScore = ts.surprised; targetState = veadoSurprisedState; }
+                        if (targetState < 0 || targetState >= veadoAvatar.states.size()) targetState = veadoStateIndex;
+                        long now = System.currentTimeMillis();
+                        if (targetState != veadoShownState) {
+                            if (targetState != veadoCandidateState) {
+                                veadoCandidateState = targetState;
+                                veadoCandidateSinceMs = now;
+                            } else if (now - veadoCandidateSinceMs >= 450) {
+                                veadoShownState = targetState;
+                            }
+                        } else {
+                            veadoCandidateState = targetState;
+                            veadoCandidateSinceMs = now;
+                        }
+                        if (veadoShownState >= 0) selectedState = veadoShownState;
+                    } else {
+                        veadoShownState = -1;
+                        veadoCandidateState = -1;
+                        veadoCandidateSinceMs = 0;
+                    }
+                    VeadominiParser.AvatarState st = veadoAvatar.getState(selectedState);
                     if (st != null) {
                         idleB = st.closed;
                         talkB = st.open != null ? st.open : st.closed;
@@ -641,6 +680,11 @@ public final class VtuberSourceManager {
                 inst.faceTracking = obj.optBoolean("faceTracking", true);
                 inst.voiceThreshold = (float) obj.optDouble("voiceThreshold", 0.04);
                 inst.veadoStateIndex = obj.optInt("veadoState", 0);
+                inst.veadoAutoEmotion = obj.optBoolean("veadoAutoEmotion", false);
+                inst.veadoHappyState = obj.optInt("veadoHappyState", 1);
+                inst.veadoSadState = obj.optInt("veadoSadState", 2);
+                inst.veadoAngryState = obj.optInt("veadoAngryState", 3);
+                inst.veadoSurprisedState = obj.optInt("veadoSurprisedState", 4);
                 veadoFile = obj.optString("veadominiFile", "");
                 pIdle = obj.optString("pngIdle", "");
                 pTalk = obj.optString("pngTalk", "");

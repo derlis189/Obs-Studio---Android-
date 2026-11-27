@@ -51,7 +51,8 @@ let cfg = {
 
 const track = {
   yaw: 0, pitch: 0, roll: 0, eyeL: 1, eyeR: 1,
-  mouthOpen: 0, happy: 0, faceX: 0, faceY: 0, mic: 0, faceDetected: false,
+  mouthOpen: 0, happy: 0, sad: 0, angry: 0, surprised: 0,
+  faceX: 0, faceY: 0, mic: 0, faceDetected: false,
   handL: 0, handR: 0, waveOsc: 0
 };
 
@@ -352,6 +353,9 @@ function applyLive2dParams(model) {
   const pitch = clamp(track.pitch * sens, -30, 30);
   const roll = clamp(track.roll * sens + live2dWaveBlend * 7.0, -30, 30);
   const smile = clamp(Math.max(track.happy || 0, live2dWaveBlend * 0.75), 0, 1);
+  const sad = clamp(track.sad || 0, 0, 1);
+  const angry = clamp(track.angry || 0, 0, 1);
+  const surprised = clamp(track.surprised || 0, 0, 1);
 
   try {
     core.setParameterValueById('ParamAngleX', yaw);
@@ -366,8 +370,12 @@ function applyLive2dParams(model) {
     core.setParameterValueById('ParamEyeRSmile', smile);
     core.setParameterValueById('ParamEyeBallX', clamp(yaw / 24, -1, 1));
     core.setParameterValueById('ParamEyeBallY', clamp(pitch / 24, -1, 1));
-    core.setParameterValueById('ParamMouthOpenY', clamp(curMouthVal, 0, 1));
-    core.setParameterValueById('ParamMouthForm', clamp(smile, -1, 1));
+    core.setParameterValueById('ParamMouthOpenY', clamp(Math.max(curMouthVal, surprised * 0.85), 0, 1));
+    core.setParameterValueById('ParamMouthForm', clamp(smile - sad * 0.7 - angry * 0.5, -1, 1));
+    core.setParameterValueById('ParamBrowLY', clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1));
+    core.setParameterValueById('ParamBrowRY', clamp(sad * 0.55 + surprised * 0.8 - angry * 0.7, -1, 1));
+    core.setParameterValueById('ParamBrowLForm', clamp(smile - angry * 0.8, -1, 1));
+    core.setParameterValueById('ParamBrowRForm', clamp(smile - angry * 0.8, -1, 1));
     core.setParameterValueById('ParamCheek', clamp(live2dWaveBlend * 0.55, 0, 1));
     core.setParameterValueById('ParamBreath', breath);
 
@@ -660,6 +668,9 @@ function animate(now) {
         em.setValue('blinkLeft', autoBlink ? 1 : (1 - track.eyeL));
         em.setValue('blinkRight', autoBlink ? 1 : (1 - track.eyeR));
         em.setValue('happy', Math.min(1, Math.max(track.happy, maxWave * 0.65)));
+        em.setValue('sad', Math.max(0, Math.min(1, track.sad || 0)));
+        em.setValue('angry', Math.max(0, Math.min(1, track.angry || 0)));
+        em.setValue('surprised', Math.max(0, Math.min(1, track.surprised || 0)));
       }
       currentVrm.update(dt);
     } else if (demoHead) {
@@ -703,10 +714,15 @@ window.OBS_VTUBER = {
     if (cfg.mode === 'vrm') loadVrmModel(cfg.vrmFile);
     if (cfg.mode === 'live2d') loadLive2dModel(cfg.live2dFile);
   },
-  updateTracking(yaw, pitch, roll, eyeL, eyeR, mouthOpen, happy, faceX, faceY, mic, detected, handL, handR, waveOsc) {
+  updateTracking(yaw, pitch, roll, eyeL, eyeR, mouthOpen, happy, faceX, faceY, mic, detected, handL, handR, waveOsc, sad, angry, surprised) {
     track.yaw = yaw; track.pitch = pitch; track.roll = roll;
     track.eyeL = eyeL; track.eyeR = eyeR; track.mouthOpen = mouthOpen;
-    track.happy = happy; track.faceX = faceX; track.faceY = faceY;
+    const smooth = (current, target) => current + ((target || 0) - current) * 0.24;
+    track.happy = smooth(track.happy, happy);
+    track.sad = smooth(track.sad, sad);
+    track.angry = smooth(track.angry, angry);
+    track.surprised = smooth(track.surprised, surprised);
+    track.faceX = faceX; track.faceY = faceY;
     track.mic = mic; track.faceDetected = !!detected;
     if (handL !== undefined) track.handL = handL;
     if (handR !== undefined) track.handR = handR;
